@@ -1,72 +1,46 @@
-# Handover — 2026-07-09 (market — opstart)
+# Handover — market (Meadow Market)
 
 ## Wat dit is
-Nieuw project **`market`** (lab-poort nog toe te wijzen): een **Discord-economysysteem**
-met een **gekoppelde website**. De website deployt op **PythonAnywhere**, met exact hetzelfde
-deploymentmodel als project **pod** (nu in `lab/Archief/pod`, live op
-`https://magicmeadow.eu.pythonanywhere.com`, EU-regio).
+Project **`market`** (lab-poort **8700**): een **Discord-economysysteem** met gekoppelde
+website. Deployt op **PythonAnywhere** (EU-regio) volgens het **pod-deploymodel**
+(Flask + Jinja + SQLite, één proces, geen build-stap).
 
-Status: **nog niets gebouwd.** Deze sessie was verkenning in afwachting van de specs.
-`lab/market/` bevat enkel dit HANDOVER.
+GitHub: `github.com/Waldstein-prog/market` (privé, onder `Waldstein-prog`). Push vanuit
+de lab-monorepo via `git subtree push --prefix=market <auth-url> main`.
 
-## Wat deze sessie deed
-- Het **pod-deploymentmodel** volledig bestudeerd (zie blauwdruk hieronder).
-- Architectuur uitgeklaard via een reeks verduidelijkingen van de user:
-  - Geen gateway-bot, geen always-on proces nodig → alles past op PA-gratis.
-  - **Geen slash-commands.** De flow is **web-gedreven**: embed met links → OAuth2-login → rol.
-  - **Geen herbruikbare template** — één concrete server.
-- Nog géén specs voor de inhoud (wat de economy precies doet) — die komen **later**.
-- Nog niets gebouwd; enkel dit HANDOVER in `lab/market/`.
+## Fasering
+- **Fase I — technische PoC (NU).** Site met een toggle die in de **dev-guild** een
+  Discord-rol **aan/uit** zet voor een gegeven user. Doel: bewijzen dat de technologie
+  (Bot Token → Discord REST-API → rol-toekenning) werkt. **Geen OAuth2, geen DB.**
+- **Fase II — businesslogic (LATER).** De user heeft de economy-specs *gedicteerd en
+  bewust nog onsamenhangend* aangeleverd; die worden **in Fase II toegelicht**. Niet nu
+  invullen. Verwacht: OAuth2-login om de bezoeker te identificeren, en rol/saldo-logica.
 
-## Pod-blauwdruk om te hergebruiken (geverifieerd, bestanden gelezen)
-Stack: **Flask + Jinja + SQLite**, één Python-proces, geen build-stap.
-- `backend/app.py` (`create_app()`), `backend/db.py` (SQLite + auto-migraties in `_migrate`),
-  `schema.sql`, `seed.py`, `set_password.py`.
-- `requirements.txt`: Flask, Werkzeug, requests, pytest — meer niet.
-- Lokaal: `./run.sh` → maakt venv, installeert deps, seedt, start op vaste poort.
-- Tests: `cd backend && python3 -m pytest` (pod had 16 groen, incl. Playwright-e2e).
+## Fase I — PoC (gebouwd)
+- `backend/app.py` — routes: `/` (toggle-UI), `GET /api/status?user_id=`,
+  `POST /api/toggle` ({user_id, enable}), `/healthz`.
+- `backend/discord_api.py` — REST-wrapper: `get_member`, `has_role`, `add_role`,
+  `remove_role`. Nette foutvertaling (401 token, 403 perms/hiërarchie, 404 geen lid).
+- `backend/config.py` — laadt `bot_token`, `guild_id`, `role_id` uit env-vars
+  (`DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, `DISCORD_ROLE_ID`) of `backend/secrets.json`.
+- `backend/secrets.example.json` — sjabloon; kopieer → `secrets.json` (gitignored).
+- UI: veld voor user-ID → status opvragen → toggle-knop.
 
-PythonAnywhere-deploy (het slimme deel — letterlijk klonen):
-- `deploy/pa_wsgi.py` — generiek WSGI, **geen aanpassing nodig**: vindt zelf `~/<proj>/backend`,
-  genereert eenmalig persistente `secret_key.txt` (gitignored, overleeft `git pull`).
-- `deploy/setup.sh` — one-shot: `git pull` → seed → admin-wachtwoord (enkel 1e keer) →
-  WSGI koppelen in `/var/www/*_wsgi.py` → `pip install` → **auto-reload via PA API-token**
-  uit `~/.pa_api_token` (regio-bewust via `PYTHONANYWHERE_SITE`/`_DOMAIN`, werkt EU én US).
-- Updaten na push = `cd ~/market && bash deploy/setup.sh`. `*.db` gitignored → data blijft.
-- **EU-regio**: live-URL = `https://<naam>.eu.pythonanywhere.com` (zonder `.eu.` = PA-placeholder).
+## Nog nodig van de user (Discord-setup) om de PoC te testen
+1. **Bot-applicatie** aanmaken (Discord Developer Portal) → **Bot Token**.
+2. Bot **inviten** in de dev-guild met permissie **Manage Roles**.
+3. Bot-rol in de serverinstellingen **hoger** slepen dan de te togglen rol (hiërarchie!).
+4. IDs verzamelen (Developer Mode aan → rechtsklik → Copy ID): **guild-ID**, **rol-ID**,
+   en een **test-user-ID**.
+5. Zet die in `backend/secrets.json` (of env-vars). REST-fetch van leden vereist **geen**
+   gateway-intent.
 
-GitHub: per-project **private repo** onder `Waldstein-prog` (zoals `pod.git`); token in
-`lab/github creds.txt`. Voor dit project → `github.com/Waldstein-prog/market.git` (nog aan te maken).
+## Lokaal draaien
+`./run.sh` → venv + deps + start op poort 8700 → http://localhost:8700
 
-## Architectuur — huidige stand (2026-07-09)
-**Geen herbruikbare template** — één concrete server. **Geen slash-commands / gateway-bot.**
-De flow is **web-gedreven**:
-1. In Discord staat een **embed met links** → bezoeker klikt → landt op de PA-site.
-2. Site identificeert de bezoeker via **Discord OAuth2-login** (nodig om te weten aan wie een
-   rol toegekend moet worden).
-3. Site **kent een Discord-rol toe** via de Discord REST-API met een **Bot Token**.
-
-Alles in **één Flask-proces + één SQLite-DB** op PA (always-on = gewoon de web-app, zoals pod).
-
-Wat dit technisch vergt:
-- Echte **bot-applicatie** als *credential* (niet als draaiend proces): bot in de server,
-  permissie **Manage Roles**, bot-rol **hoger** dan de uit te delen rol (Discord-hiërarchie).
-- Interactions-endpoint / PyNaCl uit vorige ronde: **NIET nodig** (geen slash-commands) — geschrapt.
-- Secrets: **Bot Token** + **OAuth2 Client ID/Secret**. Buiten git, zoals pod's `secret_key.txt`.
-
-## Nog open (wacht op specs)
-- **Wat is de "economy"?** Kent de site altijd dezelfde rol toe (pure gate: klik → rol), of hangt
-  de rol af van saldo/aankoop/actie? Bepaalt het hele datamodel.
-- Wordt de **embed met links** één keer handmatig gepost, of moet de site/bot 'm posten?
-- User geeft **later concrete specs** — nu niet verder bouwen.
-
-## Volgende stappen (na de specs)
-1. Lab-poort toewijzen in `lab/CLAUDE.md` (pod=8500, tracker=8600 → market wellicht **8700**).
-2. Repo aanmaken onder `Waldstein-prog`, pod's `deploy/`-scaffold + `run.sh` overnemen.
-3. Datamodel + schema op basis van de specs.
-4. Discord OAuth2-login-flow + rol-toekenning via Bot Token (Manage Roles + hiërarchie).
-
-## Context / valkuilen
-- Deze machine mist soms `python3-venv`; pod viel terug op systeem-`python3`.
-- Smoke-test/deploy altijd tegen het **`.eu.`-domein**.
-- Referentiebestanden: `lab/Archief/pod/deploy/`, `lab/Archief/pod/backend/`, `lab/Archief/pod/README.md`.
+## Deploy op PythonAnywhere
+- Eerste keer: Bash-console → `git clone https://Waldstein-prog:<TOKEN>@github.com/Waldstein-prog/market.git ~/market`
+- Web-tab → Add a new web app → Manual configuration (Python 3.x).
+- `cd ~/market && bash deploy/setup.sh` (git pull + WSGI koppelen + reload).
+- `secrets.json` staat NIET in git → op PA apart aanmaken (of env-vars via WSGI).
+- Live-URL: `https://<naam>.eu.pythonanywhere.com`.

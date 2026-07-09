@@ -9,7 +9,75 @@
 <body>
   <main class="hero">
     <h1>Meadow Market</h1>
-    <p class="tagline">Binnenkort open.</p>
+    <p class="tagline">PoC — Discord-rol toggle</p>
+
+    {% if not configured %}
+    <p class="warn">⚠ Geen Discord-config gevonden. Vul <code>backend/secrets.json</code> in
+      (kopie van <code>secrets.example.json</code>) of zet de env-vars.</p>
+    {% endif %}
+
+    <div class="panel">
+      <label for="uid">Discord user-ID</label>
+      <input id="uid" inputmode="numeric" placeholder="bv. 123456789012345678" autocomplete="off">
+      <button id="check">Status opvragen</button>
+
+      <div id="result" class="result" hidden>
+        <span id="state" class="badge"></span>
+        <button id="toggle" class="toggle"></button>
+      </div>
+      <p id="msg" class="msg" hidden></p>
+    </div>
   </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let hasRole = null;
+
+    function showMsg(text, kind) {
+      const m = $("msg");
+      m.textContent = text;
+      m.className = "msg " + (kind || "");
+      m.hidden = !text;
+    }
+
+    function render() {
+      $("result").hidden = hasRole === null;
+      if (hasRole === null) return;
+      $("state").textContent = hasRole ? "Heeft de rol" : "Heeft de rol niet";
+      $("state").className = "badge " + (hasRole ? "on" : "off");
+      $("toggle").textContent = hasRole ? "Rol afzetten" : "Rol aanzetten";
+      $("toggle").className = "toggle " + (hasRole ? "danger" : "primary");
+    }
+
+    async function check() {
+      const uid = $("uid").value.trim();
+      showMsg("", "");
+      hasRole = null; render();
+      if (!/^\d+$/.test(uid)) { showMsg("Geef een geldig user-ID (enkel cijfers).", "err"); return; }
+      const r = await fetch("/api/status?user_id=" + encodeURIComponent(uid));
+      const d = await r.json();
+      if (!d.ok) { showMsg(d.error, "err"); return; }
+      hasRole = d.has_role; render();
+    }
+
+    async function toggle() {
+      const uid = $("uid").value.trim();
+      $("toggle").disabled = true;
+      const r = await fetch("/api/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: uid, enable: !hasRole }),
+      });
+      const d = await r.json();
+      $("toggle").disabled = false;
+      if (!d.ok) { showMsg(d.error, "err"); return; }
+      hasRole = d.has_role; render();
+      showMsg(hasRole ? "Rol toegekend ✓" : "Rol verwijderd ✓", "ok");
+    }
+
+    $("check").addEventListener("click", check);
+    $("uid").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
+    $("toggle").addEventListener("click", toggle);
+  </script>
 </body>
 </html>
