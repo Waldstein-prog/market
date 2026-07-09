@@ -16,17 +16,25 @@ def create_app():
 
     @app.route("/")
     def index():
-        cfg = config.load_config()
+        try:
+            cfg = config.load_config()
+        except config.ConfigError as e:
+            return render_template("index.html", configured=False,
+                                   pinned_user="", role_label="de rol", config_error=str(e))
         return render_template(
             "index.html",
             configured=not config.missing_keys(cfg),
             pinned_user=cfg.get("user_id", ""),
             role_label=cfg.get("role_label") or "de rol",
+            config_error="",
         )
 
     @app.route("/api/status")
     def api_status():
-        cfg = config.load_config()
+        try:
+            cfg = config.load_config()
+        except config.ConfigError as e:
+            return jsonify(ok=False, error=str(e)), 400
         missing = config.missing_keys(cfg)
         if missing:
             return jsonify(ok=False, error=f"Config ontbreekt: {', '.join(missing)}"), 400
@@ -43,7 +51,10 @@ def create_app():
 
     @app.route("/api/toggle", methods=["POST"])
     def api_toggle():
-        cfg = config.load_config()
+        try:
+            cfg = config.load_config()
+        except config.ConfigError as e:
+            return jsonify(ok=False, error=str(e)), 400
         missing = config.missing_keys(cfg)
         if missing:
             return jsonify(ok=False, error=f"Config ontbreekt: {', '.join(missing)}"), 400

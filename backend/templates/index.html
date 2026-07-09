@@ -11,7 +11,9 @@
     <h1>Meadow Market</h1>
     <p class="tagline">{{ role_label }} — aan/uit</p>
 
-    {% if not configured %}
+    {% if config_error %}
+    <p class="warn">⚠ {{ config_error }}</p>
+    {% elif not configured %}
     <p class="warn">⚠ Geen Discord-config gevonden. Vul <code>backend/secrets.json</code> in
       (kopie van <code>secrets.example.json</code>) of zet de env-vars.</p>
     {% endif %}

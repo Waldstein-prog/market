@@ -15,10 +15,20 @@ _KEYS = ("bot_token", "guild_id", "role_id")
 _OPTIONAL = ("user_id", "role_label")
 
 
+class ConfigError(Exception):
+    """secrets.json bestaat maar is onleesbaar (bv. ongeldige JSON)."""
+
+
 def _load_file():
     if os.path.exists(_SECRETS_PATH):
         with open(_SECRETS_PATH) as fh:
-            return json.load(fh)
+            try:
+                return json.load(fh)
+            except json.JSONDecodeError as e:
+                raise ConfigError(
+                    f"secrets.json bevat ongeldige JSON (regel {e.lineno}, kolom {e.colno}): {e.msg}. "
+                    "Check komma's/quotes en dat de token op één regel staat."
+                )
     return {}
 
 
