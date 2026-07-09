@@ -9,7 +9,7 @@
 <body>
   <main class="hero">
     <h1>Meadow Market</h1>
-    <p class="tagline">PoC — Discord-rol toggle</p>
+    <p class="tagline">{{ role_label }} — aan/uit</p>
 
     {% if not configured %}
     <p class="warn">⚠ Geen Discord-config gevonden. Vul <code>backend/secrets.json</code> in
@@ -17,9 +17,11 @@
     {% endif %}
 
     <div class="panel">
+      {% if not pinned_user %}
       <label for="uid">Discord user-ID</label>
       <input id="uid" inputmode="numeric" placeholder="bv. 123456789012345678" autocomplete="off">
       <button id="check">Status opvragen</button>
+      {% endif %}
 
       <div id="result" class="result" hidden>
         <span id="state" class="badge"></span>
@@ -31,7 +33,13 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const PINNED_USER = {{ pinned_user | tojson }};
+    const ROLE_LABEL = {{ role_label | tojson }};
     let hasRole = null;
+
+    function currentUid() {
+      return PINNED_USER || ($("uid") ? $("uid").value.trim() : "");
+    }
 
     function showMsg(text, kind) {
       const m = $("msg");
@@ -43,14 +51,14 @@
     function render() {
       $("result").hidden = hasRole === null;
       if (hasRole === null) return;
-      $("state").textContent = hasRole ? "Heeft de rol" : "Heeft de rol niet";
+      $("state").textContent = hasRole ? ROLE_LABEL + " staat AAN" : ROLE_LABEL + " staat UIT";
       $("state").className = "badge " + (hasRole ? "on" : "off");
-      $("toggle").textContent = hasRole ? "Rol afzetten" : "Rol aanzetten";
+      $("toggle").textContent = hasRole ? "Zet uit" : "Zet aan";
       $("toggle").className = "toggle " + (hasRole ? "danger" : "primary");
     }
 
     async function check() {
-      const uid = $("uid").value.trim();
+      const uid = currentUid();
       showMsg("", "");
       hasRole = null; render();
       if (!/^\d+$/.test(uid)) { showMsg("Geef een geldig user-ID (enkel cijfers).", "err"); return; }
@@ -61,7 +69,7 @@
     }
 
     async function toggle() {
-      const uid = $("uid").value.trim();
+      const uid = currentUid();
       $("toggle").disabled = true;
       const r = await fetch("/api/toggle", {
         method: "POST",
@@ -72,12 +80,15 @@
       $("toggle").disabled = false;
       if (!d.ok) { showMsg(d.error, "err"); return; }
       hasRole = d.has_role; render();
-      showMsg(hasRole ? "Rol toegekend ✓" : "Rol verwijderd ✓", "ok");
+      showMsg(hasRole ? ROLE_LABEL + " toegekend ✓" : ROLE_LABEL + " verwijderd ✓", "ok");
     }
 
-    $("check").addEventListener("click", check);
-    $("uid").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
+    if ($("check")) $("check").addEventListener("click", check);
+    if ($("uid")) $("uid").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
     $("toggle").addEventListener("click", toggle);
+
+    // Met een gepinde user: geen invoerveld, meteen de status laden.
+    if (PINNED_USER) check();
   </script>
 </body>
 </html>

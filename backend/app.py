@@ -17,7 +17,12 @@ def create_app():
     @app.route("/")
     def index():
         cfg = config.load_config()
-        return render_template("index.html", configured=not config.missing_keys(cfg))
+        return render_template(
+            "index.html",
+            configured=not config.missing_keys(cfg),
+            pinned_user=cfg.get("user_id", ""),
+            role_label=cfg.get("role_label") or "de rol",
+        )
 
     @app.route("/api/status")
     def api_status():
