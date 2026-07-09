@@ -4,27 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Meadow Market</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>{{STYLE}}</style>
 </head>
 <body>
   <main class="hero">
     <h1>Meadow Market</h1>
-    <p class="tagline">{{ role_label }} — aan/uit</p>
-
-    {% if config_error %}
-    <p class="warn">⚠ {{ config_error }}</p>
-    {% elif not configured %}
-    <p class="warn">⚠ Geen Discord-config gevonden. Vul <code>backend/secrets.json</code> in
-      (kopie van <code>secrets.example.json</code>) of zet de env-vars.</p>
-    {% endif %}
+    <p class="tagline">{{ROLE_LABEL}} — aan/uit</p>
 
     <div class="panel">
-      {% if not pinned_user %}
-      <label for="uid">Discord user-ID</label>
-      <input id="uid" inputmode="numeric" placeholder="bv. 123456789012345678" autocomplete="off">
-      <button id="check">Status opvragen</button>
-      {% endif %}
-
       <div id="result" class="result" hidden>
         <span id="state" class="badge"></span>
         <button id="toggle" class="toggle"></button>
@@ -35,13 +22,9 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const PINNED_USER = {{ pinned_user | tojson }};
-    const ROLE_LABEL = {{ role_label | tojson }};
+    const PINNED_USER = {{PINNED_USER_JSON}};
+    const ROLE_LABEL = {{ROLE_LABEL_JSON}};
     let hasRole = null;
-
-    function currentUid() {
-      return PINNED_USER || ($("uid") ? $("uid").value.trim() : "");
-    }
 
     function showMsg(text, kind) {
       const m = $("msg");
@@ -60,23 +43,20 @@
     }
 
     async function check() {
-      const uid = currentUid();
       showMsg("", "");
       hasRole = null; render();
-      if (!/^\d+$/.test(uid)) { showMsg("Geef een geldig user-ID (enkel cijfers).", "err"); return; }
-      const r = await fetch("/api/status?user_id=" + encodeURIComponent(uid));
+      const r = await fetch("/api/status?user_id=" + encodeURIComponent(PINNED_USER));
       const d = await r.json();
       if (!d.ok) { showMsg(d.error, "err"); return; }
       hasRole = d.has_role; render();
     }
 
     async function toggle() {
-      const uid = currentUid();
       $("toggle").disabled = true;
       const r = await fetch("/api/toggle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: uid, enable: !hasRole }),
+        body: JSON.stringify({ user_id: PINNED_USER, enable: !hasRole }),
       });
       const d = await r.json();
       $("toggle").disabled = false;
@@ -85,12 +65,8 @@
       showMsg(hasRole ? ROLE_LABEL + " toegekend ✓" : ROLE_LABEL + " verwijderd ✓", "ok");
     }
 
-    if ($("check")) $("check").addEventListener("click", check);
-    if ($("uid")) $("uid").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
     $("toggle").addEventListener("click", toggle);
-
-    // Met een gepinde user: geen invoerveld, meteen de status laden.
-    if (PINNED_USER) check();
+    check();
   </script>
 </body>
 </html>

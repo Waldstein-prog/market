@@ -61,22 +61,6 @@ body {
   text-align: left;
 }
 
-.panel label {
-  display: block;
-  font-size: 0.85rem;
-  font-weight: 600;
-  margin-bottom: 0.35rem;
-}
-
-.panel input {
-  width: 100%;
-  padding: 0.6rem 0.75rem;
-  font-size: 1rem;
-  border: 1px solid #cfd8c8;
-  border-radius: 8px;
-  margin-bottom: 0.75rem;
-}
-
 button {
   font: inherit;
   cursor: pointer;

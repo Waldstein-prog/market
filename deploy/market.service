@@ -1,0 +1,22 @@
+[Unit]
+Description=Meadow Market — Discord coin-bot + rol-toggle site (Rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=market
+Group=market
+WorkingDirectory=/opt/market
+Environment=RUST_LOG=info,serenity=warn,tracing=warn
+ExecStart=/opt/market/market
+Restart=always
+RestartSec=10
+# Veiligheidscap: kan de Hytale-server nooit de OOM in duwen.
+MemoryMax=250M
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

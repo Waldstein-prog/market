@@ -5,3 +5,8 @@ backend/*.db
 backend/secret_key.txt
 backend/secrets.json
 .pytest_cache/
+
+# Rust
+/target/
+/secrets.json
+/coins.db

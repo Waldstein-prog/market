@@ -1,63 +1,53 @@
 # Handover — market (Meadow Market) — 2026-07-09
 
 ## Wat dit is
-Project **`market`** (lab-poort **8700**): een **Discord-economysysteem** met gekoppelde
-website. Deployt op **PythonAnywhere** (EU-regio) volgens het **pod-deploymodel**
-(Flask + Jinja + SQLite, één proces, geen build-stap).
+Project **`market`** (lab-poort **8700**): Discord **coin-economy + rol-toggle site**,
+in **Rust** (één self-contained binary: serenity/poise-bot + Axum-site + gedeelde SQLite).
+Draait **LIVE op de Hetzner-VPS** als systemd-service `market`.
 
-GitHub: `github.com/Waldstein-prog/market` (privé, onder `Waldstein-prog`). Push vanuit
-de lab-monorepo via `git subtree push --prefix=market <auth-url> main`.
+GitHub: `github.com/Waldstein-prog/market` (privé). Push vanuit de lab-monorepo via
+`git subtree push --prefix=market <auth-url> main`.
 
-## Deploystatus (LIVE)
-- **Fase I draait live** op `https://meadowmarket.eu.pythonanywhere.com` — pagina toont
-  "Meadow Market" (met config-waarschuwing zolang `secrets.json` ontbreekt = normaal).
-- PA-account: **`meadowmarket`** (NIEUW account, los van pod/magicmeadow).
-- Repo gecloned in `~/market` (schoon, geen stray clones), venv `market-venv`,
-  `~/.pa_api_token` gezet → `setup.sh` reload automatisch.
-- Updaten na een push van mij: `cd ~/market && bash deploy/setup.sh`.
+## Historiek van vandaag
+- Begon als **Python** (Flask + discord.py) op **PythonAnywhere**. Fase I (rol-toggle PoC)
+  draaide live op PA.
+- Toen naar **Hetzner** verhuisd → PA-account wordt verwijderd, dus **weg van de
+  gratis-PA-beperking** (geen always-on proces mogelijk voor een bot).
+- Daarna bewust **herschreven naar Rust** (compactheid/veiligheid, matcht cyd/devboard,
+  ~3 MB RAM i.p.v. ~140 MB). De Python-code is verwijderd (zit in git-historiek).
 
-## Fasering
-- **Fase I — technische PoC (NU).** Site met een toggle die in de **dev-guild** een
-  Discord-rol **aan/uit** zet voor een gegeven user. Doel: bewijzen dat de technologie
-  (Bot Token → Discord REST-API → rol-toekenning) werkt. **Geen OAuth2, geen DB.**
-- **Fase II — businesslogic (LATER).** De user heeft de economy-specs *gedicteerd en
-  bewust nog onsamenhangend* aangeleverd; die worden **in Fase II toegelicht**. Niet nu
-  invullen. Verwacht: OAuth2-login om de bezoeker te identificeren, en rol/saldo-logica.
+## Deploystatus (LIVE op Hetzner)
+- Service `market.service` draait als user **market**, `WorkingDirectory=/opt/market`,
+  `MemoryMax=250M` (kan Hytale nooit de OOM in duwen). Verbruik in rust: **~3 MB**.
+- **Site**: `http://167.235.142.113:8700` (kaal IP:poort, geen TLS — "URL later").
+  ufw-regel voor 8700/tcp toegevoegd. Onafhankelijk van de Hytale-services.
+- **Bot**: verbonden met de gateway, logt de guild-roster (4 leden dev-guild).
+- secrets.json staat op `/opt/market/secrets.json` (mode 600, market-eigenaar), niet in git.
+- **Updaten**: lokaal `./deploy/deploy.sh` (build → scp binary → systemctl restart market).
+  Bouwen gebeurt LOKAAL, nooit op de RAM-krappe VPS.
 
-## Fase I — PoC (gebouwd)
-- `backend/app.py` — routes: `/` (toggle-UI), `GET /api/status?user_id=`,
-  `POST /api/toggle` ({user_id, enable}), `/healthz`.
-- `backend/discord_api.py` — REST-wrapper: `get_member`, `has_role`, `add_role`,
-  `remove_role`. Nette foutvertaling (401 token, 403 perms/hiërarchie, 404 geen lid).
-- `backend/config.py` — laadt `bot_token`, `guild_id`, `role_id` uit env-vars
-  (`DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, `DISCORD_ROLE_ID`) of `backend/secrets.json`.
-- `backend/secrets.example.json` — sjabloon; kopieer → `secrets.json` (gitignored).
-- UI: veld voor user-ID → status opvragen → toggle-knop.
+## Coin-economy (Fase II PoC — GEBOUWD)
+- Elk bericht van een lid → random **1–3 coins**, cooldown **per lid** (nu **10s** voor
+  de test; prod-waarde 30s — constante `COOLDOWN` in `src/bot.rs`).
+- Persistent in SQLite (`/opt/market/coins.db`), tabel `coins(user_id, username, coins,
+  last_award)`. Cooldown overleeft herstart (last_award in DB).
+- `!coins` → embed-leaderboard, aflopend op coins.
+- **DEV_FEEDBACK=true**: bot antwoordt op elk bericht met de coins/cooldown. Later op
+  `false` zetten (constante in `src/bot.rs`) → dan stil.
+- **Nog live te testen door user in Discord**: berichten sturen (coins + cooldown-reply)
+  en `!coins` (leaderboard). Bot-logica + DB lokaal geverifieerd; live coin-award vergt
+  echte berichten.
 
-## VOLGENDE STAP — Discord-bot + secrets.json (nog te doen)
-De toggle werkt pas als dit ingevuld is. Nog niet gedaan.
-1. **Bot-applicatie** aanmaken (Discord Developer Portal) → **Bot Token**.
-2. Bot **inviten** in de dev-guild met permissie **Manage Roles** (OAuth2 → URL Generator,
-   scope `bot`).
-3. Bot-rol in de serverinstellingen **hoger** slepen dan de te togglen rol (hiërarchie!,
-   anders 403).
-4. IDs verzamelen (Developer Mode aan → rechtsklik → Copy ID): **guild-ID**, **rol-ID**,
-   en een **test-user-ID**.
-5. Op PA: `cp ~/market/backend/secrets.example.json ~/market/backend/secrets.json` en
-   bot_token/guild_id/role_id invullen (`nano`). Staat NIET in git → blijft op PA.
-   REST-fetch van leden vereist **geen** gateway-intent.
-6. Testen: pagina openen → user-ID intypen → *Status opvragen* → *Rol aanzetten/afzetten*.
+## Config / dev vs prod
+- Huidige guild = **DEV** (`WaldsteinDevZone`, 652452615879262220), doelrol **Hytaler**
+  (1524867158398730460), vaste site-user Waldstein (391337551543271433).
+- Naar **PROD**: enkel `secrets.json` op de server aanpassen (andere guild/rol) + bot in
+  die guild inviten + rol-hiërarchie zetten. Geen codewijziging.
+- Bot vereist privileged intents MESSAGE CONTENT + SERVER MEMBERS (staan aan).
 
-## Fase II — businesslogic (LATER, wacht op user)
-User leverde de economy-specs *gedicteerd en bewust onsamenhangend*; worden pas in Fase II
-toegelicht. Niet nu invullen. Verwacht: OAuth2-login + rol/saldo-logica.
-
-## Lokaal draaien
-`./run.sh` → venv + deps + start op poort 8700 → http://localhost:8700
-
-## Deploy op PythonAnywhere
-- Eerste keer: Bash-console → `git clone https://Waldstein-prog:<TOKEN>@github.com/Waldstein-prog/market.git ~/market`
-- Web-tab → Add a new web app → Manual configuration (Python 3.x).
-- `cd ~/market && bash deploy/setup.sh` (git pull + WSGI koppelen + reload).
-- `secrets.json` staat NIET in git → op PA apart aanmaken (of env-vars via WSGI).
-- Live-URL: `https://<naam>.eu.pythonanywhere.com`.
+## Openstaand / later
+- DEV_FEEDBACK uit + cooldown → 30s wanneer de test klaar is.
+- Site heeft **geen auth**: iedereen die `IP:8700` kent kan de rol togglen. Voor prod:
+  domein + TLS (Caddy) en/of auth. Nu bewust kaal IP:poort (PoC).
+- Fase II businesslogic (de bredere economy-specs) wacht nog op toelichting van user.
+- `coins.db` valt buiten de bestaande tale-backup (die pullt enkel /opt/hytale).
