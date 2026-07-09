@@ -1,4 +1,6 @@
-# Handover — market (Meadow Market) — 2026-07-09
+# Handover — market (Meadow Market) — 2026-07-10
+
+> Laatste commit: `e44ffe3`. LIVE op Hetzner, coins-stand net gereset naar nul.
 
 ## Wat dit is
 Project **`market`** (lab-poort **8700**): Discord **coin-economy + rol-toggle site**,
@@ -32,11 +34,16 @@ GitHub: `github.com/Waldstein-prog/market` (privé). Push vanuit de lab-monorepo
 - Persistent in SQLite (`/opt/market/coins.db`), tabel `coins(user_id, username, coins,
   last_award)`. Cooldown overleeft herstart (last_award in DB).
 - `!coins` → embed-leaderboard, aflopend op coins.
+- **Commando's zijn immuun** (`e44ffe3`): berichten die met de prefix `!` beginnen slaan
+  de coin-logica volledig over — geen coins, cooldown onaangeroerd (const `PREFIX`).
 - **DEV_FEEDBACK=true**: bot antwoordt op elk bericht met de coins/cooldown. Later op
   `false` zetten (constante in `src/bot.rs`) → dan stil.
+- **Coins-stand gereset naar nul** op 2026-07-10 (`coins.db` gewist terwijl de service
+  stil lag → app maakte verse lege tabel). Resetten = `systemctl stop market` →
+  `rm /opt/market/coins.db` → `systemctl start market`.
 - **Nog live te testen door user in Discord**: berichten sturen (coins + cooldown-reply)
-  en `!coins` (leaderboard). Bot-logica + DB lokaal geverifieerd; live coin-award vergt
-  echte berichten.
+  en `!coins` (leaderboard, mag zelf geen coins opleveren). Bot-logica + DB lokaal
+  geverifieerd; live coin-award vergt echte berichten.
 
 ## Config / dev vs prod
 - Huidige guild = **DEV** (`WaldsteinDevZone`, 652452615879262220), doelrol **Hytaler**
