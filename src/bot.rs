@@ -17,6 +17,7 @@ const MIN_COINS: i64 = 1;
 const MAX_COINS: i64 = 3;
 const DEV_FEEDBACK: bool = true; // per bericht coins/cooldown terugkoppelen; later false
 const LEADERBOARD_SIZE: i64 = 10;
+const PREFIX: &str = "!"; // command-prefix; commando's leveren geen coins op
 // ------------------------------------------------------------------------
 
 pub struct Data {
@@ -69,6 +70,10 @@ async fn handle_message(
     data: &Data,
 ) -> Result<(), Error> {
     if msg.author.bot {
+        return Ok(());
+    }
+    // Commando's (!coins e.d.) zijn immuun: geen coins, cooldown onaangeroerd.
+    if msg.content.starts_with(PREFIX) {
         return Ok(());
     }
     // enkel binnen de geconfigureerde guild (indien gezet)
@@ -164,7 +169,7 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
         .options(poise::FrameworkOptions {
             commands: vec![coins()],
             prefix_options: poise::PrefixFrameworkOptions {
-                prefix: Some("!".to_string()),
+                prefix: Some(PREFIX.to_string()),
                 ..Default::default()
             },
             event_handler: |ctx, event, framework, data| {
