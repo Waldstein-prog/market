@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+backend/venv/
+backend/*.db
+backend/secret_key.txt
+.pytest_cache/
