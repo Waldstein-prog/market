@@ -257,7 +257,7 @@ async fn find_coins_channel(ctx: &serenity::Context, data: &Data) -> Option<sere
 async fn role_grant_sweeper(pool: DbPool, cfg: Config) {
     let dc = crate::discord_rest::Discord::new(cfg.bot_token.clone(), cfg.guild_id.clone());
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         for (id, uid, role) in db::due_role_grants(&pool, now_secs()) {
             match dc.set_role(&uid, &role, false).await {
                 Ok(()) => {

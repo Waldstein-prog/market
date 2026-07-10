@@ -46,7 +46,8 @@ pub fn init_pool(path: &str) -> DbPool {
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id    TEXT NOT NULL,
             role_id    TEXT NOT NULL,
-            expires_at REAL NOT NULL
+            expires_at REAL NOT NULL,
+            label      TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS inventory (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +67,7 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "is_public", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
     conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
         .expect("backfill max_balance");
     drop(conn);
@@ -543,13 +545,30 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
 }
 
 /// Registreer een tijdelijke rol-toekenning die op `expires_at` weer weg moet.
-pub fn add_role_grant(pool: &DbPool, uid: &str, role_id: &str, expires_at: f64) {
+pub fn add_role_grant(pool: &DbPool, uid: &str, role_id: &str, expires_at: f64, label: &str) {
     let conn = pool.get().expect("db");
     conn.execute(
-        "INSERT INTO role_grants (user_id, role_id, expires_at) VALUES (?1, ?2, ?3)",
-        params![uid, role_id, expires_at],
+        "INSERT INTO role_grants (user_id, role_id, expires_at, label) VALUES (?1, ?2, ?3, ?4)",
+        params![uid, role_id, expires_at, label],
     )
     .expect("add role_grant");
+}
+
+/// Actieve (nog niet verlopen) tijdelijke rollen van een lid: (label, expires_at).
+pub fn active_grants(pool: &DbPool, uid: &str, now: f64) -> Vec<(String, f64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT label, expires_at FROM role_grants
+             WHERE user_id = ?1 AND expires_at > ?2 ORDER BY expires_at ASC",
+        )
+        .expect("prepare active_grants");
+    let rows = stmt
+        .query_map(params![uid, now], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })
+        .expect("query active_grants");
+    rows.filter_map(Result::ok).collect()
 }
 
 /// Verlopen rol-toekenningen (id, user_id, role_id) op tijdstip `now`.

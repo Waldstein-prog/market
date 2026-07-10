@@ -187,6 +187,13 @@ a.link{{color:{MEADOW}}}
   box-shadow:0 1px 3px rgba(0,0,0,.45)}}
 .switch input:checked + .slider{{background:{MEADOW}}}
 .switch input:checked + .slider::before{{transform:translateX(20px)}}
+.grants{{display:flex;flex-direction:column;gap:.4rem}}
+.grant{{display:flex;justify-content:space-between;align-items:center;
+  padding:.5rem .7rem;border-radius:10px;background:#141d14;border:1px solid #2c3d2a}}
+.glabel{{font-weight:600;font-size:.9rem}}
+.gtime{{font-variant-numeric:tabular-nums;font-weight:700;color:{MEADOW}}}
+.grant.expired{{opacity:.55}}
+.grant.expired .gtime{{color:#9db095}}
 .soon{{margin-top:1rem;padding:.8rem 1rem;border:1px dashed #3a4d38;
   border-radius:12px;color:#9db095;font-size:.92rem}}
 .slots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.7rem;margin:.6rem 0 0}}
@@ -322,9 +329,10 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
         Some((uid, name)) => {
             if is_flowerborn(&st, &uid).await {
                 let (coins, max_balance, is_public) = db::get_stats(&st.pool, &uid);
+                let grants = db::active_grants(&st.pool, &uid, now_secs());
                 (
                     nav_html("coins", is_admin(&uid)),
-                    coins_body(&name, coins, max_balance, is_public),
+                    coins_body(&name, coins, max_balance, is_public, &grants),
                 )
             } else {
                 (String::new(), rules_body(&name))
@@ -335,8 +343,44 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
 }
 
 /// Coins-pagina: mini banking-app — saldo, hoogste saldo ooit, publiek-toggle.
-fn coins_body(name: &str, coins: i64, max_balance: i64, is_public: bool) -> String {
+fn coins_body(
+    name: &str,
+    coins: i64,
+    max_balance: i64,
+    is_public: bool,
+    grants: &[(String, f64)],
+) -> String {
     let checked = if is_public { " checked" } else { "" };
+    let grants_html = if grants.is_empty() {
+        String::new()
+    } else {
+        let rows: String = grants
+            .iter()
+            .map(|(label, exp)| {
+                let lbl = if label.is_empty() {
+                    "Tijdelijke toegang".to_string()
+                } else {
+                    esc(label)
+                };
+                format!(
+                    "<div class=\"grant\" data-exp=\"{exp}\">\
+                       <span class=\"glabel\">🎟 {lbl}</span>\
+                       <span class=\"gtime\">…</span></div>"
+                )
+            })
+            .collect();
+        format!(
+            "<div class=\"grantwrap\"><div class=\"k\" style=\"margin:1.1rem 0 .4rem\">\
+               Actieve toegang</div><div class=\"grants\">{rows}</div></div>\
+             <script>(function(){{function f(s){{s=Math.max(0,Math.floor(s));\
+             var m=Math.floor(s/60),x=s%60;return m+':'+(x<10?'0':'')+x;}}\
+             function t(){{var n=Date.now()/1000;document.querySelectorAll('.grant')\
+             .forEach(function(g){{var e=parseFloat(g.dataset.exp),r=e-n,\
+             q=g.querySelector('.gtime');if(r<=0){{q.textContent='verlopen';\
+             g.classList.add('expired');}}else{{q.textContent=f(r);}}}});}}\
+             t();setInterval(t,1000);}})();</script>"
+        )
+    };
     format!(
         "<h1>🌼 Hallo, {name}</h1>\
          <p class=\"muted\">Je saldo op dit moment</p>\
@@ -347,7 +391,7 @@ fn coins_body(name: &str, coins: i64, max_balance: i64, is_public: bool) -> Stri
            <form method=\"post\" action=\"/public\" style=\"margin:0\">\
              <label class=\"switch\"><input type=\"checkbox\" name=\"public\" \
                onchange=\"this.form.submit()\"{checked}><span class=\"slider\"></span></label>\
-           </form></div>",
+           </form></div>{grants_html}",
         name = esc(name),
         coins = coins,
         max = max_balance,
@@ -804,6 +848,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                                 &uid,
                                 &item.role_id,
                                 now_secs() + item.duration as f64,
+                                &item.name,
                             );
                             extra = format!(" Toegang voor {} toegekend.", human_duration(item.duration));
                         } else {
@@ -839,11 +884,7 @@ fn human_duration(secs: i64) -> String {
 
 /// Eén item-editor op de beheerpagina: thumb, naam, prijs, upload, verwijder.
 fn admin_item(it: &db::Item) -> String {
-    let (sel_perm, sel_24) = if it.duration == 86400 {
-        ("", " selected")
-    } else {
-        (" selected", "")
-    };
+    let dur_min = it.duration / 60;
     format!(
         "<div class=\"aitem\"><div class=\"thumb\">{thumb}</div>\
          <form method=\"post\" action=\"/admin/item/update\">\
@@ -853,8 +894,8 @@ fn admin_item(it: &db::Item) -> String {
              <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"prijs\">\
              <button class=\"btn small\" type=\"submit\">✓</button></div>\
            <input name=\"role_id\" value=\"{role}\" placeholder=\"rol-ID (bij aankoop)\">\
-           <select name=\"duration\"><option value=\"0\"{sel_perm}>permanent</option>\
-             <option value=\"86400\"{sel_24}>24 uur</option></select></form>\
+           <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\" \
+             placeholder=\"duur in min (0 = permanent)\"></form>\
          <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <input type=\"file\" name=\"file\" accept=\"image/*\">\
@@ -946,7 +987,7 @@ struct ItemUpdate {
     #[serde(default)]
     role_id: String,
     #[serde(default)]
-    duration: i64,
+    duration_min: i64,
 }
 
 async fn admin_shelf_add(
@@ -1013,7 +1054,7 @@ async fn admin_item_update(
             f.name.trim(),
             f.price.max(0),
             f.role_id.trim(),
-            f.duration.max(0),
+            f.duration_min.max(0) * 60,
         );
     }
     Redirect::to("/admin/market").into_response()
