@@ -1,12 +1,13 @@
 # Meadow Market — Caddy reverse-proxy / TLS
 #
-# PRO FORMA: apex serveert nu een statische landingspagina (/var/www/magicmeadow).
-# Bij de echte OAuth-deploy terugzetten naar:
-#     magicmeadow.org { reverse_proxy 127.0.0.1:8700 }
+# Apex proxyt de Rust-app (Axum op 127.0.0.1:8700). De app-index is meteen de
+# login/account-pagina (Discord OAuth2). www → 302 naar apex.
+#
+# Terug naar een statische landing? Vervang het reverse_proxy-blok door:
+#     magicmeadow.org { root * /var/www/magicmeadow ; file_server }
 
 magicmeadow.org {
-    root * /var/www/magicmeadow
-    file_server
+    reverse_proxy 127.0.0.1:8700
 }
 
 www.magicmeadow.org {

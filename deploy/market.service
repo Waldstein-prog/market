@@ -9,6 +9,8 @@ User=market
 Group=market
 WorkingDirectory=/opt/market
 Environment=RUST_LOG=info,serenity=warn,tracing=warn
+# Publieke basis-URL voor de OAuth2 redirect-URI (HTTPS via Caddy).
+Environment=MARKET_BASE_URL=https://magicmeadow.org
 ExecStart=/opt/market/market
 Restart=always
 RestartSec=10
