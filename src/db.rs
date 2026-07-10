@@ -19,7 +19,8 @@ pub fn init_pool(path: &str) -> DbPool {
             max_balance  INTEGER NOT NULL DEFAULT 0,
             is_public    INTEGER NOT NULL DEFAULT 0,
             total_earned INTEGER NOT NULL DEFAULT 0,
-            name_color   TEXT NOT NULL DEFAULT ''
+            name_color   TEXT NOT NULL DEFAULT '',
+            perma_access INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token    TEXT PRIMARY KEY,
@@ -72,12 +73,31 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "is_public", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "total_earned", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "name_color", "TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "coins", "perma_access", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "category", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "description", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "inventory", "item_id", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
+    // Hytale-tickets zijn boosts (voor de Boosts-tab).
+    conn.execute(
+        "UPDATE items SET category='boost' WHERE name IN ('Hytale Day Pass','Hytale Permanent Pass')",
+        [],
+    )
+    .ok();
+    // Oude auto-seed gem-schappen opruimen (vervangen door de gem-catalogus).
+    conn.execute(
+        "DELETE FROM items WHERE shelf_id IN
+           (SELECT id FROM shelves WHERE title IN ('Yellow Gems','Red Gems','Blue Gems','Green Gems'))",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "DELETE FROM shelves WHERE title IN ('Yellow Gems','Red Gems','Blue Gems','Green Gems')",
+        [],
+    )
+    .ok();
     conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
         .expect("backfill max_balance");
     // total_earned kunnen we niet reconstrueren; als ondergrens het hoogste saldo ooit.
@@ -87,7 +107,6 @@ pub fn init_pool(path: &str) -> DbPool {
     )
     .expect("backfill total_earned");
     drop(conn);
-    seed_shop(&pool);
     seed_hytale(&pool);
     seed_gems(&pool);
     pool
@@ -182,56 +201,19 @@ fn seed_hytale(pool: &DbPool) {
     let shelf_id = conn.last_insert_rowid();
     // Dagpas: blauw, 24u. Permanent: goud, permanent.
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, color, duration, position)
-         VALUES ('shelf', ?1, 'Hytale Day Pass', 100, '#4a86e8', 86400, 0)",
+        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description, position)
+         VALUES ('shelf', ?1, 'Hytale Day Pass', 100, '#4a86e8', 86400, 'boost',
+                 '24h access to the Hytale server.', 0)",
         params![shelf_id],
     )
     .expect("seed daypass");
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, color, duration, position)
-         VALUES ('shelf', ?1, 'Hytale Permanent Pass', 1000, '#d4af37', 0, 1)",
+        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description, position)
+         VALUES ('shelf', ?1, 'Hytale Permanent Pass', 1000, '#d4af37', 0, 'boost',
+                 'Permanent access to the Hytale server.', 1)",
         params![shelf_id],
     )
     .expect("seed permpass");
-}
-
-/// Vul de shop één keer met test-gems (4 kleur-schappen van 5) als hij leeg is.
-fn seed_shop(pool: &DbPool) {
-    let conn = pool.get().expect("db");
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM shelves", [], |r| r.get(0))
-        .unwrap_or(0);
-    if count > 0 {
-        return;
-    }
-    let colors = [
-        ("Yellow", "#e8c34a"),
-        ("Red", "#d1543f"),
-        ("Blue", "#4a86e8"),
-        ("Green", "#57b368"),
-    ];
-    for (pos, (cname, hex)) in colors.iter().enumerate() {
-        conn.execute(
-            "INSERT INTO shelves (title, position) VALUES (?1, ?2)",
-            params![format!("{cname} Gems"), pos as i64],
-        )
-        .expect("seed shelf");
-        let shelf_id = conn.last_insert_rowid();
-        for (i, letter) in ["A", "B", "C", "D", "E"].iter().enumerate() {
-            conn.execute(
-                "INSERT INTO items (zone, shelf_id, name, price, color, position)
-                 VALUES ('shelf', ?1, ?2, ?3, ?4, ?5)",
-                params![
-                    shelf_id,
-                    format!("Gem {cname} {letter}"),
-                    (i as i64 + 1) * 5,
-                    hex,
-                    i as i64
-                ],
-            )
-            .expect("seed item");
-        }
-    }
 }
 
 /// Bestaat kolom `col` in `table`? (voor idempotente migraties.)
@@ -623,17 +605,36 @@ pub fn delete_item(pool: &DbPool, id: i64) {
 /// het item. Atomisch. Ok(nieuw_saldo, item) of Err(reden).
 pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64, Item), String> {
     let item = get_item(pool, item_id).ok_or("This item no longer exists.")?;
+    let is_gem = matches!(item.category.as_str(), "primary" | "secondary" | "prism");
     let mut conn = pool.get().expect("db");
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let owned: i64 = tx
-        .query_row(
-            "SELECT COUNT(*) FROM inventory WHERE user_id = ?1 AND item_id = ?2",
-            params![uid, item_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    if owned > 0 {
-        return Err(format!("You already own {}.", item.name));
+    // Gems zijn bingokaart-slots: maar één keer te bezitten.
+    if is_gem {
+        let owned: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM inventory WHERE user_id = ?1 AND item_id = ?2",
+                params![uid, item_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if owned > 0 {
+            return Err(format!("You already own {}.", item.name));
+        }
+    }
+    // Dagpas is nutteloos zodra je permanente toegang hebt.
+    if item.category == "boost" && item.duration > 0 {
+        let perma: i64 = tx
+            .query_row(
+                "SELECT perma_access FROM coins WHERE user_id = ?1",
+                params![uid],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        if perma != 0 {
+            return Err("You already have permanent access.".to_string());
+        }
     }
     let balance: i64 = tx
         .query_row("SELECT coins FROM coins WHERE user_id = ?1", params![uid], |r| r.get(0))
@@ -659,6 +660,42 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok((balance - item.price, item))
+}
+
+/// Verbruik één exemplaar van een item uit de inventory (voor boosts).
+pub fn consume_item(pool: &DbPool, uid: &str, item_id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "DELETE FROM inventory WHERE id = (SELECT id FROM inventory
+             WHERE user_id = ?1 AND item_id = ?2 LIMIT 1)",
+        params![uid, item_id],
+    )
+    .expect("consume item");
+}
+
+/// Zet de permanente-toegangsvlag (na gebruik van de permanente pas).
+pub fn set_perma_access(pool: &DbPool, uid: &str, username: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coins (user_id, username, perma_access) VALUES (?1, ?2, 1)
+         ON CONFLICT(user_id) DO UPDATE SET perma_access = 1, username = excluded.username",
+        params![uid, username],
+    )
+    .expect("set perma_access");
+}
+
+/// Heeft dit lid permanente toegang?
+pub fn has_perma_access(pool: &DbPool, uid: &str) -> bool {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT perma_access FROM coins WHERE user_id = ?1",
+        params![uid],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .expect("query perma_access")
+    .unwrap_or(0)
+        != 0
 }
 
 /// Ontgrendelde item-id's (bingokaart) van een lid.

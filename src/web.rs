@@ -58,6 +58,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/public", post(set_public_route))
         .route("/buy", post(buy))
         .route("/use/gem", post(use_gem))
+        .route("/use/boost", post(use_boost))
         .route("/admin/market", get(admin_market))
         .route("/admin/shelf/add", post(admin_shelf_add))
         .route("/admin/shelf/rename", post(admin_shelf_rename))
@@ -474,6 +475,27 @@ fn gem_slot(it: &db::Item, owned: bool, equipped: bool) -> String {
     )
 }
 
+/// Eén boost-vakje (Hytale-ticket): greyed als niet in bezit, anders afbeelding
+/// + naam + uitleg + Use.
+fn boost_slot(it: &db::Item, owned: bool) -> String {
+    if !owned {
+        return "<div class=\"slot locked\"><div class=\"thumb\">\
+                <span class=\"lock\">🔒</span></div></div>"
+            .to_string();
+    }
+    format!(
+        "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
+         <div class=\"name\">{name}</div><div class=\"gdesc\">{desc}</div>\
+         <form method=\"post\" action=\"/use/boost\" class=\"buyform\">\
+           <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
+           <button class=\"buy on\" type=\"submit\">Use</button></form></div>",
+        thumb = item_thumb(it),
+        name = esc(&it.name),
+        desc = esc(&it.description),
+        id = it.id,
+    )
+}
+
 /// Inventory-home met sub-tabs Coins / Gems / Boosts.
 fn inventory_home(
     pool: &db::DbPool,
@@ -539,7 +561,22 @@ fn inventory_home(
         pr = shelf("prism", "Prism"),
     );
 
-    let boosts_panel = "<div class=\"soon\">🚀 Boosts — coming next: your Hytale passes.</div>";
+    // Boosts — Hytale-tickets (verbruikbaar).
+    let boosts = db::gems_by_category(pool, "boost");
+    let boosts_panel = if boosts.is_empty() {
+        "<div class=\"soon\">🚀 No boosts available yet.</div>".to_string()
+    } else {
+        let perma = if db::has_perma_access(pool, uid) {
+            "<div class=\"notice ok\" style=\"margin:.2rem 0 1rem\">🔑 You have permanent Hytale access.</div>".to_string()
+        } else {
+            String::new()
+        };
+        let slots: String = boosts
+            .iter()
+            .map(|b| boost_slot(b, owned.contains(&b.id)))
+            .collect();
+        format!("{perma}<div class=\"shelf\">{slots}</div>")
+    };
 
     let cls = |t: &str| if t == active { " on" } else { "" };
     format!(
@@ -966,18 +1003,34 @@ fn market_notice(q: &MarketQuery) -> String {
     }
 }
 
-/// Koop een item: saldo eraf, item in de inventory. Terug naar de Market met bericht.
+/// Koop/ontgrendel een item: saldo eraf, item in de inventory. Effecten (rollen)
+/// volgen pas bij Use in de Boosts-tab. Terug naar de Shop met bericht.
 async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
     let Some((uid, _name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
     };
     let dest = match db::purchase(&st.pool, &uid, f.item_id, now_secs()) {
-        Ok((bal, item)) => {
-            let mut extra = String::new();
-            if !item.role_id.is_empty() {
-                match st.dc.set_role(&uid, &item.role_id, true).await {
-                    Ok(()) => {
-                        if item.duration > 0 {
+        Ok((bal, _item)) => format!(
+            "/market?ok={}",
+            pct(&format!("Purchased! New balance: {bal} coins."))
+        ),
+        Err(e) => format!("/market?err={}", pct(&e)),
+    };
+    Redirect::to(&dest).into_response()
+}
+
+/// Een boost (Hytale-ticket) gebruiken: verbruik het exemplaar en pas het effect
+/// toe — tijdelijke rol (dagpas, 24u-teller) of permanente toegang.
+async fn use_boost(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
+    if let Some((uid, name)) = require_flowerborn(&st, &headers).await {
+        if db::owned_item_ids(&st.pool, &uid).contains(&f.item_id) {
+            if let Some(item) = db::get_item(&st.pool, f.item_id) {
+                if item.category == "boost" {
+                    db::consume_item(&st.pool, &uid, f.item_id);
+                    if item.duration > 0 {
+                        // Tijdelijke pas: rol met aftel-teller.
+                        if !item.role_id.is_empty() {
+                            let _ = st.dc.set_role(&uid, &item.role_id, true).await;
                             db::add_role_grant(
                                 &st.pool,
                                 &uid,
@@ -985,22 +1038,19 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                                 now_secs() + item.duration as f64,
                                 &item.name,
                             );
-                            extra = format!(" Access granted for {}.", human_duration(item.duration));
-                        } else {
-                            extra = " Permanent access granted.".to_string();
+                        }
+                    } else {
+                        // Permanente pas: permanente toegang (blokkeert de dagpas).
+                        db::set_perma_access(&st.pool, &uid, &name);
+                        if !item.role_id.is_empty() {
+                            let _ = st.dc.set_role(&uid, &item.role_id, true).await;
                         }
                     }
-                    Err(e) => extra = format!(" (Role could not be granted: {e})"),
                 }
             }
-            format!(
-                "/market?ok={}",
-                pct(&format!("Purchased! New balance: {bal} coins.{extra}"))
-            )
         }
-        Err(e) => format!("/market?err={}", pct(&e)),
-    };
-    Redirect::to(&dest).into_response()
+    }
+    Redirect::to("/?tab=boosts").into_response()
 }
 
 /// Een ontgrendelde gem "gebruiken": zet je naamkleur op de gem-kleur.
