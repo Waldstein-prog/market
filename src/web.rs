@@ -7,7 +7,7 @@
 //! - `/admin`       de Fase-I rol-toggle (intern beheertool, ongewijzigd).
 use axum::{
     Json, Router,
-    extract::{Form, Query, State},
+    extract::{DefaultBodyLimit, Form, Multipart, Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{COOKIE, SET_COOKIE},
@@ -27,6 +27,7 @@ use crate::discord_rest::Discord;
 
 const SESSION_MAX_AGE: i64 = 90 * 24 * 3600; // ~90 dagen: voelt als "één keer inloggen"
 const MEADOW: &str = "#6b9b52";
+const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 
 #[derive(Clone)]
 struct AppState {
@@ -47,11 +48,27 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         http: reqwest::Client::new(),
     };
 
+    let _ = std::fs::create_dir_all(UPLOAD_DIR);
+
     let app = Router::new()
         .route("/", get(index))
         .route("/market", get(market))
+        .route("/inventory", get(inventory))
         .route("/leaderboard", get(leaderboard_page))
         .route("/public", post(set_public_route))
+        .route("/buy", post(buy))
+        .route("/admin/market", get(admin_market))
+        .route("/admin/shelf/add", post(admin_shelf_add))
+        .route("/admin/shelf/rename", post(admin_shelf_rename))
+        .route("/admin/shelf/delete", post(admin_shelf_delete))
+        .route("/admin/item/add", post(admin_item_add))
+        .route("/admin/item/update", post(admin_item_update))
+        .route("/admin/item/delete", post(admin_item_delete))
+        .route(
+            "/admin/item/image",
+            post(admin_item_image).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route("/uploads/{name}", get(serve_upload))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", get(logout))
@@ -123,7 +140,8 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn shell(title: &str, nav: &str, body: &str) -> String {
+fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
+    let card_cls = if wide { "card wide" } else { "card" };
     format!(
         r#"<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -143,8 +161,9 @@ body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
 .topnav a.active{{background:#0e1510;color:{MEADOW};opacity:1}}
 .content{{flex:1;display:grid;place-items:center;padding:1rem}}
 .card{{background:#182319;border:1px solid #2c3d2a;border-radius:18px;
-  padding:2rem 2.25rem;max-width:26rem;width:calc(100% - 2rem);
+  padding:2rem 2.25rem;max-width:28rem;width:calc(100% - 2rem);
   box-shadow:0 10px 30px rgba(0,0,0,.35)}}
+.card.wide{{max-width:64rem}}
 h1{{margin:.2rem 0 1rem;font-size:1.35rem}}
 .coins{{font-size:2.4rem;font-weight:700;color:{MEADOW};margin:.4rem 0}}
 .muted{{color:#9db095;font-size:.9rem}}
@@ -170,6 +189,54 @@ a.link{{color:{MEADOW}}}
 .switch input:checked + .slider::before{{transform:translateX(20px)}}
 .soon{{margin-top:1rem;padding:.8rem 1rem;border:1px dashed #3a4d38;
   border-radius:12px;color:#9db095;font-size:.92rem}}
+.slots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.7rem;margin:.6rem 0 0}}
+.slot{{background:#141d14;border:1px solid #2c3d2a;border-radius:12px;padding:.7rem;
+  display:flex;flex-direction:column;gap:.5rem;text-align:center}}
+.slot .thumb{{aspect-ratio:1;border-radius:9px;background:#0e1510;
+  border:1px solid #26331f;display:grid;place-items:center}}
+.slot .gem{{width:66%;aspect-ratio:1;border-radius:50%;
+  box-shadow:inset 0 -4px 8px rgba(0,0,0,.35),0 2px 6px rgba(0,0,0,.3)}}
+.slot .name{{font-size:.82rem;font-weight:600;color:#e8f0e4;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.slot .price{{font-weight:700;color:{MEADOW};font-size:.95rem}}
+.slot .buy{{width:100%;padding:.45rem;border:0;border-radius:9px;
+  background:#2c3d2a;color:#6f8268;font-weight:600;font-size:.9rem;
+  cursor:not-allowed}}
+.buyform{{margin:0;width:100%}}
+.slot .buy.on{{background:{MEADOW};color:#0e1510;cursor:pointer}}
+.slot .buy.on:hover{{filter:brightness(1.08)}}
+.notice{{padding:.6rem .9rem;border-radius:10px;margin:.2rem 0 1rem;font-size:.92rem}}
+.notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
+.notice.err{{background:#3a201c;color:#f0c9c0;border:1px solid #6e352c}}
+.shelf{{display:flex;gap:.6rem;overflow-x:auto;padding:.2rem 0 .5rem}}
+.shelf .slot{{flex:0 0 auto;width:112px}}
+.shelf .slot .thumb{{font-size:1.2rem}}
+.shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
+.slot .thumb img{{width:100%;height:100%;object-fit:contain;border-radius:9px}}
+.gem-empty{{background:#22301f}}
+.btn.small{{margin-top:0;padding:.35rem .55rem;font-size:.82rem;border-radius:8px}}
+.btn.ghost{{background:#2c3d2a;color:#cfe0c8}}
+.btn.danger{{background:#7a2f28;color:#f3d9d4}}
+.aitems{{display:flex;flex-wrap:wrap;gap:.7rem;align-items:flex-start;margin-top:.5rem}}
+.aitem{{width:152px;background:#141d14;border:1px solid #2c3d2a;border-radius:12px;
+  padding:.6rem;display:flex;flex-direction:column;gap:.4rem}}
+.aitem .thumb{{aspect-ratio:1;border:1px solid #26331f;border-radius:9px;
+  background:#0e1510;display:grid;place-items:center}}
+.aitem input,.ashelf-head input[name=title]{{width:100%;padding:.35rem;
+  border:1px solid #2c3d2a;border-radius:7px;background:#0e1510;color:#e8f0e4;
+  font:inherit;font-size:.82rem}}
+.aitem input[type=file]{{font-size:.68rem;color:#9db095;padding:.15rem 0;border:0}}
+.prow{{display:flex;gap:.3rem}}
+.iupload{{display:flex;gap:.3rem;align-items:center}}
+.plus{{width:64px;height:64px;border-radius:12px;border:1px dashed #3a4d38;
+  background:#141d14;color:{MEADOW};font-size:1.7rem;cursor:pointer;align-self:center}}
+.plus:hover{{background:#1a271a}}
+.ashelf{{border-top:1px solid #22301f;padding-top:1rem;margin-top:1.2rem}}
+.ashelf-head{{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}}
+.ashelf-head .rn{{display:flex;gap:.3rem;flex:1 1 240px}}
+.addbar{{display:flex;gap:.4rem;margin-top:1.6rem;max-width:26rem}}
+.addbar input{{flex:1;padding:.5rem;border:1px solid #2c3d2a;border-radius:9px;
+  background:#0e1510;color:#e8f0e4;font:inherit}}
 .lb{{list-style:none;margin:.5rem 0 0;padding:0}}
 .lb li{{display:flex;align-items:center;gap:.6rem;padding:.55rem .35rem;
   border-bottom:1px solid #1d281c}}
@@ -178,7 +245,7 @@ a.link{{color:{MEADOW}}}
 .lb .amt{{font-weight:700;color:{MEADOW}}}
 .lb li.me{{background:#16211590;border-radius:10px}}
 </style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span>{nav}</header>
-<div class="content"><div class="card">{body}</div></div></body></html>"#
+<div class="content"><div class="{card_cls}">{body}</div></div></body></html>"#
     )
 }
 
@@ -204,19 +271,44 @@ async fn require_flowerborn(st: &AppState, headers: &HeaderMap) -> Option<(Strin
     }
 }
 
-/// Navigatiebalk voor de ingelogde secties. `active` = "coins"|"market"|"leaderboard".
-fn nav_html(active: &str) -> String {
+/// Navigatiebalk voor de ingelogde secties. `admin` toont de Beheer-tab.
+fn nav_html(active: &str, admin: bool) -> String {
     let item = |href: &str, key: &str, label: &str| {
         let cls = if key == active { " class=\"active\"" } else { "" };
         format!("<a{cls} href=\"{href}\">{label}</a>")
     };
+    let admin_link = if admin {
+        item("/admin/market", "admin", "⚙ Beheer")
+    } else {
+        String::new()
+    };
     format!(
-        "<nav class=\"topnav\">{}{}{}{}</nav>",
+        "<nav class=\"topnav\">{}{}{}{}{}{}</nav>",
         item("/", "coins", "🪙 Coins"),
         item("/market", "market", "🛒 Market"),
+        item("/inventory", "inventory", "🎒 Inventory"),
         item("/leaderboard", "leaderboard", "🏆 Leaderboard"),
+        admin_link,
         item("/logout", "logout", "↪ Uitloggen"),
     )
+}
+
+/// Adminlijst (Discord-ID's) die de shop mogen beheren.
+const ADMINS: [&str; 2] = ["391337551543271433", "233179495094419456"];
+
+fn is_admin(uid: &str) -> bool {
+    ADMINS.contains(&uid)
+}
+
+/// (uid, naam) uit de sessie, zonder rolcheck.
+fn session_user(st: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
+    cookie(headers, "session").and_then(|t| db::get_session(&st.pool, &t))
+}
+
+/// (uid, naam) als de ingelogde gebruiker admin is, anders None.
+fn require_admin(st: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
+    let (uid, name) = session_user(st, headers)?;
+    is_admin(&uid).then_some((uid, name))
 }
 
 async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
@@ -228,7 +320,7 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
             if is_flowerborn(&st, &uid).await {
                 let (coins, max_balance, is_public) = db::get_stats(&st.pool, &uid);
                 (
-                    nav_html("coins"),
+                    nav_html("coins", is_admin(&uid)),
                     coins_body(&name, &uid, coins, max_balance, is_public),
                 )
             } else {
@@ -236,7 +328,7 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
             }
         }
     };
-    Html(shell("Meadow Market", &nav, &body))
+    Html(shell("Meadow Market", &nav, false, &body))
 }
 
 /// Coins-pagina: mini banking-app — saldo, hoogste saldo ooit, publiek-toggle.
@@ -262,19 +354,122 @@ fn coins_body(name: &str, uid: &str, coins: i64, max_balance: i64, is_public: bo
 }
 
 /// Market-sectie — placeholder tot de shop-economie er is.
-async fn market(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    let Some((_uid, name)) = require_flowerborn(&st, &headers).await else {
+async fn market(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<MarketQuery>,
+) -> Response {
+    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
     };
+    let admin = is_admin(&uid);
+    let notice = market_notice(&q);
+
+    // Daily picks: 4 willekeurige items uit de schappen.
+    let daily: String = db::random_items(&st.pool, 4).iter().map(shop_slot).collect();
+
+    // Schappen uit de DB.
+    let shelves: String = db::list_shelves(&st.pool)
+        .iter()
+        .map(|(sid, title)| {
+            let items: String = db::shelf_items(&st.pool, *sid).iter().map(shop_slot).collect();
+            format!(
+                "<h2 class=\"shelf-title\">{}</h2><div class=\"shelf\">{items}</div>",
+                esc(title)
+            )
+        })
+        .collect();
+
+    // Lucky items (indien aanwezig).
+    let lucky = db::lucky_items(&st.pool);
+    let lucky_html = if lucky.is_empty() {
+        String::new()
+    } else {
+        let items: String = lucky.iter().map(shop_slot).collect();
+        format!("<h2 class=\"shelf-title\">🍀 Lucky items</h2><div class=\"shelf\">{items}</div>")
+    };
+
+    let daily_html = if daily.is_empty() {
+        String::new()
+    } else {
+        format!("<h2 class=\"shelf-title\">Daily picks</h2><div class=\"slots\">{daily}</div>")
+    };
+
     let body = format!(
-        "<h1>🛒 Market</h1>\
-         <p class=\"muted\">Hallo {name} — hier komt de shop.</p>\
-         <div class=\"soon\">🌱 <b>Binnenkort:</b> koop items met je 🪙 coins. \
-         Een dagelijkse selectie van vier plekken, eenmalige items en een \
-         magisch slot. (In aanbouw.)</div>",
+        "<h1>🛒 Market</h1>{notice}\
+         <p class=\"muted\">Hallo {name} — welkom in de shop. Koop met je 🪙 coins.</p>\
+         {daily_html}{shelves}{lucky_html}",
         name = esc(&name),
     );
-    Html(shell("Market — Meadow Market", &nav_html("market"), &body)).into_response()
+    Html(shell("Market — Meadow Market", &nav_html("market", admin), true, &body)).into_response()
+}
+
+/// Thumbnail uit (afbeelding, kleur): geüploade afbeelding, anders een gem-bol.
+fn thumb_html(image: &str, color: &str) -> String {
+    if !image.is_empty() {
+        format!("<img src=\"/uploads/{}\" alt=\"\">", esc(image))
+    } else if !color.is_empty() {
+        format!(
+            "<span class=\"gem\" style=\"background:radial-gradient(circle at 35% 30%,#ffffffcc,{})\"></span>",
+            esc(color)
+        )
+    } else {
+        "<span class=\"gem gem-empty\"></span>".to_string()
+    }
+}
+
+fn item_thumb(it: &db::Item) -> String {
+    thumb_html(&it.image, &it.color)
+}
+
+/// Eén publiek winkelvakje: thumb, naam, prijs en een werkende Buy-knop.
+fn shop_slot(it: &db::Item) -> String {
+    format!(
+        "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
+         <div class=\"name\">{name}</div>\
+         <div class=\"price\">🪙 {price}</div>\
+         <form method=\"post\" action=\"/buy\" class=\"buyform\">\
+           <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
+           <button class=\"buy on\" type=\"submit\">Buy</button></form></div>",
+        thumb = item_thumb(it),
+        name = esc(&it.name),
+        price = it.price,
+        id = it.id,
+    )
+}
+
+/// Inventory-sectie — placeholder tot items bestaan (gekocht/gewonnen).
+async fn inventory(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let admin = is_admin(&uid);
+    let items = db::inventory_items(&st.pool, &uid);
+    let inner = if items.is_empty() {
+        "<div class=\"soon\">🌱 Je spullenkast is nog leeg. Koop iets in de \
+         <a class=\"link\" href=\"/market\">Market</a> en het verschijnt hier.</div>"
+            .to_string()
+    } else {
+        let cells: String = items
+            .iter()
+            .map(|(iname, image, price)| {
+                format!(
+                    "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
+                     <div class=\"name\">{name}</div>\
+                     <div class=\"price muted\">gekocht · 🪙 {price}</div></div>",
+                    thumb = thumb_html(image, ""),
+                    name = esc(iname),
+                )
+            })
+            .collect();
+        format!("<div class=\"slots\">{cells}</div>")
+    };
+    let body = format!(
+        "<h1>🎒 Inventory</h1>\
+         <p class=\"muted\">Hallo {name} — je gekochte en gewonnen items.</p>{inner}",
+        name = esc(&name),
+    );
+    Html(shell("Inventory — Meadow Market", &nav_html("inventory", admin), true, &body)).into_response()
 }
 
 /// Leaderboard-sectie: publieke saldo's aflopend, kroontje bij de recordhouder.
@@ -330,7 +525,8 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
             .unwrap_or_default();
         format!("<h1>🏆 Leaderboard</h1><ol class=\"lb\">{items}</ol>{note}")
     };
-    Html(shell("Leaderboard — Meadow Market", &nav_html("leaderboard"), &body)).into_response()
+    Html(shell("Leaderboard — Meadow Market", &nav_html("leaderboard", is_admin(&me)), true, &body))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -381,7 +577,7 @@ fn err_page(msg: &str) -> Response {
         "<h1>🌼 Er ging iets mis</h1><p>{}</p><a class=\"link\" href=\"/\">Terug</a>",
         esc(msg)
     );
-    (StatusCode::BAD_REQUEST, Html(shell("Meadow Market", "", &body))).into_response()
+    (StatusCode::BAD_REQUEST, Html(shell("Meadow Market", "", false, &body))).into_response()
 }
 
 // --- OAuth2-flow --------------------------------------------------------
@@ -557,4 +753,297 @@ fn bad(msg: &str) -> JsonResp {
         StatusCode::BAD_REQUEST,
         Json(json!({"ok": false, "error": msg})),
     )
+}
+
+// --- kopen --------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct BuyForm {
+    item_id: i64,
+}
+
+#[derive(Deserialize)]
+struct MarketQuery {
+    ok: Option<String>,
+    err: Option<String>,
+}
+
+/// Bannertekst voor de Market na een koop (ok/err via query).
+fn market_notice(q: &MarketQuery) -> String {
+    if let Some(m) = &q.ok {
+        format!("<div class=\"notice ok\">✅ {}</div>", esc(m))
+    } else if let Some(m) = &q.err {
+        format!("<div class=\"notice err\">⚠️ {}</div>", esc(m))
+    } else {
+        String::new()
+    }
+}
+
+/// Koop een item: saldo eraf, item in de inventory. Terug naar de Market met bericht.
+async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
+    let Some((uid, _name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let dest = match db::purchase(&st.pool, &uid, f.item_id, now_secs()) {
+        Ok(bal) => format!("/market?ok={}", pct(&format!("Gekocht! Nieuw saldo: {bal} coins."))),
+        Err(e) => format!("/market?err={}", pct(&e)),
+    };
+    Redirect::to(&dest).into_response()
+}
+
+// --- admin: market-beheer ----------------------------------------------
+
+/// Eén item-editor op de beheerpagina: thumb, naam, prijs, upload, verwijder.
+fn admin_item(it: &db::Item) -> String {
+    format!(
+        "<div class=\"aitem\"><div class=\"thumb\">{thumb}</div>\
+         <form method=\"post\" action=\"/admin/item/update\">\
+           <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+           <input name=\"name\" value=\"{name}\" placeholder=\"naam\">\
+           <div class=\"prow\">\
+             <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"prijs\">\
+             <button class=\"btn small\" type=\"submit\">✓</button></div></form>\
+         <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
+           <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+           <input type=\"file\" name=\"file\" accept=\"image/*\">\
+           <button class=\"btn small ghost\" type=\"submit\">Upload</button></form>\
+         <form method=\"post\" action=\"/admin/item/delete\" onsubmit=\"return confirm('Item verwijderen?')\">\
+           <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+           <button class=\"btn small danger\" type=\"submit\">Verwijder</button></form></div>",
+        thumb = item_thumb(it),
+        id = it.id,
+        name = esc(&it.name),
+        price = it.price,
+    )
+}
+
+async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&st, &headers).is_none() {
+        return Redirect::to("/").into_response();
+    }
+    let shelves: String = db::list_shelves(&st.pool)
+        .iter()
+        .map(|(sid, title)| {
+            let items: String = db::shelf_items(&st.pool, *sid).iter().map(admin_item).collect();
+            format!(
+                "<section class=\"ashelf\"><div class=\"ashelf-head\">\
+                   <form class=\"rn\" method=\"post\" action=\"/admin/shelf/rename\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
+                     <input name=\"title\" value=\"{title}\">\
+                     <button class=\"btn small\" type=\"submit\">Hernoem</button></form>\
+                   <form method=\"post\" action=\"/admin/shelf/delete\" onsubmit=\"return confirm('Schap en items verwijderen?')\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
+                     <button class=\"btn small danger\" type=\"submit\">Verwijder schap</button></form></div>\
+                 <div class=\"aitems\">{items}\
+                   <form method=\"post\" action=\"/admin/item/add\">\
+                     <input type=\"hidden\" name=\"zone\" value=\"shelf\">\
+                     <input type=\"hidden\" name=\"shelf_id\" value=\"{sid}\">\
+                     <button class=\"plus\" type=\"submit\" title=\"Extra slot\">＋</button></form></div></section>",
+                title = esc(title),
+            )
+        })
+        .collect();
+
+    let lucky_items: String = db::lucky_items(&st.pool).iter().map(admin_item).collect();
+    let lucky = format!(
+        "<section class=\"ashelf\"><div class=\"ashelf-head\"><b>🍀 Lucky items</b></div>\
+         <div class=\"aitems\">{lucky_items}\
+           <form method=\"post\" action=\"/admin/item/add\">\
+             <input type=\"hidden\" name=\"zone\" value=\"lucky\">\
+             <button class=\"plus\" type=\"submit\" title=\"Extra lucky item\">＋</button></form></div></section>"
+    );
+
+    let body = format!(
+        "<h1>⚙ Market-beheer</h1>\
+         <p class=\"muted\">Schappen, items, prijzen en afbeeldingen. Wijzigingen zijn \
+         meteen live op de Market.</p>{shelves}{lucky}\
+         <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
+           <input name=\"title\" placeholder=\"Naam van nieuw schap\" required>\
+           <button class=\"btn\" type=\"submit\">＋ Schap</button></form>"
+    );
+    Html(shell("Beheer — Meadow Market", &nav_html("admin", true), true, &body)).into_response()
+}
+
+#[derive(Deserialize)]
+struct ShelfAdd {
+    title: String,
+}
+#[derive(Deserialize)]
+struct ShelfRename {
+    id: i64,
+    title: String,
+}
+#[derive(Deserialize)]
+struct IdForm {
+    id: i64,
+}
+#[derive(Deserialize)]
+struct ItemAdd {
+    zone: String,
+    #[serde(default)]
+    shelf_id: Option<i64>,
+}
+#[derive(Deserialize)]
+struct ItemUpdate {
+    id: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    price: i64,
+}
+
+async fn admin_shelf_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ShelfAdd>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let t = f.title.trim();
+        if !t.is_empty() {
+            db::add_shelf(&st.pool, t);
+        }
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+async fn admin_shelf_rename(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ShelfRename>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let t = f.title.trim();
+        if !t.is_empty() {
+            db::rename_shelf(&st.pool, f.id, t);
+        }
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+async fn admin_shelf_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<IdForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::delete_shelf(&st.pool, f.id);
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+async fn admin_item_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ItemAdd>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let zone = if f.zone == "lucky" { "lucky" } else { "shelf" };
+        let shelf_id = if zone == "shelf" { f.shelf_id } else { None };
+        db::add_item(&st.pool, zone, shelf_id);
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+async fn admin_item_update(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ItemUpdate>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::update_item(&st.pool, f.id, f.name.trim(), f.price.max(0));
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+async fn admin_item_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<IdForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::delete_item(&st.pool, f.id);
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+/// Afbeelding uploaden voor een item (multipart). Bewaart op schijf + zet de naam.
+async fn admin_item_image(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mut mp: Multipart,
+) -> Response {
+    if require_admin(&st, &headers).is_none() {
+        return Redirect::to("/").into_response();
+    }
+    let mut id: Option<i64> = None;
+    let mut file: Option<(String, Vec<u8>)> = None;
+    while let Ok(Some(field)) = mp.next_field().await {
+        let field_name = field.name().map(|s| s.to_string());
+        match field_name.as_deref() {
+            Some("id") => {
+                id = field.text().await.ok().and_then(|s| s.trim().parse().ok());
+            }
+            Some("file") => {
+                let ct = field.content_type().map(|s| s.to_string());
+                let orig = field.file_name().map(|s| s.to_string());
+                if let Ok(bytes) = field.bytes().await {
+                    if !bytes.is_empty() {
+                        file = Some((ext_from(ct.as_deref(), orig.as_deref()), bytes.to_vec()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let (Some(id), Some((ext, bytes))) = (id, file) {
+        let filename = format!("item_{id}.{ext}");
+        if std::fs::write(format!("{UPLOAD_DIR}/{filename}"), &bytes).is_ok() {
+            db::set_item_image(&st.pool, id, &filename);
+        }
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+/// Bewaarde afbeelding serveren vanuit de uploads-map (met naam-sanitatie).
+async fn serve_upload(Path(name): Path<String>) -> Response {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match std::fs::read(format!("{UPLOAD_DIR}/{name}")) {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, content_type_for(&name))],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Kies een veilige extensie op basis van content-type of bestandsnaam.
+fn ext_from(ct: Option<&str>, fname: Option<&str>) -> String {
+    let by_name = fname
+        .and_then(|f| f.rsplit('.').next())
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"));
+    if let Some(e) = by_name {
+        return if e == "jpeg" { "jpg".into() } else { e };
+    }
+    match ct {
+        Some("image/png") => "png",
+        Some("image/jpeg") => "jpg",
+        Some("image/gif") => "gif",
+        Some("image/webp") => "webp",
+        _ => "png",
+    }
+    .to_string()
+}
+
+fn content_type_for(name: &str) -> &'static str {
+    match name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
 }

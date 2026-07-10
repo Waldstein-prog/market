@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 serenity = "0.12"
 poise = "0.6"
 rusqlite = { version = "0.36", features = ["bundled"] }

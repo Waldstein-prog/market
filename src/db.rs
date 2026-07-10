@@ -24,6 +24,29 @@ pub fn init_pool(path: &str) -> DbPool {
             user_id  TEXT NOT NULL,
             username TEXT NOT NULL,
             created  REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS shelves (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            title    TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS items (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            zone     TEXT NOT NULL DEFAULT 'shelf',   -- 'shelf' | 'lucky'
+            shelf_id INTEGER,                          -- NULL voor lucky
+            name     TEXT NOT NULL DEFAULT '',
+            price    INTEGER NOT NULL DEFAULT 0,
+            image    TEXT NOT NULL DEFAULT '',
+            color    TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS inventory (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id  TEXT NOT NULL,
+            name     TEXT NOT NULL DEFAULT '',
+            image    TEXT NOT NULL DEFAULT '',
+            price    INTEGER NOT NULL DEFAULT 0,
+            acquired REAL NOT NULL DEFAULT 0
         );",
     )
     .expect("kan tabel niet aanmaken");
@@ -35,7 +58,48 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "is_public", "INTEGER NOT NULL DEFAULT 0");
     conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
         .expect("backfill max_balance");
+    drop(conn);
+    seed_shop(&pool);
     pool
+}
+
+/// Vul de shop één keer met test-gems (4 kleur-schappen van 5) als hij leeg is.
+fn seed_shop(pool: &DbPool) {
+    let conn = pool.get().expect("db");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM shelves", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count > 0 {
+        return;
+    }
+    let colors = [
+        ("Yellow", "#e8c34a"),
+        ("Red", "#d1543f"),
+        ("Blue", "#4a86e8"),
+        ("Green", "#57b368"),
+    ];
+    for (pos, (cname, hex)) in colors.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO shelves (title, position) VALUES (?1, ?2)",
+            params![format!("{cname} Gems"), pos as i64],
+        )
+        .expect("seed shelf");
+        let shelf_id = conn.last_insert_rowid();
+        for (i, letter) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO items (zone, shelf_id, name, price, color, position)
+                 VALUES ('shelf', ?1, ?2, ?3, ?4, ?5)",
+                params![
+                    shelf_id,
+                    format!("Gem {cname} {letter}"),
+                    (i as i64 + 1) * 5,
+                    hex,
+                    i as i64
+                ],
+            )
+            .expect("seed item");
+        }
+    }
 }
 
 /// Bestaat kolom `col` in `table`? (voor idempotente migraties.)
@@ -236,5 +300,210 @@ pub fn leaderboard(pool: &DbPool, limit: i64) -> Vec<(String, i64)> {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })
         .expect("query leaderboard");
+    rows.filter_map(Result::ok).collect()
+}
+
+// --- shop: schappen & items ---------------------------------------------
+
+/// Eén verkoopbaar item (gem/graphic) in de shop.
+#[derive(Clone, Debug)]
+pub struct Item {
+    pub id: i64,
+    pub name: String,
+    pub price: i64,
+    pub image: String,
+    pub color: String,
+}
+
+fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
+    Ok(Item {
+        id: r.get("id")?,
+        name: r.get("name")?,
+        price: r.get("price")?,
+        image: r.get("image")?,
+        color: r.get("color")?,
+    })
+}
+
+/// Alle schappen (id, titel) op positie.
+pub fn list_shelves(pool: &DbPool) -> Vec<(i64, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT id, title FROM shelves ORDER BY position, id")
+        .expect("prepare shelves");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .expect("query shelves");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Items van één schap, op positie.
+pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, price, image, color FROM items
+             WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
+        )
+        .expect("prepare shelf_items");
+    let rows = stmt.query_map(params![shelf_id], row_to_item).expect("query");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Alle lucky-items, op positie.
+pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, price, image, color FROM items
+             WHERE zone = 'lucky' ORDER BY position, id",
+        )
+        .expect("prepare lucky_items");
+    let rows = stmt.query_map([], row_to_item).expect("query lucky");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// `n` willekeurige shelf-items voor de Daily picks.
+pub fn random_items(pool: &DbPool, n: i64) -> Vec<Item> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, price, image, color FROM items
+             WHERE zone = 'shelf' ORDER BY RANDOM() LIMIT ?1",
+        )
+        .expect("prepare random_items");
+    let rows = stmt.query_map(params![n], row_to_item).expect("query random");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Eén item ophalen (voor image-vervanging e.d.).
+pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT id, name, price, image, color FROM items WHERE id = ?1",
+        params![id],
+        row_to_item,
+    )
+    .optional()
+    .expect("query item")
+}
+
+/// Nieuw (leeg) schap onderaan. Returnt het id.
+pub fn add_shelf(pool: &DbPool, title: &str) -> i64 {
+    let conn = pool.get().expect("db");
+    let pos: i64 = conn
+        .query_row("SELECT COALESCE(MAX(position)+1,0) FROM shelves", [], |r| r.get(0))
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO shelves (title, position) VALUES (?1, ?2)",
+        params![title, pos],
+    )
+    .expect("add shelf");
+    conn.last_insert_rowid()
+}
+
+pub fn rename_shelf(pool: &DbPool, id: i64, title: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE shelves SET title = ?2 WHERE id = ?1", params![id, title])
+        .expect("rename shelf");
+}
+
+/// Schap + al zijn items verwijderen.
+pub fn delete_shelf(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM items WHERE shelf_id = ?1", params![id])
+        .expect("del shelf items");
+    conn.execute("DELETE FROM shelves WHERE id = ?1", params![id])
+        .expect("del shelf");
+}
+
+/// Nieuw leeg item toevoegen aan een schap (zone='shelf') of aan lucky. Returnt id.
+pub fn add_item(pool: &DbPool, zone: &str, shelf_id: Option<i64>) -> i64 {
+    let conn = pool.get().expect("db");
+    let pos: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM items WHERE zone=?1 AND IFNULL(shelf_id,-1)=IFNULL(?2,-1)",
+            params![zone, shelf_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO items (zone, shelf_id, name, price, position) VALUES (?1, ?2, '', 0, ?3)",
+        params![zone, shelf_id, pos],
+    )
+    .expect("add item");
+    conn.last_insert_rowid()
+}
+
+pub fn update_item(pool: &DbPool, id: i64, name: &str, price: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE items SET name = ?2, price = ?3 WHERE id = ?1",
+        params![id, name, price],
+    )
+    .expect("update item");
+}
+
+pub fn set_item_image(pool: &DbPool, id: i64, image: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE items SET image = ?2 WHERE id = ?1", params![id, image])
+        .expect("set image");
+}
+
+pub fn delete_item(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM items WHERE id = ?1", params![id])
+        .expect("del item");
+}
+
+// --- kopen & inventory --------------------------------------------------
+
+/// Koop `item_id` voor `uid`: controleer saldo, trek de prijs af en leg het
+/// item (snapshot van naam/afbeelding/prijs) in de inventory. Atomisch.
+/// Ok(nieuw_saldo) of Err(reden).
+pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<i64, String> {
+    let item = get_item(pool, item_id).ok_or("Dit item bestaat niet meer.")?;
+    let mut conn = pool.get().expect("db");
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let balance: i64 = tx
+        .query_row("SELECT coins FROM coins WHERE user_id = ?1", params![uid], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+    if balance < item.price {
+        return Err(format!(
+            "Niet genoeg coins: je hebt {balance}, {} kost {}.",
+            item.name, item.price
+        ));
+    }
+    tx.execute(
+        "UPDATE coins SET coins = coins - ?2 WHERE user_id = ?1",
+        params![uid, item.price],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO inventory (user_id, name, image, price, acquired)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![uid, item.name, item.image, item.price, ts],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(balance - item.price)
+}
+
+/// Inventory van een lid: (naam, afbeelding, betaalde prijs), nieuwste eerst.
+pub fn inventory_items(pool: &DbPool, uid: &str) -> Vec<(String, String, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, image, price FROM inventory
+             WHERE user_id = ?1 ORDER BY acquired DESC, id DESC",
+        )
+        .expect("prepare inventory");
+    let rows = stmt
+        .query_map(params![uid], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })
+        .expect("query inventory");
     rows.filter_map(Result::ok).collect()
 }
