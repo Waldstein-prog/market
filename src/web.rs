@@ -175,7 +175,7 @@ body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
 .bar{{flex:1;height:14px;background:#0e1510;border:1px solid #2c3d2a;border-radius:999px;overflow:hidden}}
 .fill{{height:100%;background:linear-gradient(90deg,#3f6a2c,{MEADOW});border-radius:999px;transition:width .4s}}
 .lvlnm{{font-variant-numeric:tabular-nums;font-weight:700;color:#cfe0c8;font-size:.85rem;white-space:nowrap}}
-.content{{flex:1;display:grid;place-items:center;padding:1rem}}
+.content{{flex:1;display:grid;justify-items:center;align-items:start;padding:1.2rem 1rem}}
 .card{{background:#182319;border:1px solid #2c3d2a;border-radius:18px;
   padding:2rem 2.25rem;max-width:28rem;width:calc(100% - 2rem);
   box-shadow:0 10px 30px rgba(0,0,0,.35)}}
