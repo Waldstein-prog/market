@@ -153,6 +153,7 @@ body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
 .topbar{{background:{MEADOW};color:#0e1510;padding:.6rem 1.1rem;
   box-shadow:0 2px 10px rgba(0,0,0,.35)}}
 .brand{{font-weight:700;font-size:1.1rem;letter-spacing:.02em}}
+.uname{{font-weight:800;font-size:1.25rem;letter-spacing:.01em;margin:0 0 .7rem}}
 .nav{{display:flex;gap:.3rem;margin:0 0 1.3rem;flex-wrap:wrap}}
 .nav a{{flex:1 1 auto;text-align:center;padding:.5rem .7rem;border-radius:11px;
   text-decoration:none;color:#cfe0c8;font-weight:600;font-size:.92rem;
@@ -315,6 +316,15 @@ fn nav_html(active: &str, admin: bool) -> String {
     )
 }
 
+/// Naam-kop (boven de nav) + de nav-tabs, voor ingelogde pagina's.
+fn chrome(name: &str, active: &str, admin: bool) -> String {
+    format!(
+        "<div class=\"uname\">{}</div>{}",
+        esc(name),
+        nav_html(active, admin)
+    )
+}
+
 // --- levelsysteem (op basis van coins ooit verdiend) --------------------
 const MAX_LEVEL: i64 = 10;
 const LEVEL_BASE: f64 = 50.0; // coins nodig van level 1 → 2
@@ -368,11 +378,11 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
         None => (String::new(), login_body(&st.cfg), false),
         Some((uid, name)) => {
             if is_flowerborn(&st, &uid).await {
-                let (coins, max_balance, _pub, total_earned) = db::get_stats(&st.pool, &uid);
+                let (coins, _max, _pub, total_earned) = db::get_stats(&st.pool, &uid);
                 let grants = db::active_grants(&st.pool, &uid, now_secs());
                 (
-                    nav_html("home", is_admin(&uid)),
-                    inventory_home(&name, coins, max_balance, total_earned, &grants),
+                    chrome(&name, "home", is_admin(&uid)),
+                    inventory_home(&name, coins, total_earned, &grants),
                     true,
                 )
             } else {
@@ -417,13 +427,8 @@ fn grants_html(grants: &[(String, f64)]) -> String {
 }
 
 /// Inventory-home met sub-tabs Coins / Gems / Boosts.
-fn inventory_home(
-    name: &str,
-    coins: i64,
-    max_balance: i64,
-    total_earned: i64,
-    grants: &[(String, f64)],
-) -> String {
+fn inventory_home(name: &str, coins: i64, total_earned: i64, grants: &[(String, f64)]) -> String {
+    let _ = name;
     let (lvl, n, m) = level_info(total_earned);
     let pct = if m > 0 { (n * 100 / m).clamp(0, 100) } else { 100 };
     let nm = if m > 0 {
@@ -439,10 +444,7 @@ fn inventory_home(
            <div class=\"bar\"><div class=\"fill\" style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\">{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Current balance</span>\
-           <span>🪙 <b>{coins}</b></span></div>\
-         <div class=\"statrow\"><span class=\"k\">Highest balance ever</span>\
-           <span>🏅 <b>{max}</b></span></div>{grants}",
-        max = max_balance,
+           <span>🪙 <b>{coins}</b></span></div>{grants}",
         grants = grants_html(grants),
     );
 
@@ -451,8 +453,7 @@ fn inventory_home(
     let boosts_panel = "<div class=\"soon\">🚀 Boosts — coming next: your Hytale passes.</div>";
 
     format!(
-        "<h1>🎒 {name}</h1>\
-         <div class=\"subtabs\">\
+        "<div class=\"subtabs\">\
            <button class=\"subtab on\" data-t=\"coins\">🪙 Coins</button>\
            <button class=\"subtab\" data-t=\"gems\">💎 Gems</button>\
            <button class=\"subtab\" data-t=\"boosts\">🚀 Boosts</button></div>\
@@ -463,8 +464,7 @@ fn inventory_home(
            ts.forEach(function(b){{b.addEventListener('click',function(){{\
              ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
              document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
-             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>",
-        name = esc(name),
+             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>"
     )
 }
 
@@ -516,7 +516,7 @@ async fn market(
          {lucky_html}{daily_html}{shelves}",
         name = esc(&name),
     );
-    Html(shell("Shop — Meadow Market", &nav_html("market", admin), true, &body)).into_response()
+    Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin), true, &body)).into_response()
 }
 
 /// Thumbnail uit (afbeelding, kleur): geüploade afbeelding, anders een gem-bol.
@@ -568,7 +568,7 @@ async fn inventory() -> Response {
 
 /// Leaderboard-sectie: publieke saldo's aflopend, kroontje bij de recordhouder.
 async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    let Some((me, _name)) = require_flowerborn(&st, &headers).await else {
+    let Some((me, name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
     };
     let rows = db::public_leaderboard(&st.pool, 25);
@@ -619,7 +619,7 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
             .unwrap_or_default();
         format!("<h1>🏆 Leaderboard</h1><ol class=\"lb\">{items}</ol>{note}")
     };
-    Html(shell("Leaderboard — Meadow Market", &nav_html("leaderboard", is_admin(&me)), true, &body))
+    Html(shell("Leaderboard — Meadow Market", &chrome(&name, "leaderboard", is_admin(&me)), true, &body))
         .into_response()
 }
 
@@ -954,9 +954,9 @@ fn admin_item(it: &db::Item) -> String {
 }
 
 async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&st, &headers).is_none() {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
-    }
+    };
     let shelves: String = db::list_shelves(&st.pool)
         .iter()
         .map(|(sid, title)| {
@@ -997,7 +997,7 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
            <input name=\"title\" placeholder=\"New shelf name\" required>\
            <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>"
     );
-    Html(shell("Manage — Meadow Market", &nav_html("admin", true), true, &body)).into_response()
+    Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true), true, &body)).into_response()
 }
 
 #[derive(Deserialize)]
