@@ -544,6 +544,19 @@ fn inventory_home(
     } else {
         esc(&name_color)
     };
+    // Discord-profielkleur als achtergrond-swatch (preview in Discord-look).
+    let discord = db::get_discord_color(pool, uid);
+    let discord_swatch = if discord.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"swatch\" style=\"background:{bg};color:{c}\" \
+               title=\"Your Discord profile color\">{nm}</div>",
+            bg = esc(&discord),
+            c = shown_color,
+            nm = esc(name),
+        )
+    };
     let shelf = |cat: &str, title: &str| -> String {
         let gems = db::gems_by_category(pool, cat);
         if gems.is_empty() {
@@ -560,10 +573,11 @@ fn inventory_home(
         format!("<h2 class=\"shelf-title\">{title}</h2><div class=\"shelf\">{slots}</div>")
     };
     let gems_panel = format!(
-        "<div class=\"nameshow\">\
+        "<div class=\"nameshow\">{ds}\
            <div class=\"swatch dark\" style=\"color:{c}\">{nm2}</div>\
            <div class=\"swatch light\" style=\"color:{c}\">{nm2}</div></div>\
          {p}{s}{pr}",
+        ds = discord_swatch,
         c = shown_color,
         nm2 = esc(name),
         p = shelf("primary", "Primary"),
@@ -906,6 +920,12 @@ async fn callback(
         .or_else(|| me["username"].as_str())
         .unwrap_or("unknown")
         .to_string();
+
+    // Discord-profielkleur (accent_color, integer) → hex, voor de naam-swatch.
+    if let Some(c) = me["accent_color"].as_i64() {
+        let hex = format!("#{:06x}", (c as u32) & 0xff_ffff);
+        db::set_discord_color(&st.pool, &uid, &name, &hex);
+    }
 
     let sess = rand_token();
     db::create_session(&st.pool, &sess, &uid, &name, now_secs());

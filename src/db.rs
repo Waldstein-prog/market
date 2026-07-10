@@ -20,7 +20,8 @@ pub fn init_pool(path: &str) -> DbPool {
             is_public    INTEGER NOT NULL DEFAULT 0,
             total_earned INTEGER NOT NULL DEFAULT 0,
             name_color   TEXT NOT NULL DEFAULT '',
-            perma_access INTEGER NOT NULL DEFAULT 0
+            perma_access INTEGER NOT NULL DEFAULT 0,
+            discord_color TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token    TEXT PRIMARY KEY,
@@ -79,6 +80,7 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "total_earned", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "name_color", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "perma_access", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "coins", "discord_color", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "category", "TEXT NOT NULL DEFAULT ''");
@@ -786,6 +788,31 @@ pub fn set_name_color(pool: &DbPool, uid: &str, username: &str, color: &str) {
         params![uid, username, color],
     )
     .expect("set name_color");
+}
+
+/// Bewaar de Discord-profielkleur (hex) van een lid (uit de OAuth-login).
+pub fn set_discord_color(pool: &DbPool, uid: &str, username: &str, hex: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coins (user_id, username, discord_color) VALUES (?1, ?2, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET discord_color = excluded.discord_color,
+             username = excluded.username",
+        params![uid, username, hex],
+    )
+    .expect("set discord_color");
+}
+
+/// De Discord-profielkleur (hex) van een lid, of leeg.
+pub fn get_discord_color(pool: &DbPool, uid: &str) -> String {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT discord_color FROM coins WHERE user_id = ?1",
+        params![uid],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("query discord_color")
+    .unwrap_or_default()
 }
 
 /// De naamkleur (hex) van een lid, of leeg.
