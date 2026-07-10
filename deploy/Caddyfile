@@ -1,0 +1,14 @@
+# Meadow Market — Caddy reverse-proxy / TLS
+#
+# PRO FORMA: apex serveert nu een statische landingspagina (/var/www/magicmeadow).
+# Bij de echte OAuth-deploy terugzetten naar:
+#     magicmeadow.org { reverse_proxy 127.0.0.1:8700 }
+
+magicmeadow.org {
+    root * /var/www/magicmeadow
+    file_server
+}
+
+www.magicmeadow.org {
+    redir https://magicmeadow.org{uri}
+}
