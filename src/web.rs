@@ -69,6 +69,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
             post(admin_item_image).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route("/uploads/{name}", get(serve_upload))
+        .route("/static/MeadowShard.png", get(meadow_shard))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", get(logout))
@@ -444,7 +445,9 @@ fn inventory_home(name: &str, coins: i64, total_earned: i64, grants: &[(String, 
            <div class=\"bar\"><div class=\"fill\" style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\">{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Current balance</span>\
-           <span>🪙 <b>{coins}</b></span></div>{grants}",
+           <span>🪙 <b>{coins}</b></span></div>{grants}\
+         <div style=\"text-align:center;margin-top:1.2rem\">\
+           <img src=\"/static/MeadowShard.png\" alt=\"MeadowShard\" width=\"88\" height=\"88\"></div>",
         grants = grants_html(grants),
     );
 
@@ -1149,6 +1152,15 @@ async fn admin_item_image(
         }
     }
     Redirect::to("/admin/market").into_response()
+}
+
+/// Debug-asset: de MeadowShard-PNG, in de binary gebakken (deploy stuurt enkel de binary).
+async fn meadow_shard() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../static/MeadowShard.png").to_vec(),
+    )
+        .into_response()
 }
 
 /// Bewaarde afbeelding serveren vanuit de uploads-map (met naam-sanitatie).
