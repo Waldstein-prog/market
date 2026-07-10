@@ -1,149 +1,96 @@
-# Handover — market (Meadow Market) — 2026-07-10 (OAuth-sessie, vervolg)
+# Handover — Meadow Market (2026-07-11)
 
-> LIVE op Hetzner. **2026-07-10: browser-login end-to-end GETEST door user = geslaagd**
-> (login + rol-check via bot + 🪙 42 op de account-pagina). Bot-prodwaarden én de
-> OAuth-flow + topbar zijn nu **GECOMMIT + gepusht** naar `market-gh` (zie §Git-staat).
-> **Volgende stap loopt: domein `magicmeadow.org` + TLS opzetten — zie §DOMEIN & TLS.**
+Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
+serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
+(Hetzner-VPS, systemd `market`) en op de **dev-guild** (WaldsteinDevZone).
 
-## 🚧 DOMEIN & TLS (2026-07-10 avond — IN UITVOERING, hier verder)
-User kocht **`magicmeadow.org`**. Doel: `https://magicmeadow.org` → market-site, zodat de
-OAuth2-redirect (die HTTPS vereist) live kan. Aanpak: **Caddy** als reverse-proxy vóór
-market, met automatisch Let's Encrypt-cert.
+> Site staat volledig in het **Engels** (merknaam *Meadow Market* blijft). Ik (Claude) praat
+> met de user in het Nederlands; de user laat de bouw grotendeels **zelfstandig** afwerken en
+> stuurt achteraf bij.
 
-**AL GEDAAN op de VPS (`ssh hytale`, 167.235.142.113):**
-- ufw: **80/tcp + 443/tcp geopend** (naast bestaande 22/5520/8090/8700).
-- **Caddy v2.11.4 geïnstalleerd** (officiële cloudsmith-repo) + service `caddy` active,
-  luistert op 80/443.
-- **`/etc/caddy/Caddyfile`** geschreven + gevalideerd:
-  `magicmeadow.org { reverse_proxy 127.0.0.1:8700 }` en `www.magicmeadow.org` → redirect
-  naar apex. Caddy blijft cert-issuance proberen tot DNS wijst (self-healing).
+## Live & deploy
+- **Site**: `https://magicmeadow.org` (Caddy → `127.0.0.1:8700`, Let's Encrypt-TLS).
+- **Service**: systemd `market` (user `market`, `/opt/market`, `MemoryMax=250M`). Draait de
+  bot-gateway + web concurrent. Logs: `ssh hytale 'journalctl -u market -f'`.
+- **Deploy**: lokaal `./deploy/deploy.sh` (bouwt release-binary LOKAAL, scp binary + unit,
+  `systemctl restart market`). **NOOIT** op de VPS compileren (RAM-krap). Uploads persisteren
+  in `/opt/market/uploads`; de DB is `/opt/market/coins.db` (SQLite; migreert idempotent bij
+  start via `ensure_column`).
+- **secrets.json** op `/opt/market/` (mode 600, niet in git): bot_token, guild_id, role_id,
+  client_id, client_secret, base_url. **Env-overrides** in `deploy/market.service`:
+  `MARKET_BASE_URL=https://magicmeadow.org` en `DISCORD_ROLE_ID=1525249217897955590`
+  (shop-toegangsrol = FlowerBorn).
+- **GitHub**: `github.com/Waldstein-prog/market` (privé). Push vanuit de lab-monorepo:
+  `git -C /home/jo/lab subtree push --prefix=market market-gh main` (cred-helper=store).
+- **Lokaal testen**: `MARKET_WEB_ONLY=1 DISCORD_ROLE_ID=1525249217897955590 cargo run`
+  (web-only = geen 2e bot-gateway). Sessie fabriceren + data zetten via python/sqlite3 op
+  `coins.db`. **Let op**: een losgekoppelde oude instance kan poort 8700 bezet houden →
+  `pkill -f 'release/market'` vóór een test.
 
-**NOG TE DOEN — in volgorde:**
-1. **USER: DNS A-records** bij de registrar (magicmeadow.org):
-   `@` → `167.235.142.113` en `www` → `167.235.142.113`. (Parking-records weg.)
-   Check propagatie: `dig +short magicmeadow.org` moet `167.235.142.113` geven.
-2. **Zodra DNS wijst**: Caddy haalt vanzelf het cert. Check: `curl -I https://magicmeadow.org`
-   (of `ssh hytale 'journalctl -u caddy -n 30'` voor cert-logs).
-3. **USER: Discord Developer Portal** → OAuth2 → Redirects → voeg toe:
-   `https://magicmeadow.org/auth/callback` (localhost-variant mag blijven).
-4. **PROD-DEPLOY (nog niet gebeurd!):** prod draait nog de **oude binary ZONDER
-   OAuth-routes** (commit `5206e5d`). Deploy de nieuwe: lokaal `cd lab/market &&
-   ./deploy/deploy.sh` (bouwt lokaal, scp binary, `systemctl restart market`; korte
-   bot-downtime). **EN** in prod-`secrets.json` op `/opt/market/`: `base_url` →
-   `https://magicmeadow.org` (env-override kan ook: `MARKET_BASE_URL`). Zonder die
-   base_url stuurt /login naar de verkeerde redirect_uri.
-5. **End-to-end test live**: open `https://magicmeadow.org`, Discord-login, coins zichtbaar.
-   NB: prod-rol-check gebruikt `role_id` uit prod-secrets (dev-guild = Hytaler); voor
-   ECHTE prod moet dat de juiste guild/rol worden (open designvraag Flowerborn).
+## Broncode (`src/`)
+- `main.rs` — start bot + web (of web-only via `MARKET_WEB_ONLY`).
+- `config.rs` — secrets.json + env-overrides.
+- `db.rs` — SQLite (rusqlite/r2d2). Tabellen: `coins`, `sessions`, `shelves`, `items`,
+  `inventory` (ontgrendel-ledger, `item_id`), `role_grants` (tijdelijke rollen), `daily_shop`
+  (24u shop-rotatie). Seeds (idempotent): `seed_gems` (gem-catalogus), `seed_hytale` (2 tickets),
+  `seed_horseshoe` (Lucky Horseshoe). Migratie ruimt oude auto-seed gem-schappen op.
+- `discord_rest.rs` — dunne REST-wrapper (rol toekennen/intrekken/checken).
+- `bot.rs` — coin-award per bericht (1–3, cooldown 30s), `!coins`-leaderboard, **Daily**-embed-
+  knop (interaction), **sweeper** (elke 30s: verlopen tijdelijke rollen intrekken).
+- `web.rs` — Axum-site (~1400 regels): alle pagina's, admin, kopen/gebruiken, uploads.
 
-## Wat dit is
-Project **`market`** (lab-poort **8700**): Discord **coin-economy + rol-toggle site**,
-in **Rust** (één self-contained binary: serenity/poise-bot + Axum-site + gedeelde SQLite).
-Draait **LIVE op de Hetzner-VPS** als systemd-service `market`.
+## Site-structuur (ingelogd als FlowerBorn)
+Topbar = merknaam; daaronder in de kaart de **naam** + **nav**: `Inventory (home /) · Shop ·
+Leaderboard · ⚙ Manage (admin) · Log out`.
 
-GitHub: `github.com/Waldstein-prog/market` (privé). Push vanuit de lab-monorepo via
-`git subtree push --prefix=market <auth-url> main`.
+- **Inventory (`/`)** — sub-tabs (client-side, `/?tab=coins|gems|boosts`):
+  - **Coins**: `coins earned all-time` groot (`coins.total_earned`, stijgt enkel bij verdienen);
+    **level 1–10** (exponentieel ×1.6, `level_info`) met fillbar + `n/m`; current balance;
+    **active-access** aftel-teller (lopende tijdelijke rollen).
+  - **Gems** = **bingokaart**: alle gems (3 primary / 5 secondary / 5 prism), **vergrendeld 🔒
+    tot je ze in de Shop koopt** (ontgrendelen). Ontgrendeld → afbeelding + naam + uitleg +
+    **Use** → **Use zet je naamkleur** (`coins.name_color`); bovenaan je naam op **swatches**
+    (Discord-profielkleur als achtergrond + donker + wit); gebruikte gem = 'Equipped'.
+  - **Boosts**: 2 Hytale-tickets (`category='boost'`, **verbruikbaar**). Kopen = ontgrendelen;
+    **Use** = activeren: dagpas → rol + 24u-teller, permanent → `perma_access` + permanente rol
+    (dagpas daarna niet meer koopbaar).
+- **Shop (`/market`)** — 4 **random dagitems** (24u-rotatie, `daily_shop`; pool = gems +
+  Lucky Horseshoe) + daaronder vast de 2 tickets. **Purse** naast de naam met **slotmachine-
+  afteller** na koop (`?from=`). **3D Buy/Use-knoppen**. Reeds bezeten gems tonen 'Owned'.
+- **Leaderboard (`/leaderboard`)** — tabs **All-time** (`total_earned`) / **Now** (`coins`),
+  iedereen zichtbaar, medailles 👑🥈🥉, eigen rij gemarkeerd.
+- **⚙ Manage (`/admin/market`, enkel Waldstein `391337551543271433` + FayBelle
+  `233179495094419456`)** — schappen +/hernoem/verwijder, item-slots (＋), lucky items (＋),
+  per item **naam · prijs · omschrijving · categorie · rol-ID · duur (min) · afbeelding
+  uploaden** · verwijderen.
 
-## Deploystatus (LIVE op Hetzner)
-- Service `market.service`, user **market**, `/opt/market`, `MemoryMax=250M`, ~3–7 MB RSS.
-- **Site**: `http://167.235.142.113:8700` (kaal IP:poort, geen TLS — "URL later").
-- **Bot**: verbonden, roster 4 leden (FayBelle, Xana, Waldstein, Raevenskye).
-- secrets.json op `/opt/market/secrets.json` (mode 600), niet in git.
-- **Updaten**: lokaal `./deploy/deploy.sh` (build → scp binary → restart). Bouwen LOKAAL.
-- **Vandaag gedeployed** (`e9…`/via deploy.sh): `src/bot.rs` prod-waarden — `COOLDOWN=30.0`,
-  `DEV_FEEDBACK=false`. Bot antwoordt dus **niet meer per bericht**; coins gaan stil.
-  Coins-test door user = **geslaagd** ("werken prima").
+## Model & regels
+- **Kopen** (`/buy`) = **ontgrendelen** (saldo eraf, in `inventory`). Gems: max 1× (bingo).
+  Boosts: verbruikbaar (herkoopbaar). **Geen** rol-effect meer bij kopen — effecten volgen bij
+  **Use** (gems: kleur; boosts: rol/toegang).
+- **Rollen (dev-guild):** shop-toegang = **FlowerBorn** `1525249217897955590` (env
+  `DISCORD_ROLE_ID`). Tickets kennen **Hytaler** `1524867158398730460` toe. **Testwaarden**:
+  Day Pass = **1 coin / 1 min** (in prod-DB gezet). Sweeper draait 30s.
+- **Discord-kleur**: `accent_color` uit `users/@me` (identify-scope) → `coins.discord_color`
+  bij login. Verschijnt pas na **opnieuw inloggen**; enkel als de user een accentkleur heeft.
 
-## Git-staat (GECOMMIT + GEPUSHT 2026-07-10)
-Twee commits op `master`, daarna `git subtree push --prefix=market … main` naar `market-gh`:
-1. `chore(market): prod-waarden — cooldown 30s + feedback uit (live)` — enkel `src/bot.rs`.
-2. `feat(market): Discord-OAuth2 login + eigen coins-pagina + topbar` — `config/db/main/web`
-   + `docs/economy-design.md` + deze `HANDOVER.md`.
+## Openstaand / mogelijke bijsturing
+1. **Permanente waarden** zetten (Manage): Day Pass terug naar 24u (1440 min) + echte prijs;
+   whitelist-rol op de **Permanent Pass** invullen (rol-ID staat nu leeg → Use zet enkel
+   `perma_access`, kent nog geen rol toe).
+2. **Prijzen/economie** balanceren (gems/tickets/horseshoe); Lucky Horseshoe heeft nog **geen
+   effect** (enkel koopbaar).
+3. **Prod-guild**: alles draait nog op de **dev-guild**. Voor de echte community: guild/rollen
+   in secrets/env aanpassen + bot inviten + hiërarchie.
+4. **Tale-integratie**: de Hytaler/whitelist-rol → echte Hytale-game-whitelist synct nog niet
+   (aparte stap op de tale-server).
+5. **Public-profiel**: `coins.is_public` bestaat nog maar wordt niet gebruikt (leaderboard toont
+   iedereen); ooit een profielpagina met public-filter.
+6. Losse asset `static/MeadowShard.png` (debug) staat nog in de repo, ongebruikt.
 
-## Wat er vandaag gebouwd is: OAuth2-login op de site
-**Doel** (beslist met user): één vaste embed-knop in een statisch Discord-kanaal →
-website. Wie **Flowerborn** is ziet z'n eigen coins; wie dat niet is ziet de regels.
-**Login = Discord OAuth2**, elk ziet enkel z'n eigen data (sessie-cookie), niets
-zichtbaar zonder login. Volledig ontwerp: **`docs/economy-design.md`** (nieuw, in `docs/`).
-
-**Geïmplementeerd (Rust, compileert schoon — `cargo check` OK):**
-- `config.rs`: velden `client_id`, `client_secret`, `base_url` (+ env-overrides
-  `DISCORD_CLIENT_ID/SECRET`, `MARKET_BASE_URL`), helpers `oauth_redirect()`,
-  `oauth_ready()`. `base_url` default `http://localhost:8700`.
-- `db.rs`: tabel **`sessions`** (token/user_id/username/created) + `get_coins`,
-  `create_session`, `get_session`, `delete_session`.
-- `web.rs` (herschreven): routes
-  - `GET /` — sessie-cookie? → Flowerborn: account-pagina met saldo; geen rol:
-    regels-pagina; niet ingelogd: login-knop.
-  - `GET /login` — CSRF-`state`-cookie + 303 naar Discord authorize (`scope=identify`).
-  - `GET /auth/callback` — state-check → code→token → `users/@me` → sessie-cookie
-    (`HttpOnly; SameSite=Lax`, Max-Age ~90 d) → redirect `/`.
-  - `GET /logout` — sessie wissen.
-  - **`GET /admin`** — de oude Fase-I rol-toggle (verplaatst, ongewijzigd).
-  - `/api/status`, `/api/toggle`, `/healthz` — ongewijzigd.
-  - Pagina's inline in `web.rs` (shell + login/account/rules), meadow-groen thema.
-  - **Topbar toegevoegd** (deze sessie): volle-breedte balk in de projectkleur
-    `MEADOW #6b9b52` bovenaan élke pagina met "🌼 Meadow Market" (zit in `shell()`,
-    body → flex-column + `.content` centreert de card eronder).
-- `main.rs`: web krijgt nu de DB-pool; **`MARKET_WEB_ONLY=1`** draait enkel de
-  web-server (geen bot-gateway) — nodig voor lokaal testen zodat de **live bot niet
-  dubbel op de gateway** komt (→ dubbele coins).
-
-**Server-side geverifieerd lokaal** (web-only, `curl`): `/` toont login-knop; `/login`
-geeft 303 naar de juiste authorize-URL met correcte client_id + ge-encode redirect_uri
-+ CSRF-cookie; `/healthz` = ok. **Browser-flow (echte Discord-login) nog te doen.**
-
-## Config / secrets (lokaal, gitignored)
-`secrets.json` lokaal aangevuld met:
-- `client_id`: `1524865923771793668` (= de bot-app / publiek).
-- `client_secret`: **gezet** (door user aangeleverd — OAuth2-secret van de app).
-- `base_url`: `http://localhost:8700`.
-
-**Discord Developer Portal** (door user gedaan): redirect-URI
-`http://localhost:8700/auth/callback` toegevoegd onder OAuth2 → Redirects.
-
-**Let op**: de rol-check gebruikt nu `role_id` = **Hytaler** (`1524867158398730460`) als
-"Flowerborn". Open vraag 1 (Flowerborn = nieuwe naam of aparte rol?) nog niet beslist;
-wordt straks enkel die ID aanpassen.
-
-## Zo pik je het weer op (volgende sessie)
-0. **Web-server draait mogelijk al** losgekoppeld op `localhost:8700` (gestart met
-   `setsid … cargo run`, log in `/tmp/market-web.log`). Check: `curl -s localhost:8700/healthz`.
-   Zo niet, herstart: `cd lab/market && MARKET_WEB_ONLY=1 cargo run` (web-only, geen
-   bot-gateway → live bot niet dubbel). **Let op**: in een losgekoppelde/chatter-shell
-   staat `cargo` niet op PATH → gebruik `/home/jo/.cargo/bin/cargo`.
-1. **De test die de user LATER doet**: open `http://localhost:8700` → groene topbar +
-   login-knop → inloggen met Discord. Met Hytaler-rol → account met 🪙 42 (lokaal
-   testsaldo voor Waldstein 391337551543271433); zonder → regels. Isolatie: incognito +
-   ander account (mag de 42 niet zien).
-2. Werkt het → **committen**: eerst `src/bot.rs` apart (prod-waarden, live), dan de
-   OAuth-flow (`config/db/main/web` + **topbar** + `docs/`). Dan `git subtree push`
-   naar de gh-repo. (User-afspraak: pas committen ná geslaagde test.)
-3. **Prod-deploy van OAuth** is geblokkeerd op **domein + TLS** (Caddy): OAuth2 vereist
-   een HTTPS redirect-URI; `http://<IP>:8700` kan geen geldig cert. Zie
-   `docs/economy-design.md §11`. Pas kopen "als het de moeite waard is" (user).
-
-## Losstaande open vraag: live coins-reset
-User vroeg een reset van de coins "voor de test". Live db (`/opt/market/coins.db` op
-`ssh hytale`) bevat momenteel **1 rij: Waldstein = 6 coins** (laatst 2026-07-09 22:22 UTC;
-sindsdien niets bijgekomen). Reset is dus **NIET** doorgevoerd — user gaf nog geen
-expliciete "ja". Wil hij het alsnog: `ssh hytale` → `systemctl stop market` →
-`rm /opt/market/coins.db` → `systemctl start market` (app maakt verse lege tabel).
-NB: dit staat **los** van het lokale OAuth-testsaldo (Waldstein=42) — twee aparte db's.
-NB2: sqlite3 staat niet op de VPS; lees de db door hem lokaal te scp'en.
-
-## Lokale losse eindjes (deze pop-os machine)
-- **Detached web-server draait mogelijk nog** op `localhost:8700` (gestart met
-  `setsid … /home/jo/.cargo/bin/cargo run`, web-only, log `/tmp/market-web.log`).
-  Overleeft sessie-einde. Stoppen mag: `pkill -f 'target/debug/market'`. In een
-  chatter/detached-shell staat `cargo` niet op PATH → gebruik het volle pad.
-- **Hytaler-rol toegekend aan Waldstein** (via de site-toggle `/api/toggle`, voor de
-  test). Bewust gelaten. Terugdraaien = toggle met `enable:false` of in Discord.
-
-## Openstaand / roadmap (uit docs/economy-design.md)
-- **Beslist**: login=OAuth2, embed=launcher, data-isolatie via sessie-cookie.
-- **Nog te beslissen**: Flowerborn vs Hytaler (rol), treasure-chest-mechaniek (A vs B),
-  consumables ja/nee, daily-streak-regels, bouwvolgorde.
-- **Economy Fase II** verder uitwerken: daily-knop, market (4-slot dagrotatie), inventory
-  met schappen, boosters, chest-events, leaderboard/kroontje. Alles in
-  `docs/economy-design.md`.
+## Zo pik je het op
+1. `cd lab/market`, `MARKET_WEB_ONLY=1 DISCORD_ROLE_ID=1525249217897955590 cargo run`, open
+   `http://localhost:8700`, log in met Discord (redirect-URI localhost staat geregistreerd).
+2. Wijzig → `cargo build --release` → `./deploy/deploy.sh` → commit → `git subtree push`.
+3. Economy-ontwerp/achtergrond: `docs/economy-design.md`. Volledige geschiedenis in de git-log
+   en in de projectmemory (`market-project`).
