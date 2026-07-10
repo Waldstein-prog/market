@@ -18,7 +18,8 @@ pub fn init_pool(path: &str) -> DbPool {
             last_daily  REAL NOT NULL DEFAULT 0,
             max_balance  INTEGER NOT NULL DEFAULT 0,
             is_public    INTEGER NOT NULL DEFAULT 0,
-            total_earned INTEGER NOT NULL DEFAULT 0
+            total_earned INTEGER NOT NULL DEFAULT 0,
+            name_color   TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token    TEXT PRIMARY KEY,
@@ -41,7 +42,9 @@ pub fn init_pool(path: &str) -> DbPool {
             color    TEXT NOT NULL DEFAULT '',
             position INTEGER NOT NULL DEFAULT 0,
             role_id  TEXT NOT NULL DEFAULT '',       -- kent deze rol toe bij aankoop
-            duration INTEGER NOT NULL DEFAULT 0      -- 0 = permanent, >0 = seconden (bv 24u)
+            duration INTEGER NOT NULL DEFAULT 0,     -- 0 = permanent, >0 = seconden (bv 24u)
+            category TEXT NOT NULL DEFAULT '',        -- 'primary'|'secondary'|'prism' voor gems
+            description TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS role_grants (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +56,7 @@ pub fn init_pool(path: &str) -> DbPool {
         CREATE TABLE IF NOT EXISTS inventory (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id  TEXT NOT NULL,
+            item_id  INTEGER NOT NULL DEFAULT 0,
             name     TEXT NOT NULL DEFAULT '',
             image    TEXT NOT NULL DEFAULT '',
             price    INTEGER NOT NULL DEFAULT 0,
@@ -67,8 +71,12 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "max_balance", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "is_public", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "total_earned", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "coins", "name_color", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "items", "category", "TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "items", "description", "TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "inventory", "item_id", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
     conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
         .expect("backfill max_balance");
@@ -81,7 +89,74 @@ pub fn init_pool(path: &str) -> DbPool {
     drop(conn);
     seed_shop(&pool);
     seed_hytale(&pool);
+    seed_gems(&pool);
     pool
+}
+
+/// Seed de gem-catalogus één keer (idempotent): 3 primary, 5 secondary, 5 prism.
+/// Elke gem is een shop-item met een categorie, kleur en omschrijving.
+fn seed_gems(pool: &DbPool) {
+    let conn = pool.get().expect("db");
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM items WHERE category IN ('primary','secondary','prism')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if exists > 0 {
+        return;
+    }
+    // (schaptitel, categorie, [(naam, kleur, prijs, uitleg)])
+    let cats: [(&str, &str, &[(&str, &str, i64, &str)]); 3] = [
+        (
+            "Primary Gems",
+            "primary",
+            &[
+                ("Ruby", "#d1543f", 40, "A fiery red primary gem."),
+                ("Topaz", "#e8c34a", 40, "A sunny yellow primary gem."),
+                ("Sapphire", "#4a86e8", 40, "A deep blue primary gem."),
+            ],
+        ),
+        (
+            "Secondary Gems",
+            "secondary",
+            &[
+                ("Emerald", "#2ecc71", 80, "A lush green secondary gem."),
+                ("Amethyst", "#9b59b6", 80, "A royal purple secondary gem."),
+                ("Citrine", "#f39c12", 80, "A warm amber secondary gem."),
+                ("Garnet", "#c0392b", 80, "A dark crimson secondary gem."),
+                ("Onyx", "#34495e", 80, "A shadowy slate secondary gem."),
+            ],
+        ),
+        (
+            "Prism Gems",
+            "prism",
+            &[
+                ("Prism Aurora", "#e056fd", 160, "A shifting magenta prism gem."),
+                ("Prism Frost", "#7ed6df", 160, "An icy cyan prism gem."),
+                ("Prism Ember", "#ff7979", 160, "A glowing coral prism gem."),
+                ("Prism Verdant", "#badc58", 160, "A vivid lime prism gem."),
+                ("Prism Dusk", "#686de0", 160, "A twilight indigo prism gem."),
+            ],
+        ),
+    ];
+    for (pos, (title, cat, gems)) in cats.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO shelves (title, position) VALUES (?1, ?2)",
+            params![title, pos as i64 + 10],
+        )
+        .expect("seed gem shelf");
+        let shelf_id = conn.last_insert_rowid();
+        for (i, (name, color, price, desc)) in gems.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO items (zone, shelf_id, name, price, color, category, description, position)
+                 VALUES ('shelf', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![shelf_id, name, price, color, cat, desc, i as i64],
+            )
+            .expect("seed gem");
+        }
+    }
 }
 
 /// Voeg de twee Hytale-tickets één keer toe (idempotent op naam): een dagpas
@@ -381,6 +456,8 @@ pub struct Item {
     pub color: String,
     pub role_id: String,
     pub duration: i64, // 0 = permanent, >0 = seconden
+    pub category: String,
+    pub description: String,
 }
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
@@ -392,6 +469,8 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         color: r.get("color")?,
         role_id: r.get("role_id")?,
         duration: r.get("duration")?,
+        category: r.get("category")?,
+        description: r.get("description")?,
     })
 }
 
@@ -412,7 +491,7 @@ pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration FROM items
+            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
              WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
         )
         .expect("prepare shelf_items");
@@ -425,7 +504,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration FROM items
+            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
              WHERE zone = 'lucky' ORDER BY position, id",
         )
         .expect("prepare lucky_items");
@@ -438,7 +517,7 @@ pub fn random_items(pool: &DbPool, n: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration FROM items
+            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
              WHERE zone = 'shelf' ORDER BY RANDOM() LIMIT ?1",
         )
         .expect("prepare random_items");
@@ -450,7 +529,7 @@ pub fn random_items(pool: &DbPool, n: i64) -> Vec<Item> {
 pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT id, name, price, image, color, role_id, duration FROM items WHERE id = ?1",
+        "SELECT id, name, price, image, color, role_id, duration, category, description FROM items WHERE id = ?1",
         params![id],
         row_to_item,
     )
@@ -505,11 +584,22 @@ pub fn add_item(pool: &DbPool, zone: &str, shelf_id: Option<i64>) -> i64 {
     conn.last_insert_rowid()
 }
 
-pub fn update_item(pool: &DbPool, id: i64, name: &str, price: i64, role_id: &str, duration: i64) {
+#[allow(clippy::too_many_arguments)]
+pub fn update_item(
+    pool: &DbPool,
+    id: i64,
+    name: &str,
+    price: i64,
+    role_id: &str,
+    duration: i64,
+    category: &str,
+    description: &str,
+) {
     let conn = pool.get().expect("db");
     conn.execute(
-        "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5 WHERE id = ?1",
-        params![id, name, price, role_id, duration],
+        "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5,
+             category = ?6, description = ?7 WHERE id = ?1",
+        params![id, name, price, role_id, duration, category, description],
     )
     .expect("update item");
 }
@@ -526,15 +616,25 @@ pub fn delete_item(pool: &DbPool, id: i64) {
         .expect("del item");
 }
 
-// --- kopen & inventory --------------------------------------------------
+// --- kopen & ontgrendelen -----------------------------------------------
 
-/// Koop `item_id` voor `uid`: controleer saldo, trek de prijs af en leg het
-/// item (snapshot van naam/afbeelding/prijs) in de inventory. Atomisch.
-/// Ok(nieuw_saldo) of Err(reden).
+/// Koop/ontgrendel `item_id` voor `uid`: elk item kan maar één keer bezeten
+/// worden (bingokaart). Controleert saldo, trekt de prijs af en ontgrendelt
+/// het item. Atomisch. Ok(nieuw_saldo, item) of Err(reden).
 pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64, Item), String> {
     let item = get_item(pool, item_id).ok_or("This item no longer exists.")?;
     let mut conn = pool.get().expect("db");
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let owned: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM inventory WHERE user_id = ?1 AND item_id = ?2",
+            params![uid, item_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if owned > 0 {
+        return Err(format!("You already own {}.", item.name));
+    }
     let balance: i64 = tx
         .query_row("SELECT coins FROM coins WHERE user_id = ?1", params![uid], |r| r.get(0))
         .optional()
@@ -552,13 +652,63 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
     )
     .map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO inventory (user_id, name, image, price, acquired)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![uid, item.name, item.image, item.price, ts],
+        "INSERT INTO inventory (user_id, item_id, name, image, price, acquired)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![uid, item_id, item.name, item.image, item.price, ts],
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok((balance - item.price, item))
+}
+
+/// Ontgrendelde item-id's (bingokaart) van een lid.
+pub fn owned_item_ids(pool: &DbPool, uid: &str) -> Vec<i64> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT item_id FROM inventory WHERE user_id = ?1 AND item_id > 0")
+        .expect("prepare owned");
+    let rows = stmt
+        .query_map(params![uid], |r| r.get::<_, i64>(0))
+        .expect("query owned");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Alle gems van een categorie ('primary'|'secondary'|'prism'), op positie.
+pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
+             WHERE category = ?1 ORDER BY position, id",
+        )
+        .expect("prepare gems_by_category");
+    let rows = stmt.query_map(params![category], row_to_item).expect("query gems");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Zet de naamkleur (hex) van een lid, of leeg om te resetten.
+pub fn set_name_color(pool: &DbPool, uid: &str, username: &str, color: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coins (user_id, username, name_color) VALUES (?1, ?2, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET name_color = excluded.name_color,
+             username = excluded.username",
+        params![uid, username, color],
+    )
+    .expect("set name_color");
+}
+
+/// De naamkleur (hex) van een lid, of leeg.
+pub fn get_name_color(pool: &DbPool, uid: &str) -> String {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT name_color FROM coins WHERE user_id = ?1",
+        params![uid],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("query name_color")
+    .unwrap_or_default()
 }
 
 /// Registreer een tijdelijke rol-toekenning die op `expires_at` weer weg moet.
@@ -606,21 +756,4 @@ pub fn delete_role_grant(pool: &DbPool, id: i64) {
     let conn = pool.get().expect("db");
     conn.execute("DELETE FROM role_grants WHERE id = ?1", params![id])
         .expect("delete role_grant");
-}
-
-/// Inventory van een lid: (naam, afbeelding, betaalde prijs), nieuwste eerst.
-pub fn inventory_items(pool: &DbPool, uid: &str) -> Vec<(String, String, i64)> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare(
-            "SELECT name, image, price FROM inventory
-             WHERE user_id = ?1 ORDER BY acquired DESC, id DESC",
-        )
-        .expect("prepare inventory");
-    let rows = stmt
-        .query_map(params![uid], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
-        })
-        .expect("query inventory");
-    rows.filter_map(Result::ok).collect()
 }

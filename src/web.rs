@@ -57,6 +57,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/leaderboard", get(leaderboard_page))
         .route("/public", post(set_public_route))
         .route("/buy", post(buy))
+        .route("/use/gem", post(use_gem))
         .route("/admin/market", get(admin_market))
         .route("/admin/shelf/add", post(admin_shelf_add))
         .route("/admin/shelf/rename", post(admin_shelf_rename))
@@ -69,7 +70,6 @@ pub async fn serve(cfg: Config, pool: DbPool) {
             post(admin_item_image).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route("/uploads/{name}", get(serve_upload))
-        .route("/static/MeadowShard.png", get(meadow_shard))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", get(logout))
@@ -234,6 +234,17 @@ a.link{{color:{MEADOW}}}
 .shelf .slot{{flex:0 0 auto;width:112px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
+.nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap}}
+.swatch{{flex:1 1 140px;text-align:center;padding:.7rem;border-radius:11px;
+  font-weight:800;font-size:1.25rem;border:1px solid #2c3d2a}}
+.swatch.dark{{background:#141414}}
+.swatch.light{{background:#ffffff}}
+.gemcard .gdesc{{font-size:.7rem;color:#9db095;line-height:1.25;
+  max-height:2.6em;overflow:hidden}}
+.slot.locked{{opacity:.45}}
+.slot.locked .thumb{{display:grid;place-items:center}}
+.slot .lock{{font-size:1.5rem;filter:grayscale(1)}}
+.buy.on.eq{{background:#2c3d2a;color:#cfe0c8;cursor:default}}
 .slot .thumb img{{width:100%;height:100%;object-fit:contain;border-radius:9px}}
 .gem-empty{{background:#22301f}}
 .btn.small{{margin-top:0;padding:.35rem .55rem;font-size:.82rem;border-radius:8px}}
@@ -372,7 +383,16 @@ fn require_admin(st: &AppState, headers: &HeaderMap) -> Option<(String, String)>
     is_admin(&uid).then_some((uid, name))
 }
 
-async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
+#[derive(Deserialize)]
+struct HomeQuery {
+    tab: Option<String>,
+}
+
+async fn index(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HomeQuery>,
+) -> Html<String> {
     let session = cookie(&headers, "session").and_then(|t| db::get_session(&st.pool, &t));
 
     let (nav, body, wide) = match session {
@@ -381,9 +401,10 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
             if is_flowerborn(&st, &uid).await {
                 let (coins, _max, _pub, total_earned) = db::get_stats(&st.pool, &uid);
                 let grants = db::active_grants(&st.pool, &uid, now_secs());
+                let tab = q.tab.as_deref().unwrap_or("coins");
                 (
                     chrome(&name, "home", is_admin(&uid)),
-                    inventory_home(&name, coins, total_earned, &grants),
+                    inventory_home(&st.pool, &uid, &name, coins, total_earned, &grants, tab),
                     true,
                 )
             } else {
@@ -427,9 +448,42 @@ fn grants_html(grants: &[(String, f64)]) -> String {
     )
 }
 
+/// Eén gem-vakje op de bingokaart: greyed slot als niet ontgrendeld, anders
+/// afbeelding + naam + uitleg + Use.
+fn gem_slot(it: &db::Item, owned: bool, equipped: bool) -> String {
+    if !owned {
+        return "<div class=\"slot locked\"><div class=\"thumb\">\
+                <span class=\"lock\">🔒</span></div></div>"
+            .to_string();
+    }
+    let (label, extra, disabled) = if equipped {
+        ("Equipped", " eq", " disabled")
+    } else {
+        ("Use", "", "")
+    };
+    format!(
+        "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
+         <div class=\"name\">{name}</div><div class=\"gdesc\">{desc}</div>\
+         <form method=\"post\" action=\"/use/gem\" class=\"buyform\">\
+           <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
+           <button class=\"buy on{extra}\" type=\"submit\"{disabled}>{label}</button></form></div>",
+        thumb = thumb_html(&it.image, &it.color),
+        name = esc(&it.name),
+        desc = esc(&it.description),
+        id = it.id,
+    )
+}
+
 /// Inventory-home met sub-tabs Coins / Gems / Boosts.
-fn inventory_home(name: &str, coins: i64, total_earned: i64, grants: &[(String, f64)]) -> String {
-    let _ = name;
+fn inventory_home(
+    pool: &db::DbPool,
+    uid: &str,
+    name: &str,
+    coins: i64,
+    total_earned: i64,
+    grants: &[(String, f64)],
+    active: &str,
+) -> String {
     let (lvl, n, m) = level_info(total_earned);
     let pct = if m > 0 { (n * 100 / m).clamp(0, 100) } else { 100 };
     let nm = if m > 0 {
@@ -445,29 +499,65 @@ fn inventory_home(name: &str, coins: i64, total_earned: i64, grants: &[(String, 
            <div class=\"bar\"><div class=\"fill\" style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\">{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Current balance</span>\
-           <span>🪙 <b>{coins}</b></span></div>{grants}\
-         <div style=\"text-align:center;margin-top:1.2rem\">\
-           <img src=\"/static/MeadowShard.png\" alt=\"MeadowShard\" width=\"88\" height=\"88\"></div>",
+           <span>🪙 <b>{coins}</b></span></div>{grants}",
         grants = grants_html(grants),
     );
 
-    let gems_panel = "<div class=\"soon\">💎 Gems — coming next: primary, secondary \
-        and prism gems to collect and equip.</div>";
+    // Gems — bingokaart: alle gems, ontgrendelde onthuld.
+    let owned: std::collections::HashSet<i64> =
+        db::owned_item_ids(pool, uid).into_iter().collect();
+    let name_color = db::get_name_color(pool, uid);
+    let shown_color = if name_color.is_empty() {
+        "#e8f0e4".to_string()
+    } else {
+        esc(&name_color)
+    };
+    let shelf = |cat: &str, title: &str| -> String {
+        let gems = db::gems_by_category(pool, cat);
+        if gems.is_empty() {
+            return String::new();
+        }
+        let slots: String = gems
+            .iter()
+            .map(|g| {
+                let own = owned.contains(&g.id);
+                let eq = own && !g.color.is_empty() && g.color.eq_ignore_ascii_case(&name_color);
+                gem_slot(g, own, eq)
+            })
+            .collect();
+        format!("<h2 class=\"shelf-title\">{title}</h2><div class=\"shelf\">{slots}</div>")
+    };
+    let gems_panel = format!(
+        "<div class=\"nameshow\">\
+           <div class=\"swatch dark\" style=\"color:{c}\">{nm2}</div>\
+           <div class=\"swatch light\" style=\"color:{c}\">{nm2}</div></div>\
+         {p}{s}{pr}",
+        c = shown_color,
+        nm2 = esc(name),
+        p = shelf("primary", "Primary"),
+        s = shelf("secondary", "Secondary"),
+        pr = shelf("prism", "Prism"),
+    );
+
     let boosts_panel = "<div class=\"soon\">🚀 Boosts — coming next: your Hytale passes.</div>";
 
+    let cls = |t: &str| if t == active { " on" } else { "" };
     format!(
         "<div class=\"subtabs\">\
-           <button class=\"subtab on\" data-t=\"coins\">🪙 Coins</button>\
-           <button class=\"subtab\" data-t=\"gems\">💎 Gems</button>\
-           <button class=\"subtab\" data-t=\"boosts\">🚀 Boosts</button></div>\
-         <div class=\"panel on\" id=\"p-coins\">{coins_panel}</div>\
-         <div class=\"panel\" id=\"p-gems\">{gems_panel}</div>\
-         <div class=\"panel\" id=\"p-boosts\">{boosts_panel}</div>\
+           <button class=\"subtab{ca}\" data-t=\"coins\">🪙 Coins</button>\
+           <button class=\"subtab{cg}\" data-t=\"gems\">💎 Gems</button>\
+           <button class=\"subtab{cb}\" data-t=\"boosts\">🚀 Boosts</button></div>\
+         <div class=\"panel{ca}\" id=\"p-coins\">{coins_panel}</div>\
+         <div class=\"panel{cg}\" id=\"p-gems\">{gems_panel}</div>\
+         <div class=\"panel{cb}\" id=\"p-boosts\">{boosts_panel}</div>\
          <script>(function(){{var ts=document.querySelectorAll('.subtab');\
            ts.forEach(function(b){{b.addEventListener('click',function(){{\
              ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
              document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
-             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>"
+             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>",
+        ca = cls("coins"),
+        cg = cls("gems"),
+        cb = cls("boosts"),
     )
 }
 
@@ -913,6 +1003,20 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
     Redirect::to(&dest).into_response()
 }
 
+/// Een ontgrendelde gem "gebruiken": zet je naamkleur op de gem-kleur.
+async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
+    if let Some((uid, name)) = require_flowerborn(&st, &headers).await {
+        if db::owned_item_ids(&st.pool, &uid).contains(&f.item_id) {
+            if let Some(item) = db::get_item(&st.pool, f.item_id) {
+                if !item.category.is_empty() {
+                    db::set_name_color(&st.pool, &uid, &name, &item.color);
+                }
+            }
+        }
+    }
+    Redirect::to("/?tab=gems").into_response()
+}
+
 /// Human-friendly duration ("1 day", "24 h", "30 min").
 fn human_duration(secs: i64) -> String {
     if secs % 86400 == 0 {
@@ -930,6 +1034,7 @@ fn human_duration(secs: i64) -> String {
 /// Eén item-editor op de beheerpagina: thumb, naam, prijs, upload, verwijder.
 fn admin_item(it: &db::Item) -> String {
     let dur_min = it.duration / 60;
+    let sel = |c: &str| if it.category == c { " selected" } else { "" };
     format!(
         "<div class=\"aitem\"><div class=\"thumb\">{thumb}</div>\
          <form method=\"post\" action=\"/admin/item/update\">\
@@ -938,6 +1043,11 @@ fn admin_item(it: &db::Item) -> String {
            <div class=\"prow\">\
              <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"price\">\
              <button class=\"btn small\" type=\"submit\">✓</button></div>\
+           <input name=\"description\" value=\"{desc}\" placeholder=\"description\">\
+           <select name=\"category\"><option value=\"\"{c0}>— no gem —</option>\
+             <option value=\"primary\"{cp}>primary</option>\
+             <option value=\"secondary\"{cs}>secondary</option>\
+             <option value=\"prism\"{cpr}>prism</option></select>\
            <input name=\"role_id\" value=\"{role}\" placeholder=\"role ID (granted on buy)\">\
            <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\" \
              placeholder=\"duration in min (0 = permanent)\"></form>\
@@ -953,6 +1063,11 @@ fn admin_item(it: &db::Item) -> String {
         name = esc(&it.name),
         price = it.price,
         role = esc(&it.role_id),
+        desc = esc(&it.description),
+        c0 = sel(""),
+        cp = sel("primary"),
+        cs = sel("secondary"),
+        cpr = sel("prism"),
     )
 }
 
@@ -1033,6 +1148,10 @@ struct ItemUpdate {
     role_id: String,
     #[serde(default)]
     duration_min: i64,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    description: String,
 }
 
 async fn admin_shelf_add(
@@ -1100,6 +1219,8 @@ async fn admin_item_update(
             f.price.max(0),
             f.role_id.trim(),
             f.duration_min.max(0) * 60,
+            f.category.trim(),
+            f.description.trim(),
         );
     }
     Redirect::to("/admin/market").into_response()
@@ -1152,15 +1273,6 @@ async fn admin_item_image(
         }
     }
     Redirect::to("/admin/market").into_response()
-}
-
-/// Debug-asset: de MeadowShard-PNG, in de binary gebakken (deploy stuurt enkel de binary).
-async fn meadow_shard() -> Response {
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/png")],
-        include_bytes!("../static/MeadowShard.png").to_vec(),
-    )
-        .into_response()
 }
 
 /// Bewaarde afbeelding serveren vanuit de uploads-map (met naam-sanitatie).
