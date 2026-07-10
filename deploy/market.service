@@ -11,6 +11,8 @@ WorkingDirectory=/opt/market
 Environment=RUST_LOG=info,serenity=warn,tracing=warn
 # Publieke basis-URL voor de OAuth2 redirect-URI (HTTPS via Caddy).
 Environment=MARKET_BASE_URL=https://magicmeadow.org
+# Shop-toegangsrol (Flowerborn) — overschrijft role_id uit secrets.json.
+Environment=DISCORD_ROLE_ID=1525249217897955590
 ExecStart=/opt/market/market
 Restart=always
 RestartSec=10
