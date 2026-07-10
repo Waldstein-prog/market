@@ -288,7 +288,7 @@ fn nav_html(active: &str, admin: bool) -> String {
         format!("<a{cls} href=\"{href}\">{label}</a>")
     };
     let admin_link = if admin {
-        item("/admin/market", "admin", "⚙ Beheer")
+        item("/admin/market", "admin", "⚙ Manage")
     } else {
         String::new()
     };
@@ -299,7 +299,7 @@ fn nav_html(active: &str, admin: bool) -> String {
         item("/inventory", "inventory", "🎒 Inventory"),
         item("/leaderboard", "leaderboard", "🏆 Leaderboard"),
         admin_link,
-        item("/logout", "logout", "↪ Uitloggen"),
+        item("/logout", "logout", "↪ Log out"),
     )
 }
 
@@ -358,7 +358,7 @@ fn coins_body(
             .iter()
             .map(|(label, exp)| {
                 let lbl = if label.is_empty() {
-                    "Tijdelijke toegang".to_string()
+                    "Temporary access".to_string()
                 } else {
                     esc(label)
                 };
@@ -371,21 +371,21 @@ fn coins_body(
             .collect();
         format!(
             "<div class=\"grantwrap\"><div class=\"k\" style=\"margin:1.1rem 0 .4rem\">\
-               Actieve toegang</div><div class=\"grants\">{rows}</div></div>\
+               Active access</div><div class=\"grants\">{rows}</div></div>\
              <script>(function(){{function f(s){{s=Math.max(0,Math.floor(s));\
              var m=Math.floor(s/60),x=s%60;return m+':'+(x<10?'0':'')+x;}}\
              function t(){{var n=Date.now()/1000;document.querySelectorAll('.grant')\
              .forEach(function(g){{var e=parseFloat(g.dataset.exp),r=e-n,\
-             q=g.querySelector('.gtime');if(r<=0){{q.textContent='verlopen';\
+             q=g.querySelector('.gtime');if(r<=0){{q.textContent='expired';\
              g.classList.add('expired');}}else{{q.textContent=f(r);}}}});}}\
              t();setInterval(t,1000);}})();</script>"
         )
     };
     format!(
-        "<h1>🌼 Hallo, {name}</h1>\
-         <p class=\"muted\">Je saldo op dit moment</p>\
+        "<h1>🌼 Hello, {name}</h1>\
+         <p class=\"muted\">Your current balance</p>\
          <div class=\"coins\">🪙 {coins}</div>\
-         <div class=\"statrow\"><span class=\"k\">Hoogste saldo ooit</span>\
+         <div class=\"statrow\"><span class=\"k\">Highest balance ever</span>\
            <span>🏅 <b>{max}</b></span></div>\
          <div class=\"statrow\"><span class=\"k\">public</span>\
            <form method=\"post\" action=\"/public\" style=\"margin:0\">\
@@ -442,11 +442,11 @@ async fn market(
 
     let body = format!(
         "<h1>🛒 Shop</h1>{notice}\
-         <p class=\"muted\">Hallo {name} — welkom in de shop. Koop met je 🪙 coins.</p>\
+         <p class=\"muted\">Hi {name} — welcome to the shop. Buy with your 🪙 coins.</p>\
          {lucky_html}{daily_html}{shelves}",
         name = esc(&name),
     );
-    Html(shell("Market — Meadow Market", &nav_html("market", admin), true, &body)).into_response()
+    Html(shell("Shop — Meadow Market", &nav_html("market", admin), true, &body)).into_response()
 }
 
 /// Thumbnail uit (afbeelding, kleur): geüploade afbeelding, anders een gem-bol.
@@ -498,8 +498,8 @@ async fn inventory(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let admin = is_admin(&uid);
     let items = db::inventory_items(&st.pool, &uid);
     let inner = if items.is_empty() {
-        "<div class=\"soon\">🌱 Je spullenkast is nog leeg. Koop iets in de \
-         <a class=\"link\" href=\"/market\">Market</a> en het verschijnt hier.</div>"
+        "<div class=\"soon\">🌱 Your inventory is empty. Buy something in the \
+         <a class=\"link\" href=\"/market\">Shop</a> and it shows up here.</div>"
             .to_string()
     } else {
         let cells: String = items
@@ -508,7 +508,7 @@ async fn inventory(State(st): State<AppState>, headers: HeaderMap) -> Response {
                 format!(
                     "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
                      <div class=\"name\">{name}</div>\
-                     <div class=\"price muted\">gekocht · 🪙 {price}</div></div>",
+                     <div class=\"price muted\">bought · 🪙 {price}</div></div>",
                     thumb = thumb_html(image, ""),
                     name = esc(iname),
                 )
@@ -518,7 +518,7 @@ async fn inventory(State(st): State<AppState>, headers: HeaderMap) -> Response {
     };
     let body = format!(
         "<h1>🎒 Inventory</h1>\
-         <p class=\"muted\">Hallo {name} — je gekochte en gewonnen items.</p>{inner}",
+         <p class=\"muted\">Hi {name} — your bought and won items.</p>{inner}",
         name = esc(&name),
     );
     Html(shell("Inventory — Meadow Market", &nav_html("inventory", admin), true, &body)).into_response()
@@ -535,9 +535,9 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
 
     let body = if rows.is_empty() {
         "<h1>🏆 Leaderboard</h1>\
-             <p class=\"muted\">Nog niemand heeft z'n saldo publiek gezet. \
-             Zet het jouwe publiek op de <a class=\"link\" href=\"/\">Coins</a>-pagina \
-             om hier te verschijnen.</p>"
+             <p class=\"muted\">No one has made their balance public yet. \
+             Make yours public on the <a class=\"link\" href=\"/\">Coins</a> page \
+             to appear here.</p>"
             .to_string()
     } else {
         let items = rows
@@ -568,8 +568,8 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
         let note = record
             .map(|(_, n, mx)| {
                 format!(
-                    "<p class=\"muted\" style=\"margin-top:1rem\">👑 Hoogste saldo ooit: \
-                     <b>{}</b> met 🏅 {}</p>",
+                    "<p class=\"muted\" style=\"margin-top:1rem\">👑 Highest balance ever: \
+                     <b>{}</b> with 🏅 {}</p>",
                     esc(&n),
                     mx
                 )
@@ -601,32 +601,32 @@ async fn set_public_route(
 
 fn login_body(cfg: &Config) -> String {
     if !cfg.oauth_ready() {
-        return "<h1>🌼 Meadow Market</h1><p class=\"muted\">OAuth is nog niet \
-            geconfigureerd (client_id/secret ontbreken in secrets.json).</p>"
+        return "<h1>🌼 Meadow Market</h1><p class=\"muted\">OAuth is not configured \
+            yet (client_id/secret missing in secrets.json).</p>"
             .to_string();
     }
-    "<h1>🌼 Welkom bij Meadow Market</h1>\
-     <p class=\"muted\">Log in met Discord om je coins en inventory te zien. \
-     Enkel Flowerborns hebben een account.</p>\
-     <a class=\"btn\" href=\"/login\">Inloggen met Discord</a>"
+    "<h1>🌼 Welcome to Meadow Market</h1>\
+     <p class=\"muted\">Log in with Discord to see your coins and inventory. \
+     Only Flowerborns have an account.</p>\
+     <a class=\"btn\" href=\"/login\">Log in with Discord</a>"
         .to_string()
 }
 
 fn rules_body(name: &str) -> String {
     format!(
-        "<h1>🌼 Hoi, {name}</h1>\
-         <p>Je bent ingelogd, maar je hebt (nog) niet de <b>Flowerborn</b>-rol. \
-         Een account op Meadow Market is enkel voor Flowerborns.</p>\
-         <p class=\"muted\">Follow the rules: verdien de Flowerborn-rol in de \
-         Discord-server, dan verschijnt hier je coin-overzicht.</p>\
-         <a class=\"link\" href=\"/logout\">Uitloggen</a>",
+        "<h1>🌼 Hi, {name}</h1>\
+         <p>You're logged in, but you don't have the <b>Flowerborn</b> role (yet). \
+         A Meadow Market account is only for Flowerborns.</p>\
+         <p class=\"muted\">Follow the rules: earn the Flowerborn role in the \
+         Discord server, then your coin overview appears here.</p>\
+         <a class=\"link\" href=\"/logout\">Log out</a>",
         name = esc(name)
     )
 }
 
 fn err_page(msg: &str) -> Response {
     let body = format!(
-        "<h1>🌼 Er ging iets mis</h1><p>{}</p><a class=\"link\" href=\"/\">Terug</a>",
+        "<h1>🌼 Something went wrong</h1><p>{}</p><a class=\"link\" href=\"/\">Back</a>",
         esc(msg)
     );
     (StatusCode::BAD_REQUEST, Html(shell("Meadow Market", "", false, &body))).into_response()
@@ -636,7 +636,7 @@ fn err_page(msg: &str) -> Response {
 
 async fn login(State(st): State<AppState>) -> Response {
     if !st.cfg.oauth_ready() {
-        return err_page("OAuth is nog niet geconfigureerd op de server.");
+        return err_page("OAuth is not configured on the server yet.");
     }
     let state = rand_token();
     let redirect = st.cfg.oauth_redirect();
@@ -663,12 +663,12 @@ async fn callback(
     Query(q): Query<CallbackQuery>,
 ) -> Response {
     let (Some(code), Some(state)) = (q.code, q.state) else {
-        return err_page("Login werd afgebroken of geweigerd.");
+        return err_page("Login was cancelled or denied.");
     };
     // CSRF: de state moet overeenkomen met de cookie die we bij /login zetten.
     match cookie(&headers, "oauth_state") {
         Some(c) if c == state => {}
-        _ => return err_page("Ongeldige of verlopen login-state. Probeer opnieuw."),
+        _ => return err_page("Invalid or expired login state. Please try again."),
     }
 
     let redirect = st.cfg.oauth_redirect();
@@ -689,13 +689,13 @@ async fn callback(
     {
         Ok(r) => match r.json().await {
             Ok(v) => v,
-            Err(e) => return err_page(&format!("Token-antwoord onleesbaar: {e}")),
+            Err(e) => return err_page(&format!("Token response unreadable: {e}")),
         },
-        Err(e) => return err_page(&format!("Token-uitwisseling mislukt: {e}")),
+        Err(e) => return err_page(&format!("Token exchange failed: {e}")),
     };
     let access = token["access_token"].as_str().unwrap_or_default();
     if access.is_empty() {
-        return err_page("Geen access_token van Discord ontvangen.");
+        return err_page("No access_token received from Discord.");
     }
 
     let me: Value = match st
@@ -708,19 +708,19 @@ async fn callback(
     {
         Ok(r) => match r.json().await {
             Ok(v) => v,
-            Err(e) => return err_page(&format!("Profiel-antwoord onleesbaar: {e}")),
+            Err(e) => return err_page(&format!("Profile response unreadable: {e}")),
         },
-        Err(e) => return err_page(&format!("Profiel ophalen mislukt: {e}")),
+        Err(e) => return err_page(&format!("Failed to fetch profile: {e}")),
     };
     let uid = me["id"].as_str().unwrap_or_default().to_string();
     if uid.is_empty() {
-        return err_page("Geen Discord-gebruiker-ID ontvangen.");
+        return err_page("No Discord user ID received.");
     }
     let name = me["global_name"]
         .as_str()
         .filter(|s| !s.is_empty())
         .or_else(|| me["username"].as_str())
-        .unwrap_or("onbekend")
+        .unwrap_or("unknown")
         .to_string();
 
     let sess = rand_token();
@@ -767,13 +767,13 @@ struct StatusQuery {
 async fn api_status(State(st): State<AppState>, Query(q): Query<StatusQuery>) -> JsonResp {
     let uid = q.user_id.trim().to_string();
     if !is_digits(&uid) {
-        return bad("Geef een geldig Discord user-ID (cijfers).");
+        return bad("Enter a valid Discord user ID (digits).");
     }
     match st.dc.has_role(&uid, &st.cfg.role_id).await {
         Ok(Some(has)) => (StatusCode::OK, Json(json!({"ok": true, "has_role": has}))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(json!({"ok": false, "error": "Die gebruiker is geen lid van de guild."})),
+            Json(json!({"ok": false, "error": "That user is not a member of the guild."})),
         ),
         Err(e) => bad(&e),
     }
@@ -788,7 +788,7 @@ struct ToggleBody {
 async fn api_toggle(State(st): State<AppState>, Json(b): Json<ToggleBody>) -> JsonResp {
     let uid = b.user_id.trim().to_string();
     if !is_digits(&uid) {
-        return bad("Geef een geldig Discord user-ID (cijfers).");
+        return bad("Enter a valid Discord user ID (digits).");
     }
     if let Err(e) = st.dc.set_role(&uid, &st.cfg.role_id, b.enable).await {
         return bad(&e);
@@ -850,17 +850,17 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                                 now_secs() + item.duration as f64,
                                 &item.name,
                             );
-                            extra = format!(" Toegang voor {} toegekend.", human_duration(item.duration));
+                            extra = format!(" Access granted for {}.", human_duration(item.duration));
                         } else {
-                            extra = " Permanente toegang toegekend.".to_string();
+                            extra = " Permanent access granted.".to_string();
                         }
                     }
-                    Err(e) => extra = format!(" (Rol kon niet toegekend worden: {e})"),
+                    Err(e) => extra = format!(" (Role could not be granted: {e})"),
                 }
             }
             format!(
                 "/market?ok={}",
-                pct(&format!("Gekocht! Nieuw saldo: {bal} coins.{extra}"))
+                pct(&format!("Purchased! New balance: {bal} coins.{extra}"))
             )
         }
         Err(e) => format!("/market?err={}", pct(&e)),
@@ -868,13 +868,13 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
     Redirect::to(&dest).into_response()
 }
 
-/// Mensvriendelijke duur ("1 dag", "24 uur", "30 min").
+/// Human-friendly duration ("1 day", "24 h", "30 min").
 fn human_duration(secs: i64) -> String {
     if secs % 86400 == 0 {
         let d = secs / 86400;
-        format!("{d} dag{}", if d == 1 { "" } else { "en" })
+        format!("{d} day{}", if d == 1 { "" } else { "s" })
     } else if secs % 3600 == 0 {
-        format!("{} uur", secs / 3600)
+        format!("{} h", secs / 3600)
     } else {
         format!("{} min", secs / 60)
     }
@@ -889,20 +889,20 @@ fn admin_item(it: &db::Item) -> String {
         "<div class=\"aitem\"><div class=\"thumb\">{thumb}</div>\
          <form method=\"post\" action=\"/admin/item/update\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-           <input name=\"name\" value=\"{name}\" placeholder=\"naam\">\
+           <input name=\"name\" value=\"{name}\" placeholder=\"name\">\
            <div class=\"prow\">\
-             <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"prijs\">\
+             <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"price\">\
              <button class=\"btn small\" type=\"submit\">✓</button></div>\
-           <input name=\"role_id\" value=\"{role}\" placeholder=\"rol-ID (bij aankoop)\">\
+           <input name=\"role_id\" value=\"{role}\" placeholder=\"role ID (granted on buy)\">\
            <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\" \
-             placeholder=\"duur in min (0 = permanent)\"></form>\
+             placeholder=\"duration in min (0 = permanent)\"></form>\
          <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <input type=\"file\" name=\"file\" accept=\"image/*\">\
            <button class=\"btn small ghost\" type=\"submit\">Upload</button></form>\
-         <form method=\"post\" action=\"/admin/item/delete\" onsubmit=\"return confirm('Item verwijderen?')\">\
+         <form method=\"post\" action=\"/admin/item/delete\" onsubmit=\"return confirm('Delete item?')\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-           <button class=\"btn small danger\" type=\"submit\">Verwijder</button></form></div>",
+           <button class=\"btn small danger\" type=\"submit\">Delete</button></form></div>",
         thumb = item_thumb(it),
         id = it.id,
         name = esc(&it.name),
@@ -924,10 +924,10 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
                    <form class=\"rn\" method=\"post\" action=\"/admin/shelf/rename\">\
                      <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
                      <input name=\"title\" value=\"{title}\">\
-                     <button class=\"btn small\" type=\"submit\">Hernoem</button></form>\
-                   <form method=\"post\" action=\"/admin/shelf/delete\" onsubmit=\"return confirm('Schap en items verwijderen?')\">\
+                     <button class=\"btn small\" type=\"submit\">Rename</button></form>\
+                   <form method=\"post\" action=\"/admin/shelf/delete\" onsubmit=\"return confirm('Delete shelf and its items?')\">\
                      <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
-                     <button class=\"btn small danger\" type=\"submit\">Verwijder schap</button></form></div>\
+                     <button class=\"btn small danger\" type=\"submit\">Delete shelf</button></form></div>\
                  <div class=\"aitems\">{items}\
                    <form method=\"post\" action=\"/admin/item/add\">\
                      <input type=\"hidden\" name=\"zone\" value=\"shelf\">\
@@ -948,14 +948,14 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
     );
 
     let body = format!(
-        "<h1>⚙ Market-beheer</h1>\
-         <p class=\"muted\">Schappen, items, prijzen en afbeeldingen. Wijzigingen zijn \
-         meteen live op de Market.</p>{shelves}{lucky}\
+        "<h1>⚙ Shop management</h1>\
+         <p class=\"muted\">Shelves, items, prices and images. Changes are live on the \
+         Shop right away.</p>{shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
-           <input name=\"title\" placeholder=\"Naam van nieuw schap\" required>\
-           <button class=\"btn\" type=\"submit\">＋ Schap</button></form>"
+           <input name=\"title\" placeholder=\"New shelf name\" required>\
+           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>"
     );
-    Html(shell("Beheer — Meadow Market", &nav_html("admin", true), true, &body)).into_response()
+    Html(shell("Manage — Meadow Market", &nav_html("admin", true), true, &body)).into_response()
 }
 
 #[derive(Deserialize)]

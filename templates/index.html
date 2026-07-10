@@ -9,7 +9,7 @@
 <body>
   <main class="hero">
     <h1>Meadow Market</h1>
-    <p class="tagline">{{ROLE_LABEL}} — aan/uit</p>
+    <p class="tagline">{{ROLE_LABEL}} — on/off</p>
 
     <div class="panel">
       <div id="result" class="result" hidden>
@@ -36,9 +36,9 @@
     function render() {
       $("result").hidden = hasRole === null;
       if (hasRole === null) return;
-      $("state").textContent = hasRole ? ROLE_LABEL + " staat AAN" : ROLE_LABEL + " staat UIT";
+      $("state").textContent = hasRole ? ROLE_LABEL + " is ON" : ROLE_LABEL + " is OFF";
       $("state").className = "badge " + (hasRole ? "on" : "off");
-      $("toggle").textContent = hasRole ? "Zet uit" : "Zet aan";
+      $("toggle").textContent = hasRole ? "Turn off" : "Turn on";
       $("toggle").className = "toggle " + (hasRole ? "danger" : "primary");
     }
 
@@ -62,7 +62,7 @@
       $("toggle").disabled = false;
       if (!d.ok) { showMsg(d.error, "err"); return; }
       hasRole = d.has_role; render();
-      showMsg(hasRole ? ROLE_LABEL + " toegekend ✓" : ROLE_LABEL + " verwijderd ✓", "ok");
+      showMsg(hasRole ? ROLE_LABEL + " granted ✓" : ROLE_LABEL + " removed ✓", "ok");
     }
 
     $("toggle").addEventListener("click", toggle);

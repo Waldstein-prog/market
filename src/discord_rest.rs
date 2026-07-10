@@ -82,11 +82,11 @@ impl Discord {
 
 fn explain(code: u16, body: &str) -> String {
     match code {
-        401 => "Bot Token ongeldig (401).".to_string(),
-        403 => "Geen toestemming (403): bot mist 'Manage Roles' of zijn rol staat niet hoger dan de doelrol."
+        401 => "Bot token invalid (401).".to_string(),
+        403 => "No permission (403): the bot lacks 'Manage Roles' or its role is not above the target role."
             .to_string(),
-        404 => "Niet gevonden (404): guild, gebruiker of rol bestaat niet.".to_string(),
-        429 => "Rate limited (429): even wachten.".to_string(),
-        c => format!("Discord-fout ({c}): {body}"),
+        404 => "Not found (404): guild, user or role does not exist.".to_string(),
+        429 => "Rate limited (429): please wait.".to_string(),
+        c => format!("Discord error ({c}): {body}"),
     }
 }

@@ -515,7 +515,7 @@ pub fn delete_item(pool: &DbPool, id: i64) {
 /// item (snapshot van naam/afbeelding/prijs) in de inventory. Atomisch.
 /// Ok(nieuw_saldo) of Err(reden).
 pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64, Item), String> {
-    let item = get_item(pool, item_id).ok_or("Dit item bestaat niet meer.")?;
+    let item = get_item(pool, item_id).ok_or("This item no longer exists.")?;
     let mut conn = pool.get().expect("db");
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let balance: i64 = tx
@@ -525,7 +525,7 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
         .unwrap_or(0);
     if balance < item.price {
         return Err(format!(
-            "Niet genoeg coins: je hebt {balance}, {} kost {}.",
+            "Not enough coins: you have {balance}, {} costs {}.",
             item.name, item.price
         ));
     }

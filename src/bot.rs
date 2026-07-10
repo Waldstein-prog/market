@@ -46,7 +46,7 @@ pub async fn coins(ctx: Context<'_>) -> Result<(), Error> {
     tracing::info!("!coins opgevraagd door {}", ctx.author().name);
     let rows = db::leaderboard(&ctx.data().pool, LEADERBOARD_SIZE);
     let desc = if rows.is_empty() {
-        "Nog niemand heeft coins. Stuur een bericht om er te verdienen!".to_string()
+        "No one has coins yet. Send a message to earn some!".to_string()
     } else {
         rows.iter()
             .enumerate()
