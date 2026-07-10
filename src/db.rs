@@ -11,10 +11,13 @@ pub fn init_pool(path: &str) -> DbPool {
     let conn = pool.get().expect("kan DB-verbinding niet ophalen");
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS coins (
-            user_id    TEXT PRIMARY KEY,
-            username   TEXT NOT NULL,
-            coins      INTEGER NOT NULL DEFAULT 0,
-            last_award REAL NOT NULL DEFAULT 0
+            user_id     TEXT PRIMARY KEY,
+            username    TEXT NOT NULL,
+            coins       INTEGER NOT NULL DEFAULT 0,
+            last_award  REAL NOT NULL DEFAULT 0,
+            last_daily  REAL NOT NULL DEFAULT 0,
+            max_balance INTEGER NOT NULL DEFAULT 0,
+            is_public   INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token    TEXT PRIMARY KEY,
@@ -24,20 +27,35 @@ pub fn init_pool(path: &str) -> DbPool {
         );",
     )
     .expect("kan tabel niet aanmaken");
+
+    // Migratie voor bestaande DB's: kolommen toevoegen indien nog afwezig,
+    // en max_balance backfillen op het huidige saldo (anders start het op 0).
+    ensure_column(&conn, "coins", "last_daily", "REAL NOT NULL DEFAULT 0");
+    ensure_column(&conn, "coins", "max_balance", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "coins", "is_public", "INTEGER NOT NULL DEFAULT 0");
+    conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
+        .expect("backfill max_balance");
     pool
 }
 
-/// Huidig coin-saldo van een lid (0 als hij nog niks heeft).
-pub fn get_coins(pool: &DbPool, user_id: &str) -> i64 {
-    let conn = pool.get().expect("db");
-    conn.query_row(
-        "SELECT coins FROM coins WHERE user_id = ?1",
-        params![user_id],
-        |r| r.get(0),
-    )
-    .optional()
-    .expect("query coins")
-    .unwrap_or(0)
+/// Bestaat kolom `col` in `table`? (voor idempotente migraties.)
+fn column_exists(conn: &rusqlite::Connection, table: &str, col: &str) -> bool {
+    let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
+        return false;
+    };
+    let names: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    names.iter().any(|n| n == col)
+}
+
+/// Voeg een kolom toe als hij nog niet bestaat (SQLite ALTER TABLE ADD COLUMN).
+fn ensure_column(conn: &rusqlite::Connection, table: &str, col: &str, decl: &str) {
+    if !column_exists(conn, table, col) {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"), [])
+            .expect("kan kolom niet toevoegen");
+    }
 }
 
 /// Bewaar een nieuwe login-sessie (cookie-token → Discord-identiteit).
@@ -82,16 +100,18 @@ pub fn get_last_award(pool: &DbPool, user_id: &str) -> f64 {
     .unwrap_or(0.0)
 }
 
-/// Tel `amount` coins bij, update username + last_award. Returnt het nieuwe totaal.
+/// Tel `amount` coins bij, update username + last_award, houd max_balance bij.
+/// Returnt het nieuwe totaal.
 pub fn award(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64) -> i64 {
     let conn = pool.get().expect("db");
     conn.execute(
-        "INSERT INTO coins (user_id, username, coins, last_award)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO coins (user_id, username, coins, last_award, max_balance)
+         VALUES (?1, ?2, ?3, ?4, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
-             coins      = coins + excluded.coins,
-             username   = excluded.username,
-             last_award = excluded.last_award",
+             coins       = coins + excluded.coins,
+             username    = excluded.username,
+             last_award  = excluded.last_award,
+             max_balance = MAX(max_balance, coins + excluded.coins)",
         params![user_id, username, amount, ts],
     )
     .expect("insert award");
@@ -101,6 +121,105 @@ pub fn award(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64)
         |r| r.get(0),
     )
     .expect("query totaal")
+}
+
+/// Unix-tijdstip van de laatste daily-claim (0.0 als de user er nog geen deed).
+pub fn get_last_daily(pool: &DbPool, user_id: &str) -> f64 {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT last_daily FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("query last_daily")
+    .unwrap_or(0.0)
+}
+
+/// Daily-beloning: tel `amount` bij, zet last_daily (eigen 24u-cooldown),
+/// houd max_balance bij. Returnt het nieuwe totaal.
+pub fn award_daily(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coins (user_id, username, coins, last_daily, max_balance)
+         VALUES (?1, ?2, ?3, ?4, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET
+             coins       = coins + excluded.coins,
+             username    = excluded.username,
+             last_daily  = excluded.last_daily,
+             max_balance = MAX(max_balance, coins + excluded.coins)",
+        params![user_id, username, amount, ts],
+    )
+    .expect("insert daily");
+    conn.query_row(
+        "SELECT coins FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )
+    .expect("query totaal")
+}
+
+/// (saldo, hoogste saldo ooit, publiek?) voor de banking-pagina.
+pub fn get_stats(pool: &DbPool, user_id: &str) -> (i64, i64, bool) {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT coins, max_balance, is_public FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)? != 0)),
+    )
+    .optional()
+    .expect("query stats")
+    .unwrap_or((0, 0, false))
+}
+
+/// Zet de publiek-vlag (of het saldo op het leaderboard mag verschijnen).
+pub fn set_public(pool: &DbPool, user_id: &str, username: &str, public: bool) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coins (user_id, username, is_public)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET
+             is_public = excluded.is_public,
+             username  = excluded.username",
+        params![user_id, username, public as i64],
+    )
+    .expect("set public");
+}
+
+/// Publiek leaderboard: (user_id, username, saldo, max_balance) aflopend op saldo.
+pub fn public_leaderboard(pool: &DbPool, limit: i64) -> Vec<(String, String, i64, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT user_id, username, coins, max_balance FROM coins
+             WHERE is_public = 1 ORDER BY coins DESC, username ASC LIMIT ?1",
+        )
+        .expect("prepare public_leaderboard");
+    let rows = stmt
+        .query_map(params![limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .expect("query public_leaderboard");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// De publieke recordhouder: (user_id, username, max_balance) met het hoogste
+/// max_balance ooit onder de leden die publiek staan. None als niemand publiek staat.
+pub fn public_record(pool: &DbPool) -> Option<(String, String, i64)> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT user_id, username, max_balance FROM coins
+         WHERE is_public = 1 ORDER BY max_balance DESC, username ASC LIMIT 1",
+        [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+    )
+    .optional()
+    .expect("query public_record")
 }
 
 /// (username, coins) aflopend op coins, dan alfabetisch.

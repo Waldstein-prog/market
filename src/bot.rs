@@ -18,6 +18,12 @@ const MAX_COINS: i64 = 3;
 const DEV_FEEDBACK: bool = false; // per bericht coins/cooldown terugkoppelen (dev-only)
 const LEADERBOARD_SIZE: i64 = 10;
 const PREFIX: &str = "!"; // command-prefix; commando's leveren geen coins op
+// --- daily-beloning (embed-knop) ----------------------------------------
+const DAILY_COOLDOWN: f64 = 24.0 * 3600.0; // 24u tussen twee claims
+const DAILY_MIN: i64 = 1; // makkelijk op te schroeven als de daily groter mag
+const DAILY_MAX: i64 = 3;
+const DAILY_CUSTOM_ID: &str = "daily_claim"; // moet matchen met de embed-knop
+const COINS_CHANNEL: &str = "coins"; // publiek kanaal voor "X earned N coins today."
 // ------------------------------------------------------------------------
 
 pub struct Data {
@@ -153,9 +159,98 @@ async fn event_handler(
         serenity::FullEvent::Message { new_message } => {
             handle_message(ctx, new_message, data).await?;
         }
+        serenity::FullEvent::InteractionCreate { interaction } => {
+            if let serenity::Interaction::Component(mc) = interaction {
+                if mc.data.custom_id == DAILY_CUSTOM_ID {
+                    handle_daily(ctx, mc, data).await?;
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
+}
+
+/// Klik op de "Daily"-knop in de embed: éénmaal per 24u coins, met een
+/// ephemeral bevestiging voor de speler + een publiek regeltje in #coins.
+async fn handle_daily(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    let now = now_secs();
+    let uid = mc.user.id.to_string();
+    let name = mc
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| mc.user.name.clone());
+
+    let elapsed = now - db::get_last_daily(&data.pool, &uid);
+    if elapsed < DAILY_COOLDOWN {
+        let left = DAILY_COOLDOWN - elapsed;
+        let hrs = (left / 3600.0).floor() as i64;
+        let mins = ((left % 3600.0) / 60.0).floor() as i64;
+        respond_ephemeral(
+            ctx,
+            mc,
+            &format!("🎁 You already claimed your daily. Come back in **{hrs}h {mins}m**."),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let amount = rand::thread_rng().gen_range(DAILY_MIN..=DAILY_MAX);
+    let total = db::award_daily(&data.pool, &uid, &name, amount, now);
+    let unit = if amount == 1 { "coin" } else { "coins" };
+    tracing::info!("daily: {name} +{amount} (totaal {total})");
+
+    respond_ephemeral(
+        ctx,
+        mc,
+        &format!("🎁 You earned **{amount}** {unit} today! Your balance is now **{total}** 🪙"),
+    )
+    .await?;
+
+    // Publiek regeltje in het #coins-kanaal (indien aanwezig in de guild).
+    if let Some(chan) = find_coins_channel(ctx, data).await {
+        let _ = chan
+            .say(&ctx.http, format!("{name} earned {amount} {unit} today."))
+            .await;
+    }
+    Ok(())
+}
+
+/// Antwoord op een component-interactie met een privé (ephemeral) bericht.
+async fn respond_ephemeral(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+    text: &str,
+) -> Result<(), Error> {
+    mc.create_response(
+        &ctx.http,
+        serenity::CreateInteractionResponse::Message(
+            serenity::CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .content(text),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Zoek het tekstkanaal met de naam `COINS_CHANNEL` in de geconfigureerde guild.
+async fn find_coins_channel(ctx: &serenity::Context, data: &Data) -> Option<serenity::ChannelId> {
+    let raw: u64 = data.cfg.guild_id.parse().ok()?;
+    if raw == 0 {
+        return None;
+    }
+    let gid = serenity::GuildId::new(raw);
+    let channels = gid.channels(&ctx.http).await.ok()?;
+    channels
+        .into_iter()
+        .find(|(_, ch)| ch.name == COINS_CHANNEL && ch.kind == serenity::ChannelType::Text)
+        .map(|(id, _)| id)
 }
 
 pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {

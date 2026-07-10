@@ -7,7 +7,7 @@
 //! - `/admin`       de Fase-I rol-toggle (intern beheertool, ongewijzigd).
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Form, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{COOKIE, SET_COOKIE},
@@ -49,6 +49,9 @@ pub async fn serve(cfg: Config, pool: DbPool) {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/market", get(market))
+        .route("/leaderboard", get(leaderboard_page))
+        .route("/public", post(set_public_route))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", get(logout))
@@ -120,7 +123,7 @@ fn esc(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn shell(title: &str, body: &str) -> String {
+fn shell(title: &str, nav: &str, body: &str) -> String {
     format!(
         r#"<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -129,9 +132,15 @@ fn shell(title: &str, body: &str) -> String {
 *{{box-sizing:border-box}}
 body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
   font:16px/1.5 system-ui,sans-serif;background:#0e1510;color:#e8f0e4}}
-.topbar{{background:{MEADOW};color:#0e1510;font-weight:700;font-size:1.1rem;
-  letter-spacing:.02em;padding:.7rem 1.25rem;
-  box-shadow:0 2px 10px rgba(0,0,0,.35)}}
+.topbar{{background:{MEADOW};color:#0e1510;padding:.5rem 1rem;
+  box-shadow:0 2px 10px rgba(0,0,0,.35);
+  display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}}
+.brand{{font-weight:700;font-size:1.1rem;letter-spacing:.02em}}
+.topnav{{margin-left:auto;display:flex;gap:.15rem;flex-wrap:wrap}}
+.topnav a{{padding:.35rem .7rem;border-radius:9px;text-decoration:none;
+  color:#0e1510;font-weight:600;font-size:.9rem;white-space:nowrap;opacity:.8}}
+.topnav a:hover{{background:rgba(14,21,16,.13);opacity:1}}
+.topnav a.active{{background:#0e1510;color:{MEADOW};opacity:1}}
 .content{{flex:1;display:grid;place-items:center;padding:1rem}}
 .card{{background:#182319;border:1px solid #2c3d2a;border-radius:18px;
   padding:2rem 2.25rem;max-width:26rem;width:calc(100% - 2rem);
@@ -143,35 +152,203 @@ a.btn,button.btn{{display:inline-block;margin-top:1rem;padding:.7rem 1.15rem;
   border:0;border-radius:12px;background:{MEADOW};color:#0e1510;font-weight:600;
   text-decoration:none;cursor:pointer;font-size:1rem}}
 a.link{{color:{MEADOW}}}
-</style></head><body><header class="topbar">🌼 Meadow Market</header>
+.statrow{{display:flex;justify-content:space-between;align-items:center;
+  padding:.7rem .1rem;border-top:1px solid #22301f}}
+.statrow .k{{color:#9db095;font-size:.92rem}}
+.pill{{display:inline-block;padding:.25rem .65rem;border-radius:999px;
+  font-size:.8rem;font-weight:700}}
+.pill.on{{background:{MEADOW};color:#0e1510}}
+.pill.off{{background:#2c3d2a;color:#9db095}}
+.switch{{position:relative;display:inline-block;width:48px;height:28px;flex:none}}
+.switch input{{opacity:0;width:0;height:0}}
+.slider{{position:absolute;inset:0;background:#2c3d2a;border-radius:999px;
+  cursor:pointer;transition:background .2s}}
+.slider::before{{content:"";position:absolute;height:22px;width:22px;left:3px;top:3px;
+  background:#f4f8f1;border-radius:50%;transition:transform .2s;
+  box-shadow:0 1px 3px rgba(0,0,0,.45)}}
+.switch input:checked + .slider{{background:{MEADOW}}}
+.switch input:checked + .slider::before{{transform:translateX(20px)}}
+.soon{{margin-top:1rem;padding:.8rem 1rem;border:1px dashed #3a4d38;
+  border-radius:12px;color:#9db095;font-size:.92rem}}
+.lb{{list-style:none;margin:.5rem 0 0;padding:0}}
+.lb li{{display:flex;align-items:center;gap:.6rem;padding:.55rem .35rem;
+  border-bottom:1px solid #1d281c}}
+.lb .rk{{width:1.9rem;text-align:center;font-weight:700;color:#9db095}}
+.lb .nm{{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.lb .amt{{font-weight:700;color:{MEADOW}}}
+.lb li.me{{background:#16211590;border-radius:10px}}
+</style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span>{nav}</header>
 <div class="content"><div class="card">{body}</div></div></body></html>"#
     )
 }
 
 // --- pagina's -----------------------------------------------------------
 
+/// Heeft dit lid de Flowerborn-rol (voorlopig de geconfigureerde `role_id`)?
+async fn is_flowerborn(st: &AppState, uid: &str) -> bool {
+    st.dc
+        .has_role(uid, &st.cfg.role_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+/// (uid, naam) van de ingelogde Flowerborn, of None (niet ingelogd / geen rol).
+async fn require_flowerborn(st: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
+    let (uid, name) = cookie(headers, "session").and_then(|t| db::get_session(&st.pool, &t))?;
+    if is_flowerborn(st, &uid).await {
+        Some((uid, name))
+    } else {
+        None
+    }
+}
+
+/// Navigatiebalk voor de ingelogde secties. `active` = "coins"|"market"|"leaderboard".
+fn nav_html(active: &str) -> String {
+    let item = |href: &str, key: &str, label: &str| {
+        let cls = if key == active { " class=\"active\"" } else { "" };
+        format!("<a{cls} href=\"{href}\">{label}</a>")
+    };
+    format!(
+        "<nav class=\"topnav\">{}{}{}{}</nav>",
+        item("/", "coins", "🪙 Coins"),
+        item("/market", "market", "🛒 Market"),
+        item("/leaderboard", "leaderboard", "🏆 Leaderboard"),
+        item("/logout", "logout", "↪ Uitloggen"),
+    )
+}
+
 async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
     let session = cookie(&headers, "session").and_then(|t| db::get_session(&st.pool, &t));
 
-    let body = match session {
-        None => login_body(&st.cfg),
+    let (nav, body) = match session {
+        None => (String::new(), login_body(&st.cfg)),
         Some((uid, name)) => {
-            let is_flowerborn = st
-                .dc
-                .has_role(&uid, &st.cfg.role_id)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-            if is_flowerborn {
-                let coins = db::get_coins(&st.pool, &uid);
-                account_body(&name, &uid, coins)
+            if is_flowerborn(&st, &uid).await {
+                let (coins, max_balance, is_public) = db::get_stats(&st.pool, &uid);
+                (
+                    nav_html("coins"),
+                    coins_body(&name, &uid, coins, max_balance, is_public),
+                )
             } else {
-                rules_body(&name)
+                (String::new(), rules_body(&name))
             }
         }
     };
-    Html(shell("Meadow Market", &body))
+    Html(shell("Meadow Market", &nav, &body))
+}
+
+/// Coins-pagina: mini banking-app — saldo, hoogste saldo ooit, publiek-toggle.
+fn coins_body(name: &str, uid: &str, coins: i64, max_balance: i64, is_public: bool) -> String {
+    let checked = if is_public { " checked" } else { "" };
+    format!(
+        "<h1>🌼 Hallo, {name}</h1>\
+         <p class=\"muted\">Je saldo op dit moment</p>\
+         <div class=\"coins\">🪙 {coins}</div>\
+         <div class=\"statrow\"><span class=\"k\">Hoogste saldo ooit</span>\
+           <span>🏅 <b>{max}</b></span></div>\
+         <div class=\"statrow\"><span class=\"k\">public</span>\
+           <form method=\"post\" action=\"/public\" style=\"margin:0\">\
+             <label class=\"switch\"><input type=\"checkbox\" name=\"public\" \
+               onchange=\"this.form.submit()\"{checked}><span class=\"slider\"></span></label>\
+           </form></div>\
+         <p class=\"muted\" style=\"margin-top:1.2rem\">Discord-ID: {uid}</p>",
+        name = esc(name),
+        uid = esc(uid),
+        coins = coins,
+        max = max_balance,
+    )
+}
+
+/// Market-sectie — placeholder tot de shop-economie er is.
+async fn market(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_uid, name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let body = format!(
+        "<h1>🛒 Market</h1>\
+         <p class=\"muted\">Hallo {name} — hier komt de shop.</p>\
+         <div class=\"soon\">🌱 <b>Binnenkort:</b> koop items met je 🪙 coins. \
+         Een dagelijkse selectie van vier plekken, eenmalige items en een \
+         magisch slot. (In aanbouw.)</div>",
+        name = esc(&name),
+    );
+    Html(shell("Market — Meadow Market", &nav_html("market"), &body)).into_response()
+}
+
+/// Leaderboard-sectie: publieke saldo's aflopend, kroontje bij de recordhouder.
+async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((me, _name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let rows = db::public_leaderboard(&st.pool, 25);
+    let record = db::public_record(&st.pool);
+    let record_uid = record.as_ref().map(|(u, _, _)| u.clone());
+
+    let body = if rows.is_empty() {
+        "<h1>🏆 Leaderboard</h1>\
+             <p class=\"muted\">Nog niemand heeft z'n saldo publiek gezet. \
+             Zet het jouwe publiek op de <a class=\"link\" href=\"/\">Coins</a>-pagina \
+             om hier te verschijnen.</p>"
+            .to_string()
+    } else {
+        let items = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (uid, uname, coins, _mx))| {
+                let rk = match i {
+                    0 => "🥇".to_string(),
+                    1 => "🥈".to_string(),
+                    2 => "🥉".to_string(),
+                    n => format!("{}", n + 1),
+                };
+                let crown = if record_uid.as_deref() == Some(uid.as_str()) {
+                    " 👑"
+                } else {
+                    ""
+                };
+                let me_cls = if *uid == me { " class=\"me\"" } else { "" };
+                format!(
+                    "<li{me_cls}><span class=\"rk\">{rk}</span>\
+                     <span class=\"nm\">{name}{crown}</span>\
+                     <span class=\"amt\">🪙 {coins}</span></li>",
+                    name = esc(uname),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let note = record
+            .map(|(_, n, mx)| {
+                format!(
+                    "<p class=\"muted\" style=\"margin-top:1rem\">👑 Hoogste saldo ooit: \
+                     <b>{}</b> met 🏅 {}</p>",
+                    esc(&n),
+                    mx
+                )
+            })
+            .unwrap_or_default();
+        format!("<h1>🏆 Leaderboard</h1><ol class=\"lb\">{items}</ol>{note}")
+    };
+    Html(shell("Leaderboard — Meadow Market", &nav_html("leaderboard"), &body)).into_response()
+}
+
+#[derive(Deserialize)]
+struct PublicForm {
+    // Checkbox: aanwezig (=Some) betekent aangevinkt/publiek; afwezig = privé.
+    public: Option<String>,
+}
+
+/// public-toggle vanaf de Coins-pagina (checkbox auto-submit → terug naar `/`).
+async fn set_public_route(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<PublicForm>,
+) -> Response {
+    if let Some((uid, name)) = require_flowerborn(&st, &headers).await {
+        db::set_public(&st.pool, &uid, &name, f.public.is_some());
+    }
+    Redirect::to("/").into_response()
 }
 
 fn login_body(cfg: &Config) -> String {
@@ -185,20 +362,6 @@ fn login_body(cfg: &Config) -> String {
      Enkel Flowerborns hebben een account.</p>\
      <a class=\"btn\" href=\"/login\">Inloggen met Discord</a>"
         .to_string()
-}
-
-fn account_body(name: &str, uid: &str, coins: i64) -> String {
-    format!(
-        "<h1>🌼 Hallo, {name}</h1>\
-         <p class=\"muted\">Je saldo op dit moment</p>\
-         <div class=\"coins\">🪙 {coins}</div>\
-         <p class=\"muted\">Discord-ID: {uid}<br>\
-         (Inventory &amp; market komen hier later.)</p>\
-         <a class=\"link\" href=\"/logout\">Uitloggen</a>",
-        name = esc(name),
-        uid = esc(uid),
-        coins = coins
-    )
 }
 
 fn rules_body(name: &str) -> String {
@@ -218,7 +381,7 @@ fn err_page(msg: &str) -> Response {
         "<h1>🌼 Er ging iets mis</h1><p>{}</p><a class=\"link\" href=\"/\">Terug</a>",
         esc(msg)
     );
-    (StatusCode::BAD_REQUEST, Html(shell("Meadow Market", &body))).into_response()
+    (StatusCode::BAD_REQUEST, Html(shell("Meadow Market", "", &body))).into_response()
 }
 
 // --- OAuth2-flow --------------------------------------------------------
