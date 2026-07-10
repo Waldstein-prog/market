@@ -16,8 +16,9 @@ pub fn init_pool(path: &str) -> DbPool {
             coins       INTEGER NOT NULL DEFAULT 0,
             last_award  REAL NOT NULL DEFAULT 0,
             last_daily  REAL NOT NULL DEFAULT 0,
-            max_balance INTEGER NOT NULL DEFAULT 0,
-            is_public   INTEGER NOT NULL DEFAULT 0
+            max_balance  INTEGER NOT NULL DEFAULT 0,
+            is_public    INTEGER NOT NULL DEFAULT 0,
+            total_earned INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token    TEXT PRIMARY KEY,
@@ -65,11 +66,18 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "last_daily", "REAL NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "max_balance", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "is_public", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "coins", "total_earned", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
     conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
         .expect("backfill max_balance");
+    // total_earned kunnen we niet reconstrueren; als ondergrens het hoogste saldo ooit.
+    conn.execute(
+        "UPDATE coins SET total_earned = max_balance WHERE total_earned < max_balance",
+        [],
+    )
+    .expect("backfill total_earned");
     drop(conn);
     seed_shop(&pool);
     seed_hytale(&pool);
@@ -218,13 +226,14 @@ pub fn get_last_award(pool: &DbPool, user_id: &str) -> f64 {
 pub fn award(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64) -> i64 {
     let conn = pool.get().expect("db");
     conn.execute(
-        "INSERT INTO coins (user_id, username, coins, last_award, max_balance)
-         VALUES (?1, ?2, ?3, ?4, ?3)
+        "INSERT INTO coins (user_id, username, coins, last_award, max_balance, total_earned)
+         VALUES (?1, ?2, ?3, ?4, ?3, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
-             coins       = coins + excluded.coins,
-             username    = excluded.username,
-             last_award  = excluded.last_award,
-             max_balance = MAX(max_balance, coins + excluded.coins)",
+             coins        = coins + excluded.coins,
+             username     = excluded.username,
+             last_award   = excluded.last_award,
+             max_balance  = MAX(max_balance, coins + excluded.coins),
+             total_earned = total_earned + excluded.coins",
         params![user_id, username, amount, ts],
     )
     .expect("insert award");
@@ -254,13 +263,14 @@ pub fn get_last_daily(pool: &DbPool, user_id: &str) -> f64 {
 pub fn award_daily(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64) -> i64 {
     let conn = pool.get().expect("db");
     conn.execute(
-        "INSERT INTO coins (user_id, username, coins, last_daily, max_balance)
-         VALUES (?1, ?2, ?3, ?4, ?3)
+        "INSERT INTO coins (user_id, username, coins, last_daily, max_balance, total_earned)
+         VALUES (?1, ?2, ?3, ?4, ?3, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
-             coins       = coins + excluded.coins,
-             username    = excluded.username,
-             last_daily  = excluded.last_daily,
-             max_balance = MAX(max_balance, coins + excluded.coins)",
+             coins        = coins + excluded.coins,
+             username     = excluded.username,
+             last_daily   = excluded.last_daily,
+             max_balance  = MAX(max_balance, coins + excluded.coins),
+             total_earned = total_earned + excluded.coins",
         params![user_id, username, amount, ts],
     )
     .expect("insert daily");
@@ -272,17 +282,24 @@ pub fn award_daily(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts
     .expect("query totaal")
 }
 
-/// (saldo, hoogste saldo ooit, publiek?) voor de banking-pagina.
-pub fn get_stats(pool: &DbPool, user_id: &str) -> (i64, i64, bool) {
+/// (saldo, hoogste saldo ooit, publiek?, ooit verdiend) voor de Coins-tab.
+pub fn get_stats(pool: &DbPool, user_id: &str) -> (i64, i64, bool, i64) {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT coins, max_balance, is_public FROM coins WHERE user_id = ?1",
+        "SELECT coins, max_balance, is_public, total_earned FROM coins WHERE user_id = ?1",
         params![user_id],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)? != 0)),
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, i64>(3)?,
+            ))
+        },
     )
     .optional()
     .expect("query stats")
-    .unwrap_or((0, 0, false))
+    .unwrap_or((0, 0, false, 0))
 }
 
 /// Zet de publiek-vlag (of het saldo op het leaderboard mag verschijnen).
@@ -305,7 +322,7 @@ pub fn public_leaderboard(pool: &DbPool, limit: i64) -> Vec<(String, String, i64
     let mut stmt = conn
         .prepare(
             "SELECT user_id, username, coins, max_balance FROM coins
-             WHERE is_public = 1 ORDER BY coins DESC, username ASC LIMIT ?1",
+             ORDER BY coins DESC, username ASC LIMIT ?1",
         )
         .expect("prepare public_leaderboard");
     let rows = stmt
@@ -327,7 +344,7 @@ pub fn public_record(pool: &DbPool) -> Option<(String, String, i64)> {
     let conn = pool.get().expect("db");
     conn.query_row(
         "SELECT user_id, username, max_balance FROM coins
-         WHERE is_public = 1 ORDER BY max_balance DESC, username ASC LIMIT 1",
+         ORDER BY max_balance DESC, username ASC LIMIT 1",
         [],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
     )

@@ -150,15 +150,28 @@ fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
 *{{box-sizing:border-box}}
 body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
   font:16px/1.5 system-ui,sans-serif;background:#0e1510;color:#e8f0e4}}
-.topbar{{background:{MEADOW};color:#0e1510;padding:.5rem 1rem;
-  box-shadow:0 2px 10px rgba(0,0,0,.35);
-  display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}}
+.topbar{{background:{MEADOW};color:#0e1510;padding:.6rem 1.1rem;
+  box-shadow:0 2px 10px rgba(0,0,0,.35)}}
 .brand{{font-weight:700;font-size:1.1rem;letter-spacing:.02em}}
-.topnav{{margin-left:auto;display:flex;gap:.15rem;flex-wrap:wrap}}
-.topnav a{{padding:.35rem .7rem;border-radius:9px;text-decoration:none;
-  color:#0e1510;font-weight:600;font-size:.9rem;white-space:nowrap;opacity:.8}}
-.topnav a:hover{{background:rgba(14,21,16,.13);opacity:1}}
-.topnav a.active{{background:#0e1510;color:{MEADOW};opacity:1}}
+.nav{{display:flex;gap:.3rem;margin:0 0 1.3rem;flex-wrap:wrap}}
+.nav a{{flex:1 1 auto;text-align:center;padding:.5rem .7rem;border-radius:11px;
+  text-decoration:none;color:#cfe0c8;font-weight:600;font-size:.92rem;
+  background:#141d14;white-space:nowrap}}
+.nav a.active{{background:{MEADOW};color:#0e1510}}
+.nav a:hover:not(.active){{background:#20301e}}
+.subtabs{{display:flex;gap:.3rem;margin:0 0 1.2rem;flex-wrap:wrap}}
+.subtab{{padding:.4rem .85rem;border-radius:9px;cursor:pointer;font-weight:600;
+  font-size:.92rem;color:#9db095;background:transparent;border:1px solid #2c3d2a}}
+.subtab.on{{background:#141d14;color:#e8f0e4;border-color:#3a4d38}}
+.panel{{display:none}}
+.panel.on{{display:block}}
+.earned{{font-size:2.6rem;font-weight:800;color:{MEADOW};text-align:center;margin:.2rem 0 0;line-height:1}}
+.levelrow{{display:flex;align-items:center;gap:.6rem;margin:1.1rem 0}}
+.lvlbadge{{background:{MEADOW};color:#0e1510;font-weight:800;border-radius:9px;
+  padding:.3rem .6rem;font-size:.9rem;white-space:nowrap}}
+.bar{{flex:1;height:14px;background:#0e1510;border:1px solid #2c3d2a;border-radius:999px;overflow:hidden}}
+.fill{{height:100%;background:linear-gradient(90deg,#3f6a2c,{MEADOW});border-radius:999px;transition:width .4s}}
+.lvlnm{{font-variant-numeric:tabular-nums;font-weight:700;color:#cfe0c8;font-size:.85rem;white-space:nowrap}}
 .content{{flex:1;display:grid;place-items:center;padding:1rem}}
 .card{{background:#182319;border:1px solid #2c3d2a;border-radius:18px;
   padding:2rem 2.25rem;max-width:28rem;width:calc(100% - 2rem);
@@ -254,8 +267,8 @@ a.link{{color:{MEADOW}}}
 .lb .nm{{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .lb .amt{{font-weight:700;color:{MEADOW}}}
 .lb li.me{{background:#16211590;border-radius:10px}}
-</style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span>{nav}</header>
-<div class="content"><div class="{card_cls}">{body}</div></div></body></html>"#
+</style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span></header>
+<div class="content"><div class="{card_cls}">{nav}{body}</div></div></body></html>"#
     )
 }
 
@@ -293,14 +306,41 @@ fn nav_html(active: &str, admin: bool) -> String {
         String::new()
     };
     format!(
-        "<nav class=\"topnav\">{}{}{}{}{}{}</nav>",
-        item("/", "coins", "🪙 Coins"),
+        "<nav class=\"nav\">{}{}{}{}{}</nav>",
+        item("/", "home", "🎒 Inventory"),
         item("/market", "market", "🛒 Shop"),
-        item("/inventory", "inventory", "🎒 Inventory"),
         item("/leaderboard", "leaderboard", "🏆 Leaderboard"),
         admin_link,
         item("/logout", "logout", "↪ Log out"),
     )
+}
+
+// --- levelsysteem (op basis van coins ooit verdiend) --------------------
+const MAX_LEVEL: i64 = 10;
+const LEVEL_BASE: f64 = 50.0; // coins nodig van level 1 → 2
+const LEVEL_GROWTH: f64 = 1.6; // exponentiële groei per level
+
+/// Coins (verdiend) nodig om van level `l` naar `l+1` te gaan.
+fn level_cost(l: i64) -> i64 {
+    (LEVEL_BASE * LEVEL_GROWTH.powi((l - 1) as i32)).round() as i64
+}
+
+/// (level 1..=MAX, coins in dit level, coins nodig voor dit level).
+/// Op max level: (MAX, verdiend-boven-drempel, 0).
+fn level_info(earned: i64) -> (i64, i64, i64) {
+    let mut level = 1i64;
+    let mut floor = 0i64;
+    loop {
+        if level >= MAX_LEVEL {
+            return (MAX_LEVEL, earned - floor, 0);
+        }
+        let cost = level_cost(level);
+        if earned < floor + cost {
+            return (level, earned - floor, cost);
+        }
+        floor += cost;
+        level += 1;
+    }
 }
 
 /// Adminlijst (Discord-ID's) die de shop mogen beheren.
@@ -324,77 +364,107 @@ fn require_admin(st: &AppState, headers: &HeaderMap) -> Option<(String, String)>
 async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
     let session = cookie(&headers, "session").and_then(|t| db::get_session(&st.pool, &t));
 
-    let (nav, body) = match session {
-        None => (String::new(), login_body(&st.cfg)),
+    let (nav, body, wide) = match session {
+        None => (String::new(), login_body(&st.cfg), false),
         Some((uid, name)) => {
             if is_flowerborn(&st, &uid).await {
-                let (coins, max_balance, is_public) = db::get_stats(&st.pool, &uid);
+                let (coins, max_balance, _pub, total_earned) = db::get_stats(&st.pool, &uid);
                 let grants = db::active_grants(&st.pool, &uid, now_secs());
                 (
-                    nav_html("coins", is_admin(&uid)),
-                    coins_body(&name, coins, max_balance, is_public, &grants),
+                    nav_html("home", is_admin(&uid)),
+                    inventory_home(&name, coins, max_balance, total_earned, &grants),
+                    true,
                 )
             } else {
-                (String::new(), rules_body(&name))
+                (String::new(), rules_body(&name), false)
             }
         }
     };
-    Html(shell("Meadow Market", &nav, false, &body))
+    Html(shell("Inventory — Meadow Market", &nav, wide, &body))
 }
 
-/// Coins-pagina: mini banking-app — saldo, hoogste saldo ooit, publiek-toggle.
-fn coins_body(
+/// Aftel-teller (HTML + script) voor lopende tijdelijke rollen.
+fn grants_html(grants: &[(String, f64)]) -> String {
+    if grants.is_empty() {
+        return String::new();
+    }
+    let rows: String = grants
+        .iter()
+        .map(|(label, exp)| {
+            let lbl = if label.is_empty() {
+                "Temporary access".to_string()
+            } else {
+                esc(label)
+            };
+            format!(
+                "<div class=\"grant\" data-exp=\"{exp}\">\
+                   <span class=\"glabel\">🎟 {lbl}</span>\
+                   <span class=\"gtime\">…</span></div>"
+            )
+        })
+        .collect();
+    format!(
+        "<div class=\"k\" style=\"margin:1.1rem 0 .4rem\">Active access</div>\
+         <div class=\"grants\">{rows}</div>\
+         <script>(function(){{function f(s){{s=Math.max(0,Math.floor(s));\
+         var m=Math.floor(s/60),x=s%60;return m+':'+(x<10?'0':'')+x;}}\
+         function t(){{var n=Date.now()/1000;document.querySelectorAll('.grant')\
+         .forEach(function(g){{var e=parseFloat(g.dataset.exp),r=e-n,\
+         q=g.querySelector('.gtime');if(r<=0){{q.textContent='expired';\
+         g.classList.add('expired');}}else{{q.textContent=f(r);}}}});}}\
+         t();setInterval(t,1000);}})();</script>"
+    )
+}
+
+/// Inventory-home met sub-tabs Coins / Gems / Boosts.
+fn inventory_home(
     name: &str,
     coins: i64,
     max_balance: i64,
-    is_public: bool,
+    total_earned: i64,
     grants: &[(String, f64)],
 ) -> String {
-    let checked = if is_public { " checked" } else { "" };
-    let grants_html = if grants.is_empty() {
-        String::new()
+    let (lvl, n, m) = level_info(total_earned);
+    let pct = if m > 0 { (n * 100 / m).clamp(0, 100) } else { 100 };
+    let nm = if m > 0 {
+        format!("{n}/{m}")
     } else {
-        let rows: String = grants
-            .iter()
-            .map(|(label, exp)| {
-                let lbl = if label.is_empty() {
-                    "Temporary access".to_string()
-                } else {
-                    esc(label)
-                };
-                format!(
-                    "<div class=\"grant\" data-exp=\"{exp}\">\
-                       <span class=\"glabel\">🎟 {lbl}</span>\
-                       <span class=\"gtime\">…</span></div>"
-                )
-            })
-            .collect();
-        format!(
-            "<div class=\"grantwrap\"><div class=\"k\" style=\"margin:1.1rem 0 .4rem\">\
-               Active access</div><div class=\"grants\">{rows}</div></div>\
-             <script>(function(){{function f(s){{s=Math.max(0,Math.floor(s));\
-             var m=Math.floor(s/60),x=s%60;return m+':'+(x<10?'0':'')+x;}}\
-             function t(){{var n=Date.now()/1000;document.querySelectorAll('.grant')\
-             .forEach(function(g){{var e=parseFloat(g.dataset.exp),r=e-n,\
-             q=g.querySelector('.gtime');if(r<=0){{q.textContent='expired';\
-             g.classList.add('expired');}}else{{q.textContent=f(r);}}}});}}\
-             t();setInterval(t,1000);}})();</script>"
-        )
+        "MAX".to_string()
     };
-    format!(
-        "<h1>🌼 Hello, {name}</h1>\
-         <p class=\"muted\">Your current balance</p>\
-         <div class=\"coins\">🪙 {coins}</div>\
+
+    let coins_panel = format!(
+        "<div class=\"earned\">🪙 {total_earned}</div>\
+         <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">coins earned all-time</p>\
+         <div class=\"levelrow\"><span class=\"lvlbadge\">Lv {lvl}</span>\
+           <div class=\"bar\"><div class=\"fill\" style=\"width:{pct}%\"></div></div>\
+           <span class=\"lvlnm\">{nm}</span></div>\
+         <div class=\"statrow\"><span class=\"k\">Current balance</span>\
+           <span>🪙 <b>{coins}</b></span></div>\
          <div class=\"statrow\"><span class=\"k\">Highest balance ever</span>\
-           <span>🏅 <b>{max}</b></span></div>\
-         <div class=\"statrow\"><span class=\"k\">public</span>\
-           <form method=\"post\" action=\"/public\" style=\"margin:0\">\
-             <label class=\"switch\"><input type=\"checkbox\" name=\"public\" \
-               onchange=\"this.form.submit()\"{checked}><span class=\"slider\"></span></label>\
-           </form></div>{grants_html}",
-        name = esc(name),
-        coins = coins,
+           <span>🏅 <b>{max}</b></span></div>{grants}",
         max = max_balance,
+        grants = grants_html(grants),
+    );
+
+    let gems_panel = "<div class=\"soon\">💎 Gems — coming next: primary, secondary \
+        and prism gems to collect and equip.</div>";
+    let boosts_panel = "<div class=\"soon\">🚀 Boosts — coming next: your Hytale passes.</div>";
+
+    format!(
+        "<h1>🎒 {name}</h1>\
+         <div class=\"subtabs\">\
+           <button class=\"subtab on\" data-t=\"coins\">🪙 Coins</button>\
+           <button class=\"subtab\" data-t=\"gems\">💎 Gems</button>\
+           <button class=\"subtab\" data-t=\"boosts\">🚀 Boosts</button></div>\
+         <div class=\"panel on\" id=\"p-coins\">{coins_panel}</div>\
+         <div class=\"panel\" id=\"p-gems\">{gems_panel}</div>\
+         <div class=\"panel\" id=\"p-boosts\">{boosts_panel}</div>\
+         <script>(function(){{var ts=document.querySelectorAll('.subtab');\
+           ts.forEach(function(b){{b.addEventListener('click',function(){{\
+             ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
+             document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
+             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>",
+        name = esc(name),
     )
 }
 
@@ -491,37 +561,9 @@ fn shop_slot(it: &db::Item) -> String {
 }
 
 /// Inventory-sectie — placeholder tot items bestaan (gekocht/gewonnen).
-async fn inventory(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
-        return Redirect::to("/").into_response();
-    };
-    let admin = is_admin(&uid);
-    let items = db::inventory_items(&st.pool, &uid);
-    let inner = if items.is_empty() {
-        "<div class=\"soon\">🌱 Your inventory is empty. Buy something in the \
-         <a class=\"link\" href=\"/market\">Shop</a> and it shows up here.</div>"
-            .to_string()
-    } else {
-        let cells: String = items
-            .iter()
-            .map(|(iname, image, price)| {
-                format!(
-                    "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
-                     <div class=\"name\">{name}</div>\
-                     <div class=\"price muted\">bought · 🪙 {price}</div></div>",
-                    thumb = thumb_html(image, ""),
-                    name = esc(iname),
-                )
-            })
-            .collect();
-        format!("<div class=\"slots\">{cells}</div>")
-    };
-    let body = format!(
-        "<h1>🎒 Inventory</h1>\
-         <p class=\"muted\">Hi {name} — your bought and won items.</p>{inner}",
-        name = esc(&name),
-    );
-    Html(shell("Inventory — Meadow Market", &nav_html("inventory", admin), true, &body)).into_response()
+/// De Inventory is nu de home (`/`); oude link doorsturen.
+async fn inventory() -> Response {
+    Redirect::to("/").into_response()
 }
 
 /// Leaderboard-sectie: publieke saldo's aflopend, kroontje bij de recordhouder.
