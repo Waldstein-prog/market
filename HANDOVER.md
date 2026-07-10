@@ -3,7 +3,38 @@
 > LIVE op Hetzner. **2026-07-10: browser-login end-to-end GETEST door user = geslaagd**
 > (login + rol-check via bot + 🪙 42 op de account-pagina). Bot-prodwaarden én de
 > OAuth-flow + topbar zijn nu **GECOMMIT + gepusht** naar `market-gh` (zie §Git-staat).
-> Prod-deploy van OAuth blijft geblokkeerd op domein + TLS.
+> **Volgende stap loopt: domein `magicmeadow.org` + TLS opzetten — zie §DOMEIN & TLS.**
+
+## 🚧 DOMEIN & TLS (2026-07-10 avond — IN UITVOERING, hier verder)
+User kocht **`magicmeadow.org`**. Doel: `https://magicmeadow.org` → market-site, zodat de
+OAuth2-redirect (die HTTPS vereist) live kan. Aanpak: **Caddy** als reverse-proxy vóór
+market, met automatisch Let's Encrypt-cert.
+
+**AL GEDAAN op de VPS (`ssh hytale`, 167.235.142.113):**
+- ufw: **80/tcp + 443/tcp geopend** (naast bestaande 22/5520/8090/8700).
+- **Caddy v2.11.4 geïnstalleerd** (officiële cloudsmith-repo) + service `caddy` active,
+  luistert op 80/443.
+- **`/etc/caddy/Caddyfile`** geschreven + gevalideerd:
+  `magicmeadow.org { reverse_proxy 127.0.0.1:8700 }` en `www.magicmeadow.org` → redirect
+  naar apex. Caddy blijft cert-issuance proberen tot DNS wijst (self-healing).
+
+**NOG TE DOEN — in volgorde:**
+1. **USER: DNS A-records** bij de registrar (magicmeadow.org):
+   `@` → `167.235.142.113` en `www` → `167.235.142.113`. (Parking-records weg.)
+   Check propagatie: `dig +short magicmeadow.org` moet `167.235.142.113` geven.
+2. **Zodra DNS wijst**: Caddy haalt vanzelf het cert. Check: `curl -I https://magicmeadow.org`
+   (of `ssh hytale 'journalctl -u caddy -n 30'` voor cert-logs).
+3. **USER: Discord Developer Portal** → OAuth2 → Redirects → voeg toe:
+   `https://magicmeadow.org/auth/callback` (localhost-variant mag blijven).
+4. **PROD-DEPLOY (nog niet gebeurd!):** prod draait nog de **oude binary ZONDER
+   OAuth-routes** (commit `5206e5d`). Deploy de nieuwe: lokaal `cd lab/market &&
+   ./deploy/deploy.sh` (bouwt lokaal, scp binary, `systemctl restart market`; korte
+   bot-downtime). **EN** in prod-`secrets.json` op `/opt/market/`: `base_url` →
+   `https://magicmeadow.org` (env-override kan ook: `MARKET_BASE_URL`). Zonder die
+   base_url stuurt /login naar de verkeerde redirect_uri.
+5. **End-to-end test live**: open `https://magicmeadow.org`, Discord-login, coins zichtbaar.
+   NB: prod-rol-check gebruikt `role_id` uit prod-secrets (dev-guild = Hytaler); voor
+   ECHTE prod moet dat de juiste guild/rol worden (open designvraag Flowerborn).
 
 ## Wat dit is
 Project **`market`** (lab-poort **8700**): Discord **coin-economy + rol-toggle site**,
@@ -100,6 +131,14 @@ expliciete "ja". Wil hij het alsnog: `ssh hytale` → `systemctl stop market` �
 `rm /opt/market/coins.db` → `systemctl start market` (app maakt verse lege tabel).
 NB: dit staat **los** van het lokale OAuth-testsaldo (Waldstein=42) — twee aparte db's.
 NB2: sqlite3 staat niet op de VPS; lees de db door hem lokaal te scp'en.
+
+## Lokale losse eindjes (deze pop-os machine)
+- **Detached web-server draait mogelijk nog** op `localhost:8700` (gestart met
+  `setsid … /home/jo/.cargo/bin/cargo run`, web-only, log `/tmp/market-web.log`).
+  Overleeft sessie-einde. Stoppen mag: `pkill -f 'target/debug/market'`. In een
+  chatter/detached-shell staat `cargo` niet op PATH → gebruik het volle pad.
+- **Hytaler-rol toegekend aan Waldstein** (via de site-toggle `/api/toggle`, voor de
+  test). Bewust gelaten. Terugdraaien = toggle met `enable:false` of in Discord.
 
 ## Openstaand / roadmap (uit docs/economy-design.md)
 - **Beslist**: login=OAuth2, embed=launcher, data-isolatie via sessie-cookie.
