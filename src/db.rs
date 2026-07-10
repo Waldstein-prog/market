@@ -15,10 +15,58 @@ pub fn init_pool(path: &str) -> DbPool {
             username   TEXT NOT NULL,
             coins      INTEGER NOT NULL DEFAULT 0,
             last_award REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            token    TEXT PRIMARY KEY,
+            user_id  TEXT NOT NULL,
+            username TEXT NOT NULL,
+            created  REAL NOT NULL DEFAULT 0
         );",
     )
     .expect("kan tabel niet aanmaken");
     pool
+}
+
+/// Huidig coin-saldo van een lid (0 als hij nog niks heeft).
+pub fn get_coins(pool: &DbPool, user_id: &str) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT coins FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("query coins")
+    .unwrap_or(0)
+}
+
+/// Bewaar een nieuwe login-sessie (cookie-token → Discord-identiteit).
+pub fn create_session(pool: &DbPool, token: &str, user_id: &str, username: &str, ts: f64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions (token, user_id, username, created)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![token, user_id, username, ts],
+    )
+    .expect("insert session");
+}
+
+/// (user_id, username) horend bij een sessie-token, indien geldig.
+pub fn get_session(pool: &DbPool, token: &str) -> Option<(String, String)> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT user_id, username FROM sessions WHERE token = ?1",
+        params![token],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .optional()
+    .expect("query session")
+}
+
+pub fn delete_session(pool: &DbPool, token: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])
+        .expect("delete session");
 }
 
 /// Unix-tijdstip van de laatste toekenning (0.0 als de user nog niks heeft).

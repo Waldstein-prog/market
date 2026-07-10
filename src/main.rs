@@ -23,10 +23,20 @@ async fn main() {
 
     let pool = db::init_pool("coins.db");
 
-    // Web-server draait concurrent met de bot-gateway.
+    // Web-only modus (lokaal testen): sla de bot-gateway over zodat een tweede
+    // instance de live bot niet dubbel op de gateway zet (→ dubbele coins).
+    let web_only = std::env::var("MARKET_WEB_ONLY").is_ok_and(|v| v != "0" && !v.is_empty());
+    if web_only {
+        tracing::warn!("MARKET_WEB_ONLY: enkel de web-server draait, geen bot-gateway.");
+        web::serve(cfg, pool).await;
+        return;
+    }
+
+    // Web-server draait concurrent met de bot-gateway (gedeelde DB-pool).
     let web_cfg = cfg.clone();
+    let web_pool = pool.clone();
     let web_task = tokio::spawn(async move {
-        web::serve(web_cfg).await;
+        web::serve(web_cfg, web_pool).await;
     });
 
     // De bot blokkeert tot de gateway sluit; valt hij weg, dan stoppen we ook de web-taak.
