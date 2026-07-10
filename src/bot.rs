@@ -253,12 +253,32 @@ async fn find_coins_channel(ctx: &serenity::Context, data: &Data) -> Option<sere
         .map(|(id, _)| id)
 }
 
+/// Achtergrondtaak: trek verlopen tijdelijke rollen (bv. 24u-tickets) weer in.
+async fn role_grant_sweeper(pool: DbPool, cfg: Config) {
+    let dc = crate::discord_rest::Discord::new(cfg.bot_token.clone(), cfg.guild_id.clone());
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        for (id, uid, role) in db::due_role_grants(&pool, now_secs()) {
+            match dc.set_role(&uid, &role, false).await {
+                Ok(()) => {
+                    db::delete_role_grant(&pool, id);
+                    tracing::info!("Ticket verlopen: rol {role} ingetrokken bij {uid}");
+                }
+                Err(e) => tracing::warn!("kan verlopen rol {role} niet intrekken bij {uid}: {e}"),
+            }
+        }
+    }
+}
+
 pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     let token = cfg.bot_token.clone();
     let intents = serenity::GatewayIntents::GUILDS
         | serenity::GatewayIntents::GUILD_MESSAGES
         | serenity::GatewayIntents::MESSAGE_CONTENT
         | serenity::GatewayIntents::GUILD_MEMBERS;
+
+    // Verlopen tijdelijke rollen periodiek intrekken.
+    tokio::spawn(role_grant_sweeper(pool.clone(), cfg.clone()));
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {

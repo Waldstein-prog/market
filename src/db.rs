@@ -38,7 +38,15 @@ pub fn init_pool(path: &str) -> DbPool {
             price    INTEGER NOT NULL DEFAULT 0,
             image    TEXT NOT NULL DEFAULT '',
             color    TEXT NOT NULL DEFAULT '',
-            position INTEGER NOT NULL DEFAULT 0
+            position INTEGER NOT NULL DEFAULT 0,
+            role_id  TEXT NOT NULL DEFAULT '',       -- kent deze rol toe bij aankoop
+            duration INTEGER NOT NULL DEFAULT 0      -- 0 = permanent, >0 = seconden (bv 24u)
+        );
+        CREATE TABLE IF NOT EXISTS role_grants (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    TEXT NOT NULL,
+            role_id    TEXT NOT NULL,
+            expires_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS inventory (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,11 +64,50 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "last_daily", "REAL NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "max_balance", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "is_public", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
     conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
         .expect("backfill max_balance");
     drop(conn);
     seed_shop(&pool);
+    seed_hytale(&pool);
     pool
+}
+
+/// Voeg de twee Hytale-tickets één keer toe (idempotent op naam): een dagpas
+/// (24u) en een permanent ticket. `role_id` laat de admin invullen in Beheer.
+fn seed_hytale(pool: &DbPool) {
+    let conn = pool.get().expect("db");
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM items WHERE name IN ('Hytale Day Pass','Hytale Permanent Pass')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if exists > 0 {
+        return;
+    }
+    // Eigen schap voor de Hytale-toegang, bovenaan (position -1).
+    conn.execute(
+        "INSERT INTO shelves (title, position) VALUES ('Hytale Access', -1)",
+        [],
+    )
+    .expect("seed hytale shelf");
+    let shelf_id = conn.last_insert_rowid();
+    // Dagpas: blauw, 24u. Permanent: goud, permanent.
+    conn.execute(
+        "INSERT INTO items (zone, shelf_id, name, price, color, duration, position)
+         VALUES ('shelf', ?1, 'Hytale Day Pass', 100, '#4a86e8', 86400, 0)",
+        params![shelf_id],
+    )
+    .expect("seed daypass");
+    conn.execute(
+        "INSERT INTO items (zone, shelf_id, name, price, color, duration, position)
+         VALUES ('shelf', ?1, 'Hytale Permanent Pass', 1000, '#d4af37', 0, 1)",
+        params![shelf_id],
+    )
+    .expect("seed permpass");
 }
 
 /// Vul de shop één keer met test-gems (4 kleur-schappen van 5) als hij leeg is.
@@ -313,6 +360,8 @@ pub struct Item {
     pub price: i64,
     pub image: String,
     pub color: String,
+    pub role_id: String,
+    pub duration: i64, // 0 = permanent, >0 = seconden
 }
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
@@ -322,6 +371,8 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         price: r.get("price")?,
         image: r.get("image")?,
         color: r.get("color")?,
+        role_id: r.get("role_id")?,
+        duration: r.get("duration")?,
     })
 }
 
@@ -342,7 +393,7 @@ pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color FROM items
+            "SELECT id, name, price, image, color, role_id, duration FROM items
              WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
         )
         .expect("prepare shelf_items");
@@ -355,7 +406,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color FROM items
+            "SELECT id, name, price, image, color, role_id, duration FROM items
              WHERE zone = 'lucky' ORDER BY position, id",
         )
         .expect("prepare lucky_items");
@@ -368,7 +419,7 @@ pub fn random_items(pool: &DbPool, n: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color FROM items
+            "SELECT id, name, price, image, color, role_id, duration FROM items
              WHERE zone = 'shelf' ORDER BY RANDOM() LIMIT ?1",
         )
         .expect("prepare random_items");
@@ -380,7 +431,7 @@ pub fn random_items(pool: &DbPool, n: i64) -> Vec<Item> {
 pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT id, name, price, image, color FROM items WHERE id = ?1",
+        "SELECT id, name, price, image, color, role_id, duration FROM items WHERE id = ?1",
         params![id],
         row_to_item,
     )
@@ -435,11 +486,11 @@ pub fn add_item(pool: &DbPool, zone: &str, shelf_id: Option<i64>) -> i64 {
     conn.last_insert_rowid()
 }
 
-pub fn update_item(pool: &DbPool, id: i64, name: &str, price: i64) {
+pub fn update_item(pool: &DbPool, id: i64, name: &str, price: i64, role_id: &str, duration: i64) {
     let conn = pool.get().expect("db");
     conn.execute(
-        "UPDATE items SET name = ?2, price = ?3 WHERE id = ?1",
-        params![id, name, price],
+        "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5 WHERE id = ?1",
+        params![id, name, price, role_id, duration],
     )
     .expect("update item");
 }
@@ -461,7 +512,7 @@ pub fn delete_item(pool: &DbPool, id: i64) {
 /// Koop `item_id` voor `uid`: controleer saldo, trek de prijs af en leg het
 /// item (snapshot van naam/afbeelding/prijs) in de inventory. Atomisch.
 /// Ok(nieuw_saldo) of Err(reden).
-pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<i64, String> {
+pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64, Item), String> {
     let item = get_item(pool, item_id).ok_or("Dit item bestaat niet meer.")?;
     let mut conn = pool.get().expect("db");
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -488,7 +539,37 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<i64, 
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(balance - item.price)
+    Ok((balance - item.price, item))
+}
+
+/// Registreer een tijdelijke rol-toekenning die op `expires_at` weer weg moet.
+pub fn add_role_grant(pool: &DbPool, uid: &str, role_id: &str, expires_at: f64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO role_grants (user_id, role_id, expires_at) VALUES (?1, ?2, ?3)",
+        params![uid, role_id, expires_at],
+    )
+    .expect("add role_grant");
+}
+
+/// Verlopen rol-toekenningen (id, user_id, role_id) op tijdstip `now`.
+pub fn due_role_grants(pool: &DbPool, now: f64) -> Vec<(i64, String, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT id, user_id, role_id FROM role_grants WHERE expires_at <= ?1")
+        .expect("prepare due grants");
+    let rows = stmt
+        .query_map(params![now], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .expect("query due grants");
+    rows.filter_map(Result::ok).collect()
+}
+
+pub fn delete_role_grant(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM role_grants WHERE id = ?1", params![id])
+        .expect("delete role_grant");
 }
 
 /// Inventory van een lid: (naam, afbeelding, betaalde prijs), nieuwste eerst.

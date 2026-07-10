@@ -226,6 +226,9 @@ a.link{{color:{MEADOW}}}
   border:1px solid #2c3d2a;border-radius:7px;background:#0e1510;color:#e8f0e4;
   font:inherit;font-size:.82rem}}
 .aitem input[type=file]{{font-size:.68rem;color:#9db095;padding:.15rem 0;border:0}}
+.aitem select{{width:100%;padding:.32rem;border:1px solid #2c3d2a;border-radius:7px;
+  background:#0e1510;color:#e8f0e4;font:inherit;font-size:.8rem}}
+.ibadge{{font-size:.72rem;font-weight:700;color:#cdbb6a}}
 .prow{{display:flex;gap:.3rem}}
 .iupload{{display:flex;gap:.3rem;align-items:center}}
 .plus{{width:64px;height:64px;border-radius:12px;border:1px dashed #3a4d38;
@@ -285,7 +288,7 @@ fn nav_html(active: &str, admin: bool) -> String {
     format!(
         "<nav class=\"topnav\">{}{}{}{}{}{}</nav>",
         item("/", "coins", "🪙 Coins"),
-        item("/market", "market", "🛒 Market"),
+        item("/market", "market", "🛒 Shop"),
         item("/inventory", "inventory", "🎒 Inventory"),
         item("/leaderboard", "leaderboard", "🏆 Leaderboard"),
         admin_link,
@@ -321,7 +324,7 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
                 let (coins, max_balance, is_public) = db::get_stats(&st.pool, &uid);
                 (
                     nav_html("coins", is_admin(&uid)),
-                    coins_body(&name, &uid, coins, max_balance, is_public),
+                    coins_body(&name, coins, max_balance, is_public),
                 )
             } else {
                 (String::new(), rules_body(&name))
@@ -332,7 +335,7 @@ async fn index(State(st): State<AppState>, headers: HeaderMap) -> Html<String> {
 }
 
 /// Coins-pagina: mini banking-app — saldo, hoogste saldo ooit, publiek-toggle.
-fn coins_body(name: &str, uid: &str, coins: i64, max_balance: i64, is_public: bool) -> String {
+fn coins_body(name: &str, coins: i64, max_balance: i64, is_public: bool) -> String {
     let checked = if is_public { " checked" } else { "" };
     format!(
         "<h1>🌼 Hallo, {name}</h1>\
@@ -344,10 +347,8 @@ fn coins_body(name: &str, uid: &str, coins: i64, max_balance: i64, is_public: bo
            <form method=\"post\" action=\"/public\" style=\"margin:0\">\
              <label class=\"switch\"><input type=\"checkbox\" name=\"public\" \
                onchange=\"this.form.submit()\"{checked}><span class=\"slider\"></span></label>\
-           </form></div>\
-         <p class=\"muted\" style=\"margin-top:1.2rem\">Discord-ID: {uid}</p>",
+           </form></div>",
         name = esc(name),
-        uid = esc(uid),
         coins = coins,
         max = max_balance,
     )
@@ -396,9 +397,9 @@ async fn market(
     };
 
     let body = format!(
-        "<h1>🛒 Market</h1>{notice}\
+        "<h1>🛒 Shop</h1>{notice}\
          <p class=\"muted\">Hallo {name} — welkom in de shop. Koop met je 🪙 coins.</p>\
-         {daily_html}{shelves}{lucky_html}",
+         {lucky_html}{daily_html}{shelves}",
         name = esc(&name),
     );
     Html(shell("Market — Meadow Market", &nav_html("market", admin), true, &body)).into_response()
@@ -422,12 +423,19 @@ fn item_thumb(it: &db::Item) -> String {
     thumb_html(&it.image, &it.color)
 }
 
-/// Eén publiek winkelvakje: thumb, naam, prijs en een werkende Buy-knop.
+/// Eén publiek winkelvakje: thumb, naam, prijs, effect-badge en Buy-knop.
 fn shop_slot(it: &db::Item) -> String {
+    let badge = if it.role_id.is_empty() {
+        String::new()
+    } else if it.duration > 0 {
+        format!("<div class=\"ibadge\">🎟 {}</div>", human_duration(it.duration))
+    } else {
+        "<div class=\"ibadge\">🔑 permanent</div>".to_string()
+    };
     format!(
         "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div>\
-         <div class=\"price\">🪙 {price}</div>\
+         <div class=\"price\">🪙 {price}</div>{badge}\
          <form method=\"post\" action=\"/buy\" class=\"buyform\">\
            <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
            <button class=\"buy on\" type=\"submit\">Buy</button></form></div>",
@@ -785,16 +793,57 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         return Redirect::to("/").into_response();
     };
     let dest = match db::purchase(&st.pool, &uid, f.item_id, now_secs()) {
-        Ok(bal) => format!("/market?ok={}", pct(&format!("Gekocht! Nieuw saldo: {bal} coins."))),
+        Ok((bal, item)) => {
+            let mut extra = String::new();
+            if !item.role_id.is_empty() {
+                match st.dc.set_role(&uid, &item.role_id, true).await {
+                    Ok(()) => {
+                        if item.duration > 0 {
+                            db::add_role_grant(
+                                &st.pool,
+                                &uid,
+                                &item.role_id,
+                                now_secs() + item.duration as f64,
+                            );
+                            extra = format!(" Toegang voor {} toegekend.", human_duration(item.duration));
+                        } else {
+                            extra = " Permanente toegang toegekend.".to_string();
+                        }
+                    }
+                    Err(e) => extra = format!(" (Rol kon niet toegekend worden: {e})"),
+                }
+            }
+            format!(
+                "/market?ok={}",
+                pct(&format!("Gekocht! Nieuw saldo: {bal} coins.{extra}"))
+            )
+        }
         Err(e) => format!("/market?err={}", pct(&e)),
     };
     Redirect::to(&dest).into_response()
+}
+
+/// Mensvriendelijke duur ("1 dag", "24 uur", "30 min").
+fn human_duration(secs: i64) -> String {
+    if secs % 86400 == 0 {
+        let d = secs / 86400;
+        format!("{d} dag{}", if d == 1 { "" } else { "en" })
+    } else if secs % 3600 == 0 {
+        format!("{} uur", secs / 3600)
+    } else {
+        format!("{} min", secs / 60)
+    }
 }
 
 // --- admin: market-beheer ----------------------------------------------
 
 /// Eén item-editor op de beheerpagina: thumb, naam, prijs, upload, verwijder.
 fn admin_item(it: &db::Item) -> String {
+    let (sel_perm, sel_24) = if it.duration == 86400 {
+        ("", " selected")
+    } else {
+        (" selected", "")
+    };
     format!(
         "<div class=\"aitem\"><div class=\"thumb\">{thumb}</div>\
          <form method=\"post\" action=\"/admin/item/update\">\
@@ -802,7 +851,10 @@ fn admin_item(it: &db::Item) -> String {
            <input name=\"name\" value=\"{name}\" placeholder=\"naam\">\
            <div class=\"prow\">\
              <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"prijs\">\
-             <button class=\"btn small\" type=\"submit\">✓</button></div></form>\
+             <button class=\"btn small\" type=\"submit\">✓</button></div>\
+           <input name=\"role_id\" value=\"{role}\" placeholder=\"rol-ID (bij aankoop)\">\
+           <select name=\"duration\"><option value=\"0\"{sel_perm}>permanent</option>\
+             <option value=\"86400\"{sel_24}>24 uur</option></select></form>\
          <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <input type=\"file\" name=\"file\" accept=\"image/*\">\
@@ -814,6 +866,7 @@ fn admin_item(it: &db::Item) -> String {
         id = it.id,
         name = esc(&it.name),
         price = it.price,
+        role = esc(&it.role_id),
     )
 }
 
@@ -890,6 +943,10 @@ struct ItemUpdate {
     name: String,
     #[serde(default)]
     price: i64,
+    #[serde(default)]
+    role_id: String,
+    #[serde(default)]
+    duration: i64,
 }
 
 async fn admin_shelf_add(
@@ -950,7 +1007,14 @@ async fn admin_item_update(
     Form(f): Form<ItemUpdate>,
 ) -> Response {
     if require_admin(&st, &headers).is_some() {
-        db::update_item(&st.pool, f.id, f.name.trim(), f.price.max(0));
+        db::update_item(
+            &st.pool,
+            f.id,
+            f.name.trim(),
+            f.price.max(0),
+            f.role_id.trim(),
+            f.duration.max(0),
+        );
     }
     Redirect::to("/admin/market").into_response()
 }
