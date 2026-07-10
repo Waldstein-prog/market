@@ -444,39 +444,35 @@ pub fn set_public(pool: &DbPool, user_id: &str, username: &str, public: bool) {
 }
 
 /// Publiek leaderboard: (user_id, username, saldo, max_balance) aflopend op saldo.
-pub fn public_leaderboard(pool: &DbPool, limit: i64) -> Vec<(String, String, i64, i64)> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare(
-            "SELECT user_id, username, coins, max_balance FROM coins
-             ORDER BY coins DESC, username ASC LIMIT ?1",
-        )
-        .expect("prepare public_leaderboard");
-    let rows = stmt
-        .query_map(params![limit], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        })
-        .expect("query public_leaderboard");
-    rows.filter_map(Result::ok).collect()
+/// Leaderboard 'Now' — (user_id, username, huidig saldo) aflopend.
+pub fn leaderboard_now(pool: &DbPool, limit: i64) -> Vec<(String, String, i64)> {
+    lb_query(
+        pool,
+        "SELECT user_id, username, coins FROM coins
+         ORDER BY coins DESC, username ASC LIMIT ?1",
+        limit,
+    )
 }
 
-/// De publieke recordhouder: (user_id, username, max_balance) met het hoogste
-/// max_balance ooit onder de leden die publiek staan. None als niemand publiek staat.
-pub fn public_record(pool: &DbPool) -> Option<(String, String, i64)> {
-    let conn = pool.get().expect("db");
-    conn.query_row(
-        "SELECT user_id, username, max_balance FROM coins
-         ORDER BY max_balance DESC, username ASC LIMIT 1",
-        [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+/// Leaderboard 'All-time' — (user_id, username, ooit verdiend) aflopend.
+pub fn leaderboard_alltime(pool: &DbPool, limit: i64) -> Vec<(String, String, i64)> {
+    lb_query(
+        pool,
+        "SELECT user_id, username, total_earned FROM coins
+         ORDER BY total_earned DESC, username ASC LIMIT ?1",
+        limit,
     )
-    .optional()
-    .expect("query public_record")
+}
+
+fn lb_query(pool: &DbPool, sql: &str, limit: i64) -> Vec<(String, String, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn.prepare(sql).expect("prepare leaderboard");
+    let rows = stmt
+        .query_map(params![limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })
+        .expect("query leaderboard");
+    rows.filter_map(Result::ok).collect()
 }
 
 /// (username, coins) aflopend op coins, dan alfabetisch.

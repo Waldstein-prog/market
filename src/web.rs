@@ -709,59 +709,58 @@ async fn inventory() -> Response {
     Redirect::to("/").into_response()
 }
 
-/// Leaderboard-sectie: publieke saldo's aflopend, kroontje bij de recordhouder.
+/// Eén ranglijst renderen: medailles per rang (👑 / 🥈 / 🥉), eigen rij gemarkeerd.
+fn lb_list(rows: &[(String, String, i64)], me: &str) -> String {
+    if rows.is_empty() {
+        return "<p class=\"muted\">No one on the board yet.</p>".to_string();
+    }
+    let items: String = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (uid, uname, val))| {
+            let rk = match i {
+                0 => "👑".to_string(),
+                1 => "🥈".to_string(),
+                2 => "🥉".to_string(),
+                n => format!("{}", n + 1),
+            };
+            let me_cls = if uid == me { " class=\"me\"" } else { "" };
+            format!(
+                "<li{me_cls}><span class=\"rk\">{rk}</span>\
+                 <span class=\"nm\">{name}</span>\
+                 <span class=\"amt\">🪙 {val}</span></li>",
+                name = esc(uname),
+            )
+        })
+        .collect();
+    format!("<ol class=\"lb\">{items}</ol>")
+}
+
+/// Leaderboard met tabs All-time (ooit verdiend) en Now (huidig saldo).
 async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some((me, name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
     };
-    let rows = db::public_leaderboard(&st.pool, 25);
-    let record = db::public_record(&st.pool);
-    let record_uid = record.as_ref().map(|(u, _, _)| u.clone());
+    let all_list = lb_list(&db::leaderboard_alltime(&st.pool, 50), &me);
+    let now_list = lb_list(&db::leaderboard_now(&st.pool, 50), &me);
 
-    let body = if rows.is_empty() {
+    let body = format!(
         "<h1>🏆 Leaderboard</h1>\
-             <p class=\"muted\">No one has made their balance public yet. \
-             Make yours public on the <a class=\"link\" href=\"/\">Coins</a> page \
-             to appear here.</p>"
-            .to_string()
-    } else {
-        let items = rows
-            .iter()
-            .enumerate()
-            .map(|(i, (uid, uname, coins, _mx))| {
-                let rk = match i {
-                    0 => "🥇".to_string(),
-                    1 => "🥈".to_string(),
-                    2 => "🥉".to_string(),
-                    n => format!("{}", n + 1),
-                };
-                let crown = if record_uid.as_deref() == Some(uid.as_str()) {
-                    " 👑"
-                } else {
-                    ""
-                };
-                let me_cls = if *uid == me { " class=\"me\"" } else { "" };
-                format!(
-                    "<li{me_cls}><span class=\"rk\">{rk}</span>\
-                     <span class=\"nm\">{name}{crown}</span>\
-                     <span class=\"amt\">🪙 {coins}</span></li>",
-                    name = esc(uname),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("");
-        let note = record
-            .map(|(_, n, mx)| {
-                format!(
-                    "<p class=\"muted\" style=\"margin-top:1rem\">👑 Highest balance ever: \
-                     <b>{}</b> with 🏅 {}</p>",
-                    esc(&n),
-                    mx
-                )
-            })
-            .unwrap_or_default();
-        format!("<h1>🏆 Leaderboard</h1><ol class=\"lb\">{items}</ol>{note}")
-    };
+         <div class=\"subtabs\">\
+           <button class=\"subtab on\" data-t=\"alltime\">All-time</button>\
+           <button class=\"subtab\" data-t=\"now\">Now</button></div>\
+         <p class=\"muted\" id=\"lb-hint\">Ranked by coins earned all-time.</p>\
+         <div class=\"panel on\" id=\"p-alltime\">{all_list}</div>\
+         <div class=\"panel\" id=\"p-now\">{now_list}</div>\
+         <script>(function(){{var ts=document.querySelectorAll('.subtab'),\
+           h=document.getElementById('lb-hint');\
+           ts.forEach(function(b){{b.addEventListener('click',function(){{\
+             ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
+             document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
+             document.getElementById('p-'+b.dataset.t).classList.add('on');\
+             h.textContent=b.dataset.t==='now'?'Ranked by current balance.':\
+               'Ranked by coins earned all-time.';}});}});}})();</script>"
+    );
     Html(shell("Leaderboard — Meadow Market", &chrome(&name, "leaderboard", is_admin(&me), ""), true, &body))
         .into_response()
 }
