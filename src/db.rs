@@ -62,6 +62,11 @@ pub fn init_pool(path: &str) -> DbPool {
             image    TEXT NOT NULL DEFAULT '',
             price    INTEGER NOT NULL DEFAULT 0,
             acquired REAL NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS daily_shop (
+            day     INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            PRIMARY KEY (day, item_id)
         );",
     )
     .expect("kan tabel niet aanmaken");
@@ -109,7 +114,72 @@ pub fn init_pool(path: &str) -> DbPool {
     drop(conn);
     seed_hytale(&pool);
     seed_gems(&pool);
+    seed_horseshoe(&pool);
     pool
+}
+
+/// Seed de Lucky Horseshoe (idempotent op naam) op een eigen 'Boosters'-schap.
+fn seed_horseshoe(pool: &DbPool) {
+    let conn = pool.get().expect("db");
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM items WHERE name = 'Lucky Horseshoe'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if exists > 0 {
+        return;
+    }
+    conn.execute(
+        "INSERT INTO shelves (title, position) VALUES ('Boosters', 20)",
+        [],
+    )
+    .expect("seed booster shelf");
+    let shelf_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO items (zone, shelf_id, name, price, color, category, description, position)
+         VALUES ('shelf', ?1, 'Lucky Horseshoe', 120, '#c9a227', 'booster',
+                 'A lucky charm — boosts your fortune.', 0)",
+        params![shelf_id],
+    )
+    .expect("seed horseshoe");
+}
+
+/// De dagelijkse shop-selectie: `n` items voor `day`, stabiel bewaard in
+/// daily_shop. Pool = alle koopbare niet-boost items (gems + boosters).
+pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
+    let conn = pool.get().expect("db");
+    let mut ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT item_id FROM daily_shop WHERE day = ?1")
+            .expect("prepare daily_shop");
+        stmt.query_map(params![day], |r| r.get::<_, i64>(0))
+            .expect("query daily_shop")
+            .filter_map(Result::ok)
+            .collect()
+    };
+    if ids.is_empty() {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM items
+                 WHERE category != 'boost' AND category != '' ORDER BY RANDOM() LIMIT ?1",
+            )
+            .expect("prepare pick");
+        ids = stmt
+            .query_map(params![n], |r| r.get::<_, i64>(0))
+            .expect("query pick")
+            .filter_map(Result::ok)
+            .collect();
+        for id in &ids {
+            conn.execute(
+                "INSERT OR IGNORE INTO daily_shop (day, item_id) VALUES (?1, ?2)",
+                params![day, id],
+            )
+            .expect("insert daily_shop");
+        }
+    }
+    ids.iter().filter_map(|id| get_item(pool, *id)).collect()
 }
 
 /// Seed de gem-catalogus één keer (idempotent): 3 primary, 5 secondary, 5 prism.
@@ -491,19 +561,6 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
         )
         .expect("prepare lucky_items");
     let rows = stmt.query_map([], row_to_item).expect("query lucky");
-    rows.filter_map(Result::ok).collect()
-}
-
-/// `n` willekeurige shelf-items voor de Daily picks.
-pub fn random_items(pool: &DbPool, n: i64) -> Vec<Item> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
-             WHERE zone = 'shelf' ORDER BY RANDOM() LIMIT ?1",
-        )
-        .expect("prepare random_items");
-    let rows = stmt.query_map(params![n], row_to_item).expect("query random");
     rows.filter_map(Result::ok).collect()
 }
 

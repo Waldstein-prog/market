@@ -226,8 +226,16 @@ a.link{{color:{MEADOW}}}
   background:#2c3d2a;color:#6f8268;font-weight:600;font-size:.9rem;
   cursor:not-allowed}}
 .buyform{{margin:0;width:100%}}
-.slot .buy.on{{background:{MEADOW};color:#0e1510;cursor:pointer}}
-.slot .buy.on:hover{{filter:brightness(1.08)}}
+.buy.on{{background:{MEADOW};color:#0e1510;cursor:pointer;
+  box-shadow:0 3px 0 #3a5a28;transition:transform .05s,box-shadow .05s,filter .1s}}
+.buy.on:hover{{filter:brightness(1.06)}}
+.buy.on:active{{transform:translateY(3px);box-shadow:0 0 0 #3a5a28}}
+.buy.owned{{width:100%;padding:.45rem;border:0;border-radius:9px;
+  background:#2c3d2a;color:#8aa07f;font-weight:600;font-size:.9rem;cursor:default}}
+.purse{{display:inline-block;font-size:.8rem;font-weight:700;color:#cfe0c8;
+  background:#141d14;border:1px solid #2c3d2a;padding:.2rem .65rem;border-radius:999px;
+  margin-left:.55rem;vertical-align:middle;white-space:nowrap}}
+.purse-n{{color:{MEADOW};font-variant-numeric:tabular-nums}}
 .notice{{padding:.6rem .9rem;border-radius:10px;margin:.2rem 0 1rem;font-size:.92rem}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
 .notice.err{{background:#3a201c;color:#f0c9c0;border:1px solid #6e352c}}
@@ -329,11 +337,13 @@ fn nav_html(active: &str, admin: bool) -> String {
     )
 }
 
-/// Naam-kop (boven de nav) + de nav-tabs, voor ingelogde pagina's.
-fn chrome(name: &str, active: &str, admin: bool) -> String {
+/// Naam-kop (boven de nav) + de nav-tabs, voor ingelogde pagina's. `extra` komt
+/// naast de naam (bv. de Purse op de Shop).
+fn chrome(name: &str, active: &str, admin: bool, extra: &str) -> String {
     format!(
-        "<div class=\"uname\">{}</div>{}",
+        "<div class=\"uname\">{}{}</div>{}",
         esc(name),
+        extra,
         nav_html(active, admin)
     )
 }
@@ -404,7 +414,7 @@ async fn index(
                 let grants = db::active_grants(&st.pool, &uid, now_secs());
                 let tab = q.tab.as_deref().unwrap_or("coins");
                 (
-                    chrome(&name, "home", is_admin(&uid)),
+                    chrome(&name, "home", is_admin(&uid), ""),
                     inventory_home(&st.pool, &uid, &name, coins, total_earned, &grants, tab),
                     true,
                 )
@@ -598,7 +608,7 @@ fn inventory_home(
     )
 }
 
-/// Market-sectie — placeholder tot de shop-economie er is.
+/// Shop: 4 dagelijkse random items (24u-rotatie) + de vaste Hytale-tickets.
 async fn market(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -608,45 +618,40 @@ async fn market(
         return Redirect::to("/").into_response();
     };
     let admin = is_admin(&uid);
+    let (coins, _m, _p, _te) = db::get_stats(&st.pool, &uid);
     let notice = market_notice(&q);
+    let owned: std::collections::HashSet<i64> =
+        db::owned_item_ids(&st.pool, &uid).into_iter().collect();
 
-    // Daily picks: 4 willekeurige items uit de schappen.
-    let daily: String = db::random_items(&st.pool, 4).iter().map(shop_slot).collect();
-
-    // Schappen uit de DB.
-    let shelves: String = db::list_shelves(&st.pool)
+    let day = (now_secs() / 86400.0) as i64;
+    let offers: String = db::shop_offers(&st.pool, day, 4)
         .iter()
-        .map(|(sid, title)| {
-            let items: String = db::shelf_items(&st.pool, *sid).iter().map(shop_slot).collect();
-            format!(
-                "<h2 class=\"shelf-title\">{}</h2><div class=\"shelf\">{items}</div>",
-                esc(title)
-            )
-        })
+        .map(|it| shop_slot(it, owned.contains(&it.id)))
+        .collect();
+    let tickets: String = db::gems_by_category(&st.pool, "boost")
+        .iter()
+        .map(|it| shop_slot(it, owned.contains(&it.id)))
         .collect();
 
-    // Lucky items (indien aanwezig).
-    let lucky = db::lucky_items(&st.pool);
-    let lucky_html = if lucky.is_empty() {
-        String::new()
-    } else {
-        let items: String = lucky.iter().map(shop_slot).collect();
-        format!("<h2 class=\"shelf-title\">🍀 Lucky items</h2><div class=\"shelf\">{items}</div>")
-    };
-
-    let daily_html = if daily.is_empty() {
-        String::new()
-    } else {
-        format!("<h2 class=\"shelf-title\">Daily picks</h2><div class=\"slots\">{daily}</div>")
-    };
+    let from = q.from.unwrap_or(coins);
+    let purse = format!(
+        " <span class=\"purse\" data-from=\"{from}\">Purse 🪙 <span class=\"purse-n\">{coins}</span></span>"
+    );
 
     let body = format!(
         "<h1>🛒 Shop</h1>{notice}\
-         <p class=\"muted\">Hi {name} — welcome to the shop. Buy with your 🪙 coins.</p>\
-         {lucky_html}{daily_html}{shelves}",
-        name = esc(&name),
+         <p class=\"muted\">Today's picks — refreshed every 24h.</p>\
+         <div class=\"slots\">{offers}</div>\
+         <h2 class=\"shelf-title\">🎟 Hytale passes</h2><div class=\"shelf\">{tickets}</div>\
+         <script>(function(){{var p=document.querySelector('.purse');if(!p)return;\
+           var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
+           if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
+           function step(t){{var k=Math.min(1,(t-s)/d);\
+             el.textContent=Math.round(from+(to-from)*k);\
+             if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>",
     );
-    Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin), true, &body)).into_response()
+    Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, &purse), true, &body))
+        .into_response()
 }
 
 /// Thumbnail uit (afbeelding, kleur): geüploade afbeelding, anders een gem-bol.
@@ -667,8 +672,9 @@ fn item_thumb(it: &db::Item) -> String {
     thumb_html(&it.image, &it.color)
 }
 
-/// Eén publiek winkelvakje: thumb, naam, prijs, effect-badge en Buy-knop.
-fn shop_slot(it: &db::Item) -> String {
+/// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
+/// reeds verzamelde gems).
+fn shop_slot(it: &db::Item, owned: bool) -> String {
     let badge = if it.role_id.is_empty() {
         String::new()
     } else if it.duration > 0 {
@@ -676,17 +682,24 @@ fn shop_slot(it: &db::Item) -> String {
     } else {
         "<div class=\"ibadge\">🔑 permanent</div>".to_string()
     };
+    let is_gem = matches!(it.category.as_str(), "primary" | "secondary" | "prism");
+    let action = if owned && is_gem {
+        "<button class=\"buy owned\" disabled>Owned</button>".to_string()
+    } else {
+        format!(
+            "<form method=\"post\" action=\"/buy\" class=\"buyform\">\
+               <input type=\"hidden\" name=\"item_id\" value=\"{}\">\
+               <button class=\"buy on\" type=\"submit\">Buy</button></form>",
+            it.id
+        )
+    };
     format!(
         "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div>\
-         <div class=\"price\">🪙 {price}</div>{badge}\
-         <form method=\"post\" action=\"/buy\" class=\"buyform\">\
-           <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
-           <button class=\"buy on\" type=\"submit\">Buy</button></form></div>",
+         <div class=\"price\">🪙 {price}</div>{badge}{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
         price = it.price,
-        id = it.id,
     )
 }
 
@@ -749,7 +762,7 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
             .unwrap_or_default();
         format!("<h1>🏆 Leaderboard</h1><ol class=\"lb\">{items}</ol>{note}")
     };
-    Html(shell("Leaderboard — Meadow Market", &chrome(&name, "leaderboard", is_admin(&me)), true, &body))
+    Html(shell("Leaderboard — Meadow Market", &chrome(&name, "leaderboard", is_admin(&me), ""), true, &body))
         .into_response()
 }
 
@@ -990,6 +1003,7 @@ struct BuyForm {
 struct MarketQuery {
     ok: Option<String>,
     err: Option<String>,
+    from: Option<i64>,
 }
 
 /// Bannertekst voor de Market na een koop (ok/err via query).
@@ -1010,8 +1024,9 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         return Redirect::to("/").into_response();
     };
     let dest = match db::purchase(&st.pool, &uid, f.item_id, now_secs()) {
-        Ok((bal, _item)) => format!(
-            "/market?ok={}",
+        Ok((bal, item)) => format!(
+            "/market?from={}&ok={}",
+            bal + item.price,
             pct(&format!("Purchased! New balance: {bal} coins."))
         ),
         Err(e) => format!("/market?err={}", pct(&e)),
@@ -1165,7 +1180,7 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
            <input name=\"title\" placeholder=\"New shelf name\" required>\
            <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>"
     );
-    Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true), true, &body)).into_response()
+    Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true, ""), true, &body)).into_response()
 }
 
 #[derive(Deserialize)]
