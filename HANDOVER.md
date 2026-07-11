@@ -89,6 +89,12 @@ Leaderboard · ⚙ Manage (admin) · Log out`.
 5. **Public-profiel**: `coins.is_public` bestaat nog maar wordt niet gebruikt (leaderboard toont
    iedereen); ooit een profielpagina met public-filter.
 6. Losse asset `static/MeadowShard.png` (debug) staat nog in de repo, ongebruikt.
+7. **TODO (voor later, apart gezet): weekly leaderboard.** Derde leaderboard-tab **"This week"**
+   = coins verdiend in de lopende week (per-week teller, reset wekelijks — vergt tracking van
+   verdiensten per week, bv. een `weekly_earned` + weekstart, of award-events met timestamp).
+   Dit wekelijkse klassement wordt **elke zaterdag 16:00 Brusselse tijd** als een **mooie embed
+   in het #general-kanaal** gepost (geplande taak in de bot, tz Europe/Brussels, via Discord REST
+   webhook/`POST /channels/{id}/messages` zoals de bestaande embeds).
 
 ## Zo pik je het op
 1. `cd lab/market`, `MARKET_WEB_ONLY=1 DISCORD_ROLE_ID=1525249217897955590 cargo run`, open
