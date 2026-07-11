@@ -232,10 +232,12 @@ a.link{{color:{MEADOW}}}
 .buy.on:active{{transform:translateY(3px);box-shadow:0 0 0 #3a5a28}}
 .buy.owned{{width:100%;padding:.45rem;border:0;border-radius:9px;
   background:#2c3d2a;color:#8aa07f;font-weight:600;font-size:.9rem;cursor:default}}
-.purse{{display:inline-block;font-size:.8rem;font-weight:700;color:#cfe0c8;
-  background:#141d14;border:1px solid #2c3d2a;padding:.2rem .65rem;border-radius:999px;
-  margin-left:.55rem;vertical-align:middle;white-space:nowrap}}
-.purse-n{{color:{MEADOW};font-variant-numeric:tabular-nums}}
+.shophead{{display:flex;justify-content:space-between;align-items:center;
+  gap:1rem;flex-wrap:wrap}}
+.shophead h1{{margin:.2rem 0}}
+.purse-box{{font-size:1.6rem;font-weight:800;color:#cfe0c8;background:#141d14;
+  border:1px solid #2c3d2a;padding:.45rem 1.1rem;border-radius:14px;white-space:nowrap}}
+.purse-box .purse-n{{color:{MEADOW};font-variant-numeric:tabular-nums}}
 .notice{{padding:.6rem .9rem;border-radius:10px;margin:.2rem 0 1rem;font-size:.92rem}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
 .notice.err{{background:#3a201c;color:#f0c9c0;border:1px solid #6e352c}}
@@ -287,7 +289,8 @@ a.link{{color:{MEADOW}}}
   border-bottom:1px solid #1d281c}}
 .lb .rk{{width:1.9rem;text-align:center;font-weight:700;color:#9db095}}
 .lb .nm{{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.lb .amt{{font-weight:700;color:{MEADOW}}}
+.lb .amt{{font-weight:700;color:{MEADOW};font-variant-numeric:tabular-nums;
+  text-align:right;min-width:5.5rem}}
 .lb li.me{{background:#16211590;border-radius:10px}}
 </style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span></header>
 <div class="content"><div class="{card_cls}">{nav}{body}</div></div></body></html>"#
@@ -648,23 +651,22 @@ async fn market(
         .collect();
 
     let from = q.from.unwrap_or(coins);
-    let purse = format!(
-        " <span class=\"purse\" data-from=\"{from}\">Purse 🪙 <span class=\"purse-n\">{coins}</span></span>"
-    );
 
     let body = format!(
-        "<h1>🛒 Shop</h1>{notice}\
+        "<div class=\"shophead\"><h1>🛒 Shop</h1>\
+           <div class=\"purse-box\" data-from=\"{from}\">Purse 🪙 \
+             <span class=\"purse-n\">{coins}</span></div></div>{notice}\
          <p class=\"muted\">Today's picks — refreshed every 24h.</p>\
          <div class=\"slots\">{offers}</div>\
          <h2 class=\"shelf-title\">🎟 Hytale passes</h2><div class=\"shelf\">{tickets}</div>\
-         <script>(function(){{var p=document.querySelector('.purse');if(!p)return;\
+         <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
            var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
            if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
            function step(t){{var k=Math.min(1,(t-s)/d);\
              el.textContent=Math.round(from+(to-from)*k);\
              if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>",
     );
-    Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, &purse), true, &body))
+    Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, ""), true, &body))
         .into_response()
 }
 
@@ -1043,11 +1045,8 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         return Redirect::to("/").into_response();
     };
     let dest = match db::purchase(&st.pool, &uid, f.item_id, now_secs()) {
-        Ok((bal, item)) => format!(
-            "/market?from={}&ok={}",
-            bal + item.price,
-            pct(&format!("Purchased! New balance: {bal} coins."))
-        ),
+        // Geen succesbanner meer: de Purse telt zelf af naar het nieuwe saldo.
+        Ok((bal, item)) => format!("/market?from={}", bal + item.price),
         Err(e) => format!("/market?err={}", pct(&e)),
     };
     Redirect::to(&dest).into_response()
