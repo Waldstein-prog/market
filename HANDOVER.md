@@ -8,6 +8,19 @@ serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmea
 > met de user in het Nederlands; de user laat de bouw grotendeels **zelfstandig** afwerken en
 > stuurt achteraf bij.
 
+## 📌 Sessie 2026-07-11 (laatste)
+- **DEV_FEEDBACK=true + COOLDOWN=10s** (test-waarden) staan in `src/bot.rs` en **draaien LIVE**
+  op de dev-guild (gedeployed) — Waldstein test grondig de coins. ⚠️ **Vóór een echte prod-uitrol
+  terugzetten** naar `DEV_FEEDBACK=false` + prod-cooldown. (Cooldown = per lid, één award per 10s.)
+- **BESLIST — Hytale-passen = echte whitelist i.p.v. Discord-rol.** Volledige spec + designbesluiten
+  in **`docs/TODO-hytale-passes.md`**. Kort: rol valt volledig weg (market + tale-bot); koper typt
+  z'n **Hytale-naam**; **meerdere dagpassen** in inventory met **Use** (+24u-stapel); shop voorlopig
+  **enkel de passen**; market voedt `hytale_users` in de tale-bot-DB, de **tale-bot** whitelistet +
+  bewaakt de timer (heeft de 24u-stapel-logica + FIFO al). Nog te bouwen.
+- **Nieuw project `lab/ops` (techstuff-console) LIVE**: admin-ops op `magicmeadow.org/techstuff`
+  (pwd FluffRules9-) — backups + wereld-manager boven tale+market. Zie `ops/README.md` + memory
+  [[ops-techstuff]]. Caddy proxyt nu `/techstuff` → :8091 (apex market ongemoeid).
+
 ## Live & deploy
 - **Site**: `https://magicmeadow.org` (Caddy → `127.0.0.1:8700`, Let's Encrypt-TLS).
 - **Service**: systemd `market` (user `market`, `/opt/market`, `MemoryMax=250M`). Draait de

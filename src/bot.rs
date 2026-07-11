@@ -12,10 +12,10 @@ use crate::config::Config;
 use crate::db::{self, DbPool};
 
 // --- dev-instellingen (later aanpassen) ---------------------------------
-const COOLDOWN: f64 = 30.0; // seconden tussen twee toekenningen per lid
+const COOLDOWN: f64 = 10.0; // seconden tussen twee toekenningen per lid
 const MIN_COINS: i64 = 1;
 const MAX_COINS: i64 = 3;
-const DEV_FEEDBACK: bool = false; // per bericht coins/cooldown terugkoppelen (dev-only)
+const DEV_FEEDBACK: bool = true; // per bericht coins/cooldown terugkoppelen (dev-only)
 const LEADERBOARD_SIZE: i64 = 10;
 const PREFIX: &str = "!"; // command-prefix; commando's leveren geen coins op
 // --- daily-beloning (embed-knop) ----------------------------------------
