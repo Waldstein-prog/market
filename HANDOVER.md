@@ -55,8 +55,10 @@ Leaderboard · ⚙ Manage (admin) · Log out`.
     **Use** = activeren: dagpas → rol + 24u-teller, permanent → `perma_access` + permanente rol
     (dagpas daarna niet meer koopbaar).
 - **Shop (`/market`)** — 4 **random dagitems** (24u-rotatie, `daily_shop`; pool = gems +
-  Lucky Horseshoe) + daaronder vast de 2 tickets. **Purse** naast de naam met **slotmachine-
-  afteller** na koop (`?from=`). **3D Buy/Use-knoppen**. Reeds bezeten gems tonen 'Owned'.
+  Lucky Horseshoe) + daaronder vast de 2 tickets. **Grote Purse-box rechts onder de nav**
+  (`.shophead`/`.purse-box`) met **slotmachine-afteller** na koop (`?from=` → JS telt af).
+  Géén succesbanner meer (fout-banners blijven). **3D Buy/Use-knoppen**. Reeds bezeten gems
+  tonen 'Owned'.
 - **Leaderboard (`/leaderboard`)** — tabs **All-time** (`total_earned`) / **Now** (`coins`),
   iedereen zichtbaar, medailles 👑🥈🥉, eigen rij gemarkeerd.
 - **⚙ Manage (`/admin/market`, enkel Waldstein `391337551543271433` + FayBelle
