@@ -16,6 +16,7 @@ const COOLDOWN: f64 = 10.0; // seconden tussen twee toekenningen per lid
 const MIN_COINS: i64 = 1;
 const MAX_COINS: i64 = 3;
 const DEV_FEEDBACK: bool = true; // per bericht coins/cooldown terugkoppelen (dev-only)
+const TEST_CHANNEL_ID: u64 = 1253362520530489397; // dev-only: enkel hier coins per bericht (0 = overal)
 const LEADERBOARD_SIZE: i64 = 10;
 const PREFIX: &str = "!"; // command-prefix; commando's leveren geen coins op
 // --- daily-beloning (embed-knop) ----------------------------------------
@@ -80,6 +81,10 @@ async fn handle_message(
     }
     // Commando's (!coins e.d.) zijn immuun: geen coins, cooldown onaangeroerd.
     if msg.content.starts_with(PREFIX) {
+        return Ok(());
+    }
+    // dev-test: coins per bericht enkel in het testkanaal (indien gezet)
+    if TEST_CHANNEL_ID != 0 && msg.channel_id.get() != TEST_CHANNEL_ID {
         return Ok(());
     }
     // enkel binnen de geconfigureerde guild (indien gezet)
