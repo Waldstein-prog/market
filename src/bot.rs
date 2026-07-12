@@ -41,8 +41,34 @@ const CHEST_DISTINCT_USERS: usize = 2; // TEST-waarde (weinig testers); prod = 3
 const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatters"-telling
 const CHEST_POP_DELAY: u64 = 3 * 60; // seconden tussen verschijnen en poppen
 const CHEST_CHANNEL_COOLDOWN: f64 = 30.0 * 60.0; // rust per kanaal na een chest (anti-spam)
-const CHEST_PRIZE: i64 = 1; // prijs in coins (voorlopig 1)
 const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
+// Prijsverdeling: (gewicht in ‰ (per duizend), min, max coins). Som = CHEST_TIER_TOTAL.
+// CHEST_TIERS = de ACTUELE (live) verdeling die de trekking gebruikt (coarse, zoals
+// gevraagd). CHEST_TIERS_PROPOSAL = een fijnkorreliger VOORSTEL, enkel getoond in de
+// !chest-embed (nog niet actief). Beide tonen in de embed, coarse boven, voorstel onder.
+const CHEST_TIER_TOTAL: u32 = 1000; // som van de gewichten (‰)
+const CHEST_TIERS: [(u32, i64, i64); 5] = [
+    (700, 50, 100),   // 70%
+    (200, 100, 300),  // 20%
+    (50, 300, 500),   // 5%
+    (40, 500, 800),   // 4%
+    (10, 800, 1000),  // 1%
+];
+const CHEST_TIERS_PROPOSAL: [(u32, i64, i64); 10] = [
+    (400, 50, 80),    // 40%
+    (220, 80, 120),   // 22%
+    (140, 120, 180),  // 14%
+    (90, 180, 260),   // 9%
+    (60, 260, 360),   // 6%
+    (40, 360, 480),   // 4%
+    (25, 480, 620),   // 2.5%
+    (15, 620, 760),   // 1.5%
+    (7, 760, 880),    // 0.7%
+    (3, 880, 1000),   // 0.3%
+];
+// Dev-guild (WaldsteinDevZone): het !chest-overzichtscommando werkt ENKEL hier en
+// nooit op een latere prod-guild (harde snowflake-check, niet config-afhankelijk).
+const DEV_GUILD_ID: u64 = 652452615879262220;
 // ------------------------------------------------------------------------
 
 pub struct Data {
@@ -72,6 +98,7 @@ struct ChestTracker {
     // per chest-bericht (message_id) de lopende chest
     chests: HashMap<u64, Chest>,
 }
+type Context<'a> = poise::Context<'a, Data, Error>;
 
 fn now_secs() -> f64 {
     SystemTime::now()
@@ -277,6 +304,69 @@ async fn respond_ephemeral(
     Ok(())
 }
 
+/// Trek een prijs volgens de ACTUELE gewogen verdeling (CHEST_TIERS).
+fn chest_prize() -> i64 {
+    let mut rng = rand::thread_rng();
+    let mut roll = rng.gen_range(0..CHEST_TIER_TOTAL);
+    for (w, lo, hi) in CHEST_TIERS {
+        if roll < w {
+            return rng.gen_range(lo..=hi);
+        }
+        roll -= w;
+    }
+    // Vangnet (mocht de som != CHEST_TIER_TOTAL zijn): laagste tier.
+    let (_, lo, hi) = CHEST_TIERS[0];
+    rng.gen_range(lo..=hi)
+}
+
+/// Formatteer een tier-tabel als embed-regels ("**X%** · lo–hi coins").
+fn tier_lines(tiers: &[(u32, i64, i64)]) -> String {
+    tiers
+        .iter()
+        .map(|&(w, lo, hi)| {
+            let pct = if w % 10 == 0 {
+                format!("{}%", w / 10)
+            } else {
+                format!("{:.1}%", w as f64 / 10.0)
+            };
+            format!("**{pct}** · {lo}–{hi} coins")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Embed met het overzicht: de huidige (live) verdeling + het fijnkorrelige voorstel.
+fn chest_odds_embed() -> serenity::CreateEmbed {
+    serenity::CreateEmbed::new()
+        .title("🎁 Treasure chest — coin odds")
+        .description("What a popped chest can pay out. Odds are per pop; the winner is a random opener.")
+        .field("📊 Current (live)", tier_lines(&CHEST_TIERS), false)
+        .field(
+            "🔬 Proposal — finer-grained",
+            tier_lines(&CHEST_TIERS_PROPOSAL),
+            false,
+        )
+        .colour(0xF1_C4_0F)
+}
+
+/// `!chest` — toon de prijsverdeling (huidig + voorstel). ENKEL op de dev-guild;
+/// op een latere prod-guild reageert dit commando nooit.
+#[poise::command(prefix_command)]
+pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
+    if ctx.guild_id().map(|g| g.get()) != Some(DEV_GUILD_ID) {
+        return Ok(());
+    }
+    // Ruim het commando-bericht op (properder kanaal); faalt dat, toon toch de embed.
+    if let poise::Context::Prefix(pctx) = ctx {
+        if let Err(e) = pctx.msg.delete(ctx.serenity_context()).await {
+            tracing::warn!("kan !chest-bericht niet verwijderen: {e}");
+        }
+    }
+    ctx.send(poise::CreateReply::default().embed(chest_odds_embed()))
+        .await?;
+    Ok(())
+}
+
 /// Registreer de chatter en spawn — bij ≥ CHEST_DISTINCT_USERS verschillende
 /// chatters binnen CHEST_WINDOW — een treasure chest (met knop) in het kanaal.
 /// Wordt enkel voor geldige (test)kanaal-berichten aangeroepen.
@@ -436,18 +526,19 @@ async fn pop_chest(
     } else {
         let idx = rand::thread_rng().gen_range(0..joiners.len());
         let (winner_uid, winner_name) = &joiners[idx];
-        let total = db::award(&pool, winner_uid, winner_name, CHEST_PRIZE, now_secs());
-        let coin_word = if CHEST_PRIZE == 1 { "coin" } else { "coins" };
+        let prize = chest_prize();
+        let total = db::award(&pool, winner_uid, winner_name, prize, now_secs());
+        let coin_word = if prize == 1 { "coin" } else { "coins" };
         let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };
         tracing::info!(
-            "chest gepopt: {winner_name} wint {CHEST_PRIZE} coin(s) uit {} deelnemer(s)",
+            "chest gepopt: {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
             joiners.len()
         );
         serenity::CreateEmbed::new()
             .title("💰 The chest popped!")
             .description(format!(
                 "Out of {} lucky {opener_word}, <@{winner_uid}> wins \
-                 **{CHEST_PRIZE} {coin_word}**!\nBalance: **{total}** 🪙",
+                 **{prize} {coin_word}**!\nBalance: **{total}** 🪙",
                 joiners.len()
             ))
             .colour(0x6B_9B_52)
@@ -505,9 +596,14 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     // Verlopen tijdelijke rollen periodiek intrekken.
     tokio::spawn(role_grant_sweeper(pool.clone(), cfg.clone()));
 
-    // Geen prefix-commando's meer (het !coins-leaderboard leeft enkel op de site).
+    // Enkel !chest (dev-only info-commando). Het !coins-leaderboard is verwijderd.
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
+            commands: vec![chest()],
+            prefix_options: poise::PrefixFrameworkOptions {
+                prefix: Some(PREFIX.to_string()),
+                ..Default::default()
+            },
             event_handler: |ctx, event, framework, data| {
                 Box::pin(event_handler(ctx, event, framework, data))
             },
