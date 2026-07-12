@@ -79,10 +79,17 @@ gewenst.)
    - `market_grants()` leest `hytale_whitelist` **READ-ONLY** (`file:…?mode=ro`, timeout 2s);
      dedupt op naam (permanent wint), valideert `^[A-Za-z0-9_]{1,32}$`, en is een **veilige
      no-op** bij ontbrekende DB/tabel (market nog niet uitgerold → `sqlite3.Error` → lege dict).
-   - `reconcile_market()` draait in de bestaande **5-min `pass_maintenance`-lus**: geldige/
-     permanente grant → `whitelist add` (enkel als nog niet zichtbaar → spam-arm, de add leert
-     de naam in names.json); verlopen → `whitelist remove` (enkel als nog present én niet
-     beschermd/niet door een lokale hytale_users-pas levend gehouden).
+   - `reconcile_market()` draait in de bestaande **5-min `pass_maintenance`-lus** en is de
+     **add-kant**: geldige/permanente grant → `whitelist add` (enkel als nog niet zichtbaar →
+     spam-arm, de add leert de naam in names.json).
+   - **AUTORITAIR model (2026-07-12, wens Waldstein):** niemand op de whitelist tenzij hij een
+     geldige pass gebruikte. `enforce_whitelist()` is de sluitpost van dezelfde lus: bouwt de
+     toegestane set (protected admins + geldige lokale/market/Twitch-passen) en **verwijdert al
+     wie zichtbaar op de whitelist staat zónder recht** (ook naamloze restanten van de oude rol).
+     Veilig: purged enkel via names.json resolvebare namen, nooit protected, en slaat de purge
+     over als de market-DB onleesbaar is. `protected_names = ["Faybelle","Waldstein"]` (beide
+     admins; zij hebben `/op` via de server-`permissions.json` — groep `hytale:Admin` — anderen
+     niet). **Go-live vergt `whitelist.json "enabled": true`** op de server (nu `false` → gate uit).
    - Config: nieuwe `[market]`-sectie (`enabled`, `coins_db`) in `config.example.toml`
      (default `enabled=false`). **Op prod moet `[market] enabled=true` + `coins_db` in
      `/opt/hytale/bot/config.toml`** vóór het werkt.
