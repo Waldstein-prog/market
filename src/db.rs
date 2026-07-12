@@ -508,23 +508,6 @@ fn lb_query(pool: &DbPool, sql: &str, limit: i64) -> Vec<(String, String, i64)> 
     rows.filter_map(Result::ok).collect()
 }
 
-/// (username, coins) aflopend op coins, dan alfabetisch.
-pub fn leaderboard(pool: &DbPool, limit: i64) -> Vec<(String, i64)> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare(
-            "SELECT username, coins FROM coins
-             ORDER BY coins DESC, username ASC LIMIT ?1",
-        )
-        .expect("prepare leaderboard");
-    let rows = stmt
-        .query_map(params![limit], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })
-        .expect("query leaderboard");
-    rows.filter_map(Result::ok).collect()
-}
-
 // --- shop: schappen & items ---------------------------------------------
 
 /// Eén verkoopbaar item (gem/graphic) in de shop.

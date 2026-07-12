@@ -19,8 +19,7 @@ const MIN_COINS: i64 = 1;
 const MAX_COINS: i64 = 3;
 const DEV_FEEDBACK: bool = false; // per bericht coins/cooldown terugkoppelen (dev-only)
 const TEST_CHANNEL_ID: u64 = 1253362520530489397; // dev-only: enkel hier coins per bericht (0 = overal)
-const LEADERBOARD_SIZE: i64 = 10;
-const PREFIX: &str = "!"; // command-prefix; commando's leveren geen coins op
+const PREFIX: &str = "!"; // deze berichten leveren geen coins op (oude commando-syntax)
 // --- daily-beloning (embed-knop) ----------------------------------------
 const DAILY_COOLDOWN: f64 = 24.0 * 3600.0; // 24u tussen twee claims
 // Streak-daily: dag 1 = random in [BASE_MIN, BASE_MAX]. Elke opeenvolgende dag
@@ -73,50 +72,12 @@ struct ChestTracker {
     // per chest-bericht (message_id) de lopende chest
     chests: HashMap<u64, Chest>,
 }
-type Context<'a> = poise::Context<'a, Data, Error>;
 
 fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
-}
-
-/// `!coins` — leaderboard-embed.
-#[poise::command(prefix_command)]
-pub async fn coins(ctx: Context<'_>) -> Result<(), Error> {
-    tracing::info!("!coins opgevraagd door {}", ctx.author().name);
-    // Ruim het commando-bericht op (properder kanaal). Vereist Manage Messages;
-    // faalt het (geen recht), dan tonen we gewoon toch het leaderboard.
-    if let poise::Context::Prefix(pctx) = ctx {
-        if let Err(e) = pctx.msg.delete(ctx.serenity_context()).await {
-            tracing::warn!("kan !coins-bericht niet verwijderen: {e}");
-        }
-    }
-    let rows = db::leaderboard(&ctx.data().pool, LEADERBOARD_SIZE);
-    let desc = if rows.is_empty() {
-        "No one has coins yet. Send a message to earn some!".to_string()
-    } else {
-        rows.iter()
-            .enumerate()
-            .map(|(i, (u, c))| {
-                let rank = match i {
-                    0 => "🥇".to_string(),
-                    1 => "🥈".to_string(),
-                    2 => "🥉".to_string(),
-                    n => format!("**{}.**", n + 1),
-                };
-                format!("{rank} {u} — **{c}** coins")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let embed = serenity::CreateEmbed::new()
-        .title("🪙 Meadow Market — Coin Leaderboard")
-        .description(desc)
-        .colour(0x6B_9B_52);
-    ctx.send(poise::CreateReply::default().embed(embed)).await?;
-    Ok(())
 }
 
 async fn handle_message(
@@ -544,13 +505,9 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     // Verlopen tijdelijke rollen periodiek intrekken.
     tokio::spawn(role_grant_sweeper(pool.clone(), cfg.clone()));
 
+    // Geen prefix-commando's meer (het !coins-leaderboard leeft enkel op de site).
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![coins()],
-            prefix_options: poise::PrefixFrameworkOptions {
-                prefix: Some(PREFIX.to_string()),
-                ..Default::default()
-            },
             event_handler: |ctx, event, framework, data| {
                 Box::pin(event_handler(ctx, event, framework, data))
             },
