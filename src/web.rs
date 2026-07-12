@@ -528,13 +528,13 @@ fn inventory_home(
     };
 
     let coins_panel = format!(
-        "<div class=\"earned\">🪙 {total_earned}</div>\
-         <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">coins earned all-time</p>\
+        "<div class=\"earned\">🪙 {coins}</div>\
+         <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">current balance</p>\
          <div class=\"levelrow\"><span class=\"lvlbadge\">Lv {lvl}</span>\
            <div class=\"bar\"><div class=\"fill\" style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\">{nm}</span></div>\
-         <div class=\"statrow\"><span class=\"k\">Current balance</span>\
-           <span>🪙 <b>{coins}</b></span></div>{grants}",
+         <div class=\"statrow\"><span class=\"k\">Coins earned all-time</span>\
+           <span>🪙 <b>{total_earned}</b></span></div>{grants}",
         grants = grants_html(grants),
     );
 
