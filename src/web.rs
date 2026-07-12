@@ -77,6 +77,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin", get(admin))
         .route("/api/status", get(api_status))
         .route("/api/toggle", post(api_toggle))
+        .route("/api/balance", get(api_balance))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
 
@@ -149,6 +150,25 @@ fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
         String::new()
     } else {
         "<a class=\"tb-logout\" href=\"/logout\">↪ Log out</a>".to_string()
+    };
+    // Live-refresh: pol elke 5s /api/balance en werk de getagde elementen bij
+    // (saldo, all-time, level). Enkel op ingelogde pagina's met zo'n element.
+    let poller = if nav.is_empty() {
+        String::new()
+    } else {
+        "<script>(function(){\
+           if(!document.querySelector('[data-bal],[data-earned]'))return;\
+           function set(s,v){document.querySelectorAll(s).forEach(function(e){e.textContent=v;});}\
+           function upd(){fetch('/api/balance',{cache:'no-store'})\
+             .then(function(r){return r.ok?r.json():null;})\
+             .then(function(d){if(!d||!d.ok)return;\
+               set('[data-bal]',d.coins);set('[data-earned]',d.earned);\
+               var b=document.querySelector('[data-lvl]');if(b)b.textContent='Lv '+d.lvl;\
+               var f=document.querySelector('[data-fill]');if(f)f.style.width=d.pct+'%';\
+               var n=document.querySelector('[data-lvlnm]');if(n)n.textContent=d.nm;})\
+             .catch(function(){});}\
+           setInterval(upd,5000);})();</script>"
+            .to_string()
     };
     format!(
         r#"<!doctype html><html lang="nl"><head><meta charset="utf-8">
@@ -303,7 +323,7 @@ a.link{{color:{MEADOW}}}
   text-align:right;min-width:5.5rem}}
 .lb li.me{{background:#16211590;border-radius:10px}}
 </style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span>{logout}</header>
-<div class="content"><div class="{card_cls}">{nav}{body}</div></div></body></html>"#
+<div class="content"><div class="{card_cls}">{nav}{body}</div></div>{poller}</body></html>"#
     )
 }
 
@@ -528,13 +548,13 @@ fn inventory_home(
     };
 
     let coins_panel = format!(
-        "<div class=\"earned\">🪙 {coins}</div>\
+        "<div class=\"earned\">🪙 <span data-bal>{coins}</span></div>\
          <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">current balance</p>\
-         <div class=\"levelrow\"><span class=\"lvlbadge\">Lv {lvl}</span>\
-           <div class=\"bar\"><div class=\"fill\" style=\"width:{pct}%\"></div></div>\
-           <span class=\"lvlnm\">{nm}</span></div>\
+         <div class=\"levelrow\"><span class=\"lvlbadge\" data-lvl>Lv {lvl}</span>\
+           <div class=\"bar\"><div class=\"fill\" data-fill style=\"width:{pct}%\"></div></div>\
+           <span class=\"lvlnm\" data-lvlnm>{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Coins earned all-time</span>\
-           <span>🪙 <b>{total_earned}</b></span></div>{grants}",
+           <span>🪙 <b data-earned>{total_earned}</b></span></div>{grants}",
         grants = grants_html(grants),
     );
 
@@ -686,7 +706,7 @@ async fn market(
     let body = format!(
         "<div class=\"shophead\"><h1>🛒 Shop</h1>\
            <div class=\"purse-box\" data-from=\"{from}\">Purse 🪙 \
-             <span class=\"purse-n\">{coins}</span></div></div>{notice}\
+             <span class=\"purse-n\" data-bal>{coins}</span></div></div>{notice}\
          <p class=\"muted\">Hytale server passes — buying a pass whitelists you instantly.</p>\
          <h2 class=\"shelf-title\">🎟 Hytale passes</h2><div class=\"shelf\">{tickets}</div>\
          <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
@@ -1023,6 +1043,33 @@ async fn api_status(State(st): State<AppState>, Query(q): Query<StatusQuery>) ->
         ),
         Err(e) => bad(&e),
     }
+}
+
+/// Lichte balans-polling voor de live-refresh op de site. Enkel een sessie nodig
+/// (géén Discord-rolcheck per poll — dat zou elke 5s een API-call zijn).
+async fn api_balance(State(st): State<AppState>, headers: HeaderMap) -> JsonResp {
+    let Some((uid, _name)) = session_user(&st, &headers) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false})));
+    };
+    let (coins, _m, _p, total_earned) = db::get_stats(&st.pool, &uid);
+    let (lvl, n, m) = level_info(total_earned);
+    let pct = if m > 0 { (n * 100 / m).clamp(0, 100) } else { 100 };
+    let nm = if m > 0 {
+        format!("{n}/{m}")
+    } else {
+        "MAX".to_string()
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "coins": coins,
+            "earned": total_earned,
+            "lvl": lvl,
+            "pct": pct,
+            "nm": nm,
+        })),
+    )
 }
 
 #[derive(Deserialize)]
