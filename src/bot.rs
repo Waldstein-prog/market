@@ -6,6 +6,8 @@
 //! Tijdens dev (DEV_FEEDBACK) antwoordt de bot op elk bericht met de coins/cooldown.
 use poise::serenity_prelude as serenity;
 use rand::Rng;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
@@ -31,13 +33,46 @@ const DAILY_MAX_STEP: i64 = 5;
 const DAILY_STREAK_CAP: i64 = 200;
 const DAILY_CUSTOM_ID: &str = "daily_claim"; // moet matchen met de embed-knop
 const COINS_CHANNEL: &str = "coins"; // publiek kanaal voor "X earned N coins today."
+// --- treasure chest -----------------------------------------------------
+// Chatten ≥ CHEST_DISTINCT_USERS verschillende mensen binnen CHEST_WINDOW in
+// hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
+// CHEST_POP_DELAY later popt hij en wint één random klikker CHEST_PRIZE coin(s).
+const CHEST_ENABLED: bool = true;
+const CHEST_DISTINCT_USERS: usize = 2; // TEST-waarde (weinig testers); prod = 3
+const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatters"-telling
+const CHEST_POP_DELAY: u64 = 3 * 60; // seconden tussen verschijnen en poppen
+const CHEST_CHANNEL_COOLDOWN: f64 = 30.0 * 60.0; // rust per kanaal na een chest (anti-spam)
+const CHEST_PRIZE: i64 = 1; // prijs in coins (voorlopig 1)
+const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
 // ------------------------------------------------------------------------
 
 pub struct Data {
     pub pool: DbPool,
     pub cfg: Config,
+    // Gedeelde treasure-chest-staat (interne mutability; korte sync-secties, nooit
+    // over een await vastgehouden).
+    chest: Arc<Mutex<ChestTracker>>,
 }
 type Error = Box<dyn std::error::Error + Send + Sync>;
+
+/// Eén lopende (nog niet gepopte) chest: het kanaal + de deelnemers die klikten.
+struct Chest {
+    channel_id: u64,
+    joiners: Vec<(String, String)>, // (uid, weergavenaam), ontdubbeld op uid
+}
+
+/// Per-guild gedeelde chest-boekhouding.
+#[derive(Default)]
+struct ChestTracker {
+    // per kanaal: recente (uid, ts) om "N verschillende chatters binnen het venster" te tellen
+    recent: HashMap<u64, Vec<(String, f64)>>,
+    // per kanaal: tot wanneer er geen nieuwe chest mag verschijnen (cooldown)
+    cooldown_until: HashMap<u64, f64>,
+    // kanalen met een chest die nog moet poppen (voorkomt dubbele spawns)
+    active: HashSet<u64>,
+    // per chest-bericht (message_id) de lopende chest
+    chests: HashMap<u64, Chest>,
+}
 type Context<'a> = poise::Context<'a, Data, Error>;
 
 fn now_secs() -> f64 {
@@ -129,6 +164,10 @@ async fn handle_message(
             .await?;
         }
     }
+
+    // Elk (geldig) bericht telt mee voor de treasure-chest-detectie, ook tijdens
+    // de coin-cooldown.
+    maybe_spawn_chest(ctx, msg, data).await?;
     Ok(())
 }
 
@@ -174,6 +213,8 @@ async fn event_handler(
             if let serenity::Interaction::Component(mc) = interaction {
                 if mc.data.custom_id == DAILY_CUSTOM_ID {
                     handle_daily(ctx, mc, data).await?;
+                } else if mc.data.custom_id == CHEST_CUSTOM_ID {
+                    handle_chest_click(ctx, mc, data).await?;
                 }
             }
         }
@@ -268,6 +309,183 @@ async fn respond_ephemeral(
     Ok(())
 }
 
+/// Registreer de chatter en spawn — bij ≥ CHEST_DISTINCT_USERS verschillende
+/// chatters binnen CHEST_WINDOW — een treasure chest (met knop) in het kanaal.
+/// Wordt enkel voor geldige (test)kanaal-berichten aangeroepen.
+async fn maybe_spawn_chest(
+    ctx: &serenity::Context,
+    msg: &serenity::Message,
+    data: &Data,
+) -> Result<(), Error> {
+    if !CHEST_ENABLED {
+        return Ok(());
+    }
+    let now = now_secs();
+    let chan = msg.channel_id.get();
+    let uid = msg.author.id.to_string();
+
+    // Beslis onder de lock: registreer de chatter, prune het venster, tel distinct.
+    let spawn = {
+        let mut t = data.chest.lock().unwrap();
+        let on_cd = t.cooldown_until.get(&chan).is_some_and(|&u| u > now);
+        let active = t.active.contains(&chan);
+        let distinct = {
+            let v = t.recent.entry(chan).or_default();
+            v.retain(|(_, ts)| now - *ts < CHEST_WINDOW); // verlopen entries weg
+            v.retain(|(u, _)| u != &uid); // oude entry van deze uid weg (verse ts erbij)
+            v.push((uid.clone(), now));
+            v.iter().map(|(u, _)| u.as_str()).collect::<HashSet<_>>().len()
+        };
+        let go = !on_cd && !active && distinct >= CHEST_DISTINCT_USERS;
+        if go {
+            if let Some(v) = t.recent.get_mut(&chan) {
+                v.clear(); // venster resetten zodat het niet blijft hertriggeren
+            }
+            t.active.insert(chan); // meteen reserveren → geen dubbele spawn
+        }
+        go
+    };
+    if !spawn {
+        return Ok(());
+    }
+
+    // Stuur het chest-bericht met de "Open"-knop.
+    let button = serenity::CreateButton::new(CHEST_CUSTOM_ID)
+        .emoji('🎁')
+        .label("Open the chest")
+        .style(serenity::ButtonStyle::Success);
+    let builder = serenity::CreateMessage::new()
+        .content(
+            "🎁 **A treasure chest appeared!** You lot got the channel buzzing.\n\
+             Click to hop in — it pops in 3 minutes and one lucky opener wins a prize!",
+        )
+        .components(vec![serenity::CreateActionRow::Buttons(vec![button])]);
+    let sent = match msg.channel_id.send_message(&ctx.http, builder).await {
+        Ok(m) => m,
+        Err(e) => {
+            // Zending mislukt → reservering vrijgeven zodat een volgende poging kan.
+            data.chest.lock().unwrap().active.remove(&chan);
+            return Err(e.into());
+        }
+    };
+    let msg_id = sent.id.get();
+
+    // Registreer de lopende chest en plan de pop.
+    data.chest.lock().unwrap().chests.insert(
+        msg_id,
+        Chest {
+            channel_id: chan,
+            joiners: Vec::new(),
+        },
+    );
+    tracing::info!("treasure chest gespawned in kanaal {chan} (bericht {msg_id})");
+
+    let http = ctx.http.clone();
+    let pool = data.pool.clone();
+    let tracker = data.chest.clone();
+    let channel_id = msg.channel_id;
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(CHEST_POP_DELAY)).await;
+        pop_chest(http, pool, tracker, channel_id, msg_id).await;
+    });
+    Ok(())
+}
+
+/// Klik op een treasure chest = meedoen aan de trekking (één inschrijving per lid).
+async fn handle_chest_click(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    let msg_id = mc.message.id.get();
+    let uid = mc.user.id.to_string();
+    let name = mc
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| mc.user.name.clone());
+
+    // None = chest bestaat niet (meer); Some(0) = zat er al in; Some(n≥1) = toegevoegd.
+    let joined = {
+        let mut t = data.chest.lock().unwrap();
+        match t.chests.get_mut(&msg_id) {
+            None => None,
+            Some(c) => {
+                if c.joiners.iter().any(|(u, _)| u == &uid) {
+                    Some(0)
+                } else {
+                    c.joiners.push((uid.clone(), name));
+                    Some(c.joiners.len())
+                }
+            }
+        }
+    };
+    let text = match joined {
+        None => "📦 Too late — this chest already popped.".to_string(),
+        Some(0) => "🎁 You're already in! Sit tight for the pop.".to_string(),
+        Some(n) => format!(
+            "🎁 You're in! **{n}** {} waiting for the pop.",
+            if n == 1 { "opener" } else { "openers" }
+        ),
+    };
+    respond_ephemeral(ctx, mc, &text).await?;
+    Ok(())
+}
+
+/// Pop de chest (na CHEST_POP_DELAY): kies een random klikker, ken de prijs toe en
+/// werk het bericht bij. Geeft het kanaal vrij en zet de anti-spam-cooldown.
+async fn pop_chest(
+    http: Arc<serenity::Http>,
+    pool: DbPool,
+    tracker: Arc<Mutex<ChestTracker>>,
+    channel_id: serenity::ChannelId,
+    msg_id: u64,
+) {
+    // Haal de chest eruit, geef het kanaal vrij, zet de cooldown.
+    let joiners = {
+        let mut t = tracker.lock().unwrap();
+        let chest = t.chests.remove(&msg_id);
+        if let Some(c) = &chest {
+            t.active.remove(&c.channel_id);
+            t.cooldown_until
+                .insert(c.channel_id, now_secs() + CHEST_CHANNEL_COOLDOWN);
+        }
+        match chest {
+            Some(c) => c.joiners,
+            None => return, // al opgeruimd (zou niet mogen)
+        }
+    };
+
+    let content = if joiners.is_empty() {
+        "📦 The treasure chest crumbled to dust — nobody opened it in time.".to_string()
+    } else {
+        let idx = rand::thread_rng().gen_range(0..joiners.len());
+        let (winner_uid, winner_name) = &joiners[idx];
+        let total = db::award(&pool, winner_uid, winner_name, CHEST_PRIZE, now_secs());
+        let coin_word = if CHEST_PRIZE == 1 { "coin" } else { "coins" };
+        let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };
+        tracing::info!(
+            "chest gepopt: {winner_name} wint {CHEST_PRIZE} coin(s) uit {} deelnemer(s)",
+            joiners.len()
+        );
+        format!(
+            "💰 **The chest popped!** Out of {} lucky {opener_word}, <@{winner_uid}> \
+             wins **{CHEST_PRIZE} {coin_word}**! Balance: **{total}** 🪙",
+            joiners.len()
+        )
+    };
+
+    let edit = serenity::EditMessage::new()
+        .content(content)
+        .components(vec![]); // knop verwijderen
+    if let Err(e) = channel_id
+        .edit_message(http.as_ref(), serenity::MessageId::new(msg_id), edit)
+        .await
+    {
+        tracing::warn!("kan chest-bericht {msg_id} niet bijwerken: {e}");
+    }
+}
+
 /// Zoek het tekstkanaal met de naam `COINS_CHANNEL` in de geconfigureerde guild.
 async fn find_coins_channel(ctx: &serenity::Context, data: &Data) -> Option<serenity::ChannelId> {
     let raw: u64 = data.cfg.guild_id.parse().ok()?;
@@ -322,7 +540,13 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
             ..Default::default()
         })
         .setup(move |_ctx, _ready, _framework| {
-            Box::pin(async move { Ok(Data { pool, cfg }) })
+            Box::pin(async move {
+                Ok(Data {
+                    pool,
+                    cfg,
+                    chest: Arc::new(Mutex::new(ChestTracker::default())),
+                })
+            })
         })
         .build();
 
