@@ -36,10 +36,10 @@ serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmea
   652452615879262220`); op een prod-guild volledig inert (geen embed, geen actie).
 - **Botcommando's wissen hun aanroep-bericht** vóór uitvoering — centraal via een poise
   `pre_command`-hook (`5569d0d`). Staande regel, zie memory [[market-bot-commands-clean]].
-  ⚠️ **Vereist dat de bot "Manage Messages" heeft** in de guild/kanaal — anders logt hij
-  `Invalid permissions` en blijft het bericht staan (embed verschijnt wél). De bot heeft
-  Manage Roles maar géén Administrator/Manage Messages en kan zichzelf dat recht **niet**
-  geven → in Server-instellingen → Rollen → `MeadowMarketBot` → Manage Messages AAN.
+  ℹ️ **Vereist "Manage Messages"** in de guild/kanaal — anders `Invalid permissions` en blijft
+  het bericht staan (embed verschijnt wél). De bot heeft Manage Roles maar géén Administrator/
+  Manage Messages en kan zichzelf dat recht niet geven. **OPGELOST 2026-07-12 avond:** user zette
+  Manage Messages AAN voor `MeadowMarketBot` → commando-berichten worden nu correct gewist ✅.
 - **`!coins`-commando + Discord-leaderboard VERWIJDERD** (`d94a41f`) — leaderboard leeft enkel
   nog op de site (`/leaderboard`). Dode code opgeruimd (`db::leaderboard`, `LEADERBOARD_SIZE`).
 - **Prod-feedback teruggezet** (`9e8272b`): **`DEV_FEEDBACK = false`** (geen per-bericht coin/
