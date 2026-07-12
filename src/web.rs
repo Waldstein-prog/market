@@ -145,6 +145,12 @@ fn esc(s: &str) -> String {
 
 fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
     let card_cls = if wide { "card wide" } else { "card" };
+    // Logout hoort bij een ingelogde sessie; de nav is leeg op de login-pagina.
+    let logout = if nav.is_empty() {
+        String::new()
+    } else {
+        "<a class=\"tb-logout\" href=\"/logout\">↪ Log out</a>".to_string()
+    };
     format!(
         r#"<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -154,8 +160,12 @@ fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
 body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
   font:16px/1.5 system-ui,sans-serif;background:#0e1510;color:#e8f0e4}}
 .topbar{{background:{MEADOW};color:#0e1510;padding:.6rem 1.1rem;
-  box-shadow:0 2px 10px rgba(0,0,0,.35)}}
+  box-shadow:0 2px 10px rgba(0,0,0,.35);
+  display:flex;align-items:center;justify-content:space-between;gap:1rem}}
 .brand{{font-weight:700;font-size:1.1rem;letter-spacing:.02em}}
+.tb-logout{{color:#0e1510;text-decoration:none;font-weight:700;font-size:.9rem;
+  background:rgba(14,21,16,.12);padding:.35rem .8rem;border-radius:999px;white-space:nowrap}}
+.tb-logout:hover{{background:rgba(14,21,16,.22)}}
 .uname{{font-weight:800;font-size:1.25rem;letter-spacing:.01em;margin:0 0 .7rem}}
 .nav{{display:flex;gap:.3rem;margin:0 0 1.3rem;flex-wrap:wrap}}
 .nav a{{flex:1 1 auto;text-align:center;padding:.5rem .7rem;border-radius:11px;
@@ -293,7 +303,7 @@ a.link{{color:{MEADOW}}}
 .lb .amt{{font-weight:700;color:{MEADOW};font-variant-numeric:tabular-nums;
   text-align:right;min-width:5.5rem}}
 .lb li.me{{background:#16211590;border-radius:10px}}
-</style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span></header>
+</style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span>{logout}</header>
 <div class="content"><div class="{card_cls}">{nav}{body}</div></div></body></html>"#
     )
 }
@@ -332,12 +342,11 @@ fn nav_html(active: &str, admin: bool) -> String {
         String::new()
     };
     format!(
-        "<nav class=\"nav\">{}{}{}{}{}</nav>",
+        "<nav class=\"nav\">{}{}{}{}</nav>",
         item("/", "home", "🎒 Inventory"),
         item("/market", "market", "🛒 Shop"),
         item("/leaderboard", "leaderboard", "🏆 Leaderboard"),
         admin_link,
-        item("/logout", "logout", "↪ Log out"),
     )
 }
 
