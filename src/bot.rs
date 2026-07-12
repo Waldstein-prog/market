@@ -86,6 +86,13 @@ fn now_secs() -> f64 {
 #[poise::command(prefix_command)]
 pub async fn coins(ctx: Context<'_>) -> Result<(), Error> {
     tracing::info!("!coins opgevraagd door {}", ctx.author().name);
+    // Ruim het commando-bericht op (properder kanaal). Vereist Manage Messages;
+    // faalt het (geen recht), dan tonen we gewoon toch het leaderboard.
+    if let poise::Context::Prefix(pctx) = ctx {
+        if let Err(e) = pctx.msg.delete(ctx.serenity_context()).await {
+            tracing::warn!("kan !coins-bericht niet verwijderen: {e}");
+        }
+    }
     let rows = db::leaderboard(&ctx.data().pool, LEADERBOARD_SIZE);
     let desc = if rows.is_empty() {
         "No one has coins yet. Send a message to earn some!".to_string()
