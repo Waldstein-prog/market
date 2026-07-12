@@ -14,10 +14,10 @@ use crate::config::Config;
 use crate::db::{self, DbPool};
 
 // --- dev-instellingen (later aanpassen) ---------------------------------
-const COOLDOWN: f64 = 10.0; // seconden tussen twee toekenningen per lid
+const COOLDOWN: f64 = 30.0; // seconden tussen twee toekenningen per lid
 const MIN_COINS: i64 = 1;
 const MAX_COINS: i64 = 3;
-const DEV_FEEDBACK: bool = true; // per bericht coins/cooldown terugkoppelen (dev-only)
+const DEV_FEEDBACK: bool = false; // per bericht coins/cooldown terugkoppelen (dev-only)
 const TEST_CHANNEL_ID: u64 = 1253362520530489397; // dev-only: enkel hier coins per bericht (0 = overal)
 const LEADERBOARD_SIZE: i64 = 10;
 const PREFIX: &str = "!"; // command-prefix; commando's leveren geen coins op
@@ -150,7 +150,7 @@ async fn handle_message(
         let total = db::award(&data.pool, &uid, &name, amount, now);
         tracing::info!("{name}: +{amount} coins (totaal {total})");
         if DEV_FEEDBACK {
-            msg.reply(ctx, format!("🪙 +{amount} coins! Totaal: **{total}**"))
+            msg.reply(ctx, format!("🪙 +{amount} coins! Total: **{total}**"))
                 .await?;
         }
     } else {
@@ -159,7 +159,7 @@ async fn handle_message(
         if DEV_FEEDBACK {
             msg.reply(
                 ctx,
-                format!("⏳ Cooldown — nog **{remaining}s** tot je weer coins krijgt."),
+                format!("⏳ Cooldown — **{remaining}s** until you can earn coins again."),
             )
             .await?;
         }
@@ -352,13 +352,17 @@ async fn maybe_spawn_chest(
     // Stuur het chest-bericht met de "Open"-knop.
     let button = serenity::CreateButton::new(CHEST_CUSTOM_ID)
         .emoji('🎁')
-        .label("Open the chest")
+        .label("Try your luck")
         .style(serenity::ButtonStyle::Success);
-    let builder = serenity::CreateMessage::new()
-        .content(
-            "🎁 **A treasure chest appeared!** You lot got the channel buzzing.\n\
-             Click to hop in — it pops in 3 minutes and one lucky opener wins a prize!",
+    let embed = serenity::CreateEmbed::new()
+        .title("🎁 A treasure chest appeared!")
+        .description(
+            "You lot got the channel buzzing. Click **Try your luck** to hop in — \
+             it pops in 3 minutes and one lucky opener wins a prize!",
         )
+        .colour(0xF1_C4_0F);
+    let builder = serenity::CreateMessage::new()
+        .embed(embed)
         .components(vec![serenity::CreateActionRow::Buttons(vec![button])]);
     let sent = match msg.channel_id.send_message(&ctx.http, builder).await {
         Ok(m) => m,
@@ -456,8 +460,11 @@ async fn pop_chest(
         }
     };
 
-    let content = if joiners.is_empty() {
-        "📦 The treasure chest crumbled to dust — nobody opened it in time.".to_string()
+    let embed = if joiners.is_empty() {
+        serenity::CreateEmbed::new()
+            .title("📦 The chest crumbled to dust")
+            .description("Nobody opened it in time.")
+            .colour(0x95_A5_A6)
     } else {
         let idx = rand::thread_rng().gen_range(0..joiners.len());
         let (winner_uid, winner_name) = &joiners[idx];
@@ -468,15 +475,18 @@ async fn pop_chest(
             "chest gepopt: {winner_name} wint {CHEST_PRIZE} coin(s) uit {} deelnemer(s)",
             joiners.len()
         );
-        format!(
-            "💰 **The chest popped!** Out of {} lucky {opener_word}, <@{winner_uid}> \
-             wins **{CHEST_PRIZE} {coin_word}**! Balance: **{total}** 🪙",
-            joiners.len()
-        )
+        serenity::CreateEmbed::new()
+            .title("💰 The chest popped!")
+            .description(format!(
+                "Out of {} lucky {opener_word}, <@{winner_uid}> wins \
+                 **{CHEST_PRIZE} {coin_word}**!\nBalance: **{total}** 🪙",
+                joiners.len()
+            ))
+            .colour(0x6B_9B_52)
     };
 
     let edit = serenity::EditMessage::new()
-        .content(content)
+        .embeds(vec![embed])
         .components(vec![]); // knop verwijderen
     if let Err(e) = channel_id
         .edit_message(http.as_ref(), serenity::MessageId::new(msg_id), edit)
