@@ -8,6 +8,50 @@ serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmea
 > met de user in het Nederlands; de user laat de bouw grotendeels **zelfstandig** afwerken en
 > stuurt achteraf bij.
 
+## 📌 Sessie 2026-07-12 (avond) — MARKET-FEATURES + TREASURE CHEST
+> **Volgende sessie: start hier.** Alles hieronder is gecommit + gepusht (`tale-gh` +
+> `market-gh` subtree) én **gedeployed** op de dev-guild. Reeks kleine iteraties, live getest.
+
+- **Logout naar de topbar** — pill rechtsboven in de groene balk i.p.v. een nav-tab (`39ab399`).
+- **Pas-flow herzien — kopen = direct whitelisten** (`c6ba964`): Buy op een Hytale-pas activeert
+  meteen (geen inventory-tussenstap, geen aparte Use). De **Hytale-naam wordt één keer** mee-
+  getypt in het koopformulier (inline veld zolang er geen naam is), daarna persistent en niet
+  meer gevraagd. Boosts-tab toont enkel nog whitelist-status + (corrigeerbare) naam. `/use/boost`
+  + `boost_slot` verwijderd. Lokaal e2e geverifieerd (stapelen, guard, perma, blokkering).
+- **`bot.py` 1-min reconcile gecommit** (`3b6bc9c`) — draaide al live, git-schuld rechtgezet.
+- **🎁 Treasure chest** (market-bot, `src/bot.rs`): bij **≥ CHEST_DISTINCT_USERS verschillende
+  chatters** binnen 10 min in het **testkanaal** (`#botstuffs-test-channel`,
+  `TEST_CHANNEL_ID`) verschijnt een chest-**embed** met een **Try your luck**-knop. Klikken =
+  meedoen (1 inschrijving/lid, ephemeral teller); **3 min** later popt hij, één random klikker
+  wint. Anti-spam: per-kanaal `active`-vlag tijdens de 3 min + **30-min cooldown** na een pop.
+  In-memory (chest verloren bij bot-herstart; aanvaardbaar).
+  - **`CHEST_DISTINCT_USERS = 2` = TESTWAARDE** (weinig testers) — **prod = 3**.
+  - **Gewogen prijzen** (`chest_prize`, gewichten in ‰): **70%** 50-100, **20%** 100-300,
+    **5%** 300-500, **4%** 500-800, **1%** 800-1000 coins (EV ~148). Dit is de **live** verdeling
+    (`CHEST_TIERS`).
+  - **`CHEST_TIERS_PROPOSAL`** = fijnkorreliger 10-tier voorstel (EV ~157), **enkel getoond** in
+    de `!chest`-embed ter vergelijking — nog niet actief. Omschakelen = de twee arrays wisselen.
+- **`!chest`-commando** — embed met **Current (live)** + **Proposal (finer-grained)** verdeling.
+  **Enkel op de dev-guild** via poise-`check` `dev_guild_only` (snowflake `DEV_GUILD_ID =
+  652452615879262220`); op een prod-guild volledig inert (geen embed, geen actie).
+- **Botcommando's wissen hun aanroep-bericht** vóór uitvoering — centraal via een poise
+  `pre_command`-hook (`5569d0d`). Staande regel, zie memory [[market-bot-commands-clean]].
+  ⚠️ **Vereist dat de bot "Manage Messages" heeft** in de guild/kanaal — anders logt hij
+  `Invalid permissions` en blijft het bericht staan (embed verschijnt wél). De bot heeft
+  Manage Roles maar géén Administrator/Manage Messages en kan zichzelf dat recht **niet**
+  geven → in Server-instellingen → Rollen → `MeadowMarketBot` → Manage Messages AAN.
+- **`!coins`-commando + Discord-leaderboard VERWIJDERD** (`d94a41f`) — leaderboard leeft enkel
+  nog op de site (`/leaderboard`). Dode code opgeruimd (`db::leaderboard`, `LEADERBOARD_SIZE`).
+- **Prod-feedback teruggezet** (`9e8272b`): **`DEV_FEEDBACK = false`** (geen per-bericht coin/
+  cooldown-reply meer) + **`COOLDOWN = 30s`** (was test 10s). *(Dit vervangt de "nog open"-noot
+  van de namiddag-sectie.)* Alle Discord-berichten/feedback in het **Engels**.
+- **Coins-tab**: **huidig saldo groot** (`.earned`), all-time klein eronder — minder verwarrend.
+- **Live-refresh van het saldo** (`bb8d601`): endpoint **`GET /api/balance`** (enkel sessie,
+  géén Discord-call) + een JS-poller (5s) werkt saldo (shop-purse + Coins-tab), all-time en de
+  level-balk live bij op ingelogde pagina's. Geen page-reload meer nodig.
+- **Nog open / testwaarden:** `CHEST_DISTINCT_USERS = 2` (→ 3 voor prod); overweeg het
+  fijnkorrelige chest-voorstel te activeren; `!chest`-`DEV_GUILD_ID` staat op de dev-guild.
+
 ## 📌 Sessie 2026-07-12 (namiddag) — GEDEPLOYED + LIVE-FIXES
 > **Volgende sessie: start hier.** De whitelist-passen-feature is **gepusht + gedeployed** en
 > draait live. Onderweg twee dingen bijgesteld op de prod-host `hytale`:
