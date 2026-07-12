@@ -8,10 +8,36 @@ serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmea
 > met de user in het Nederlands; de user laat de bouw grotendeels **zelfstandig** afwerken en
 > stuurt achteraf bij.
 
-## 📌 Sessie 2026-07-12 (laatste) — ALLES GEBOUWD + GETEST, ENKEL DEPLOY RESTEERT
-> **Volgende sessie: start hier.** Beide kanten zijn af, gebouwd en lokaal getest. Niets is
-> gedeployed of gecommit. De laatste stap (prod-deploy) werd door de auto-mode-classifier
-> geblokkeerd (algemene opdracht, prod-target niet benoemd) — user moet de deploy goedkeuren.
+## 📌 Sessie 2026-07-12 (namiddag) — GEDEPLOYED + LIVE-FIXES
+> **Volgende sessie: start hier.** De whitelist-passen-feature is **gepusht + gedeployed** en
+> draait live. Onderweg twee dingen bijgesteld op de prod-host `hytale`:
+
+- **Gepusht:** 4 commits → `tale-gh` (`cdf078b`) + market-subtree → `market-gh` (`b01d468`).
+- **Market gedeployed** (`./deploy/deploy.sh`) — `market.service` active, `coins.db` gemigreerd.
+- **tale-bot gedeployed** (propere deploy: eerst read-only diff bevestigd dat de live `bot.py`
+  == baseline `325bbae`, dus **geen live edits van Faybelle** overschreven; backup
+  `bot.py.bak-20260712`). `[market]`-sectie toegevoegd aan `/opt/hytale/bot/config.toml`
+  (`enabled=true`, `coins_db="/opt/market/coins.db"`).
+- **Reconcile-interval 5 min → 1 min** (`bot.py`, `@tasks.loop(minutes=1)`): een koper wacht nu
+  ≤1 min i.p.v. ≤5 min op whitelisting. Load verwaarloosbaar (idle-ronde = paar SQLite-reads;
+  console-commando's vuren enkel bij een échte add/remove).
+- **⚠️ FIX coins.db-toegang:** map `/opt/market` stond op `750` (`drwxr-x---`) → de bot-user
+  `hytale` kon de wereld-leesbare `coins.db` (644) niet bereiken (`market coins.db niet
+  gevonden`). Opgelost met **`chmod o+x /opt/market`** (traverse-bit; map krijgt géén leesbit,
+  `secrets.json` blijft `600`). Na de fix leest de reconcile schoon. *(De HANDOVER hieronder
+  beweerde "644 → geen perms-stap nodig"; dat was fout, de maprechten waren het probleem.)*
+- **⚠️ whitelist.json stond `enabled:true`, NIET `false`** (de sectie hieronder zei `false`). De
+  nieuwe `enforce_whitelist()` dwingt dus écht af. Gevolg: de purge haalde **Waldstein** van de
+  whitelist (hij had geen pass en stond **niet** in `protected_names` — enkel Faybelle stond er).
+- **FIX protected_names:** `["Faybelle"]` → **`["Faybelle", "Waldstein"]`** in `config.toml`
+  (backup `config.toml.bak-20260712`), bot herstart → Waldstein terug op `whitelist.json`
+  (UUID `55f2e0de…`). Beide admins zijn nu beschermd (nooit kickbaar, ook zonder pass).
+- **Nog open / let op:** testwaarden `DEV_FEEDBACK=true`/`COOLDOWN=10s` (market `bot.rs`) staan
+  nog aan voor de dev-guild — vóór een echte prod-community terug naar `false`/prod-cooldown.
+  Tale-side TODO blijft: in-game welkom + resttijd bij join.
+
+## 📌 Sessie 2026-07-12 (voormiddag) — GEBOUWD + GETEST *(zie namiddag hierboven: intussen gedeployed)*
+> Beide kanten af, gebouwd en lokaal getest.
 
 **Market (`cargo build --release` ✓, lokaal e2e getest tegen de live rol-API):**
 - **Hytale-passen = echte whitelist.** Use van een pas geeft géén Discord-rol meer maar schrijft
@@ -140,8 +166,9 @@ Leaderboard · ⚙ Manage (admin) · Log out`.
    effect** (enkel koopbaar).
 3. **Prod-guild**: alles draait nog op de **dev-guild**. Voor de echte community: guild/rollen
    in secrets/env aanpassen + bot inviten + hiërarchie.
-4. **Tale-integratie**: de Hytaler/whitelist-rol → echte Hytale-game-whitelist synct nog niet
-   (aparte stap op de tale-server).
+4. **Tale-integratie**: ✅ LIVE sinds 2026-07-12 (namiddag). Market schrijft grants in
+   `hytale_whitelist`; de tale-bot reconcilet elke **1 min** read-only naar `whitelist.json`
+   (`whitelist.json` = `enabled:true`, wordt afgedwongen). Zie de bovenste sessie-sectie.
 5. **Public-profiel**: `coins.is_public` bestaat nog maar wordt niet gebruikt (leaderboard toont
    iedereen); ooit een profielpagina met public-filter.
 6. Losse asset `static/MeadowShard.png` (debug) staat nog in de repo, ongebruikt.
