@@ -749,6 +749,7 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
 }
 
 /// Verbruik één exemplaar van een item uit de inventory (voor boosts).
+#[allow(dead_code)]
 pub fn consume_item(pool: &DbPool, uid: &str, item_id: i64) {
     let conn = pool.get().expect("db");
     conn.execute(
