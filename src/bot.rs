@@ -21,8 +21,14 @@ const LEADERBOARD_SIZE: i64 = 10;
 const PREFIX: &str = "!"; // command-prefix; commando's leveren geen coins op
 // --- daily-beloning (embed-knop) ----------------------------------------
 const DAILY_COOLDOWN: f64 = 24.0 * 3600.0; // 24u tussen twee claims
-const DAILY_MIN: i64 = 1; // makkelijk op te schroeven als de daily groter mag
-const DAILY_MAX: i64 = 3;
+// Streak-daily: dag 1 = random in [BASE_MIN, BASE_MAX]. Elke opeenvolgende dag
+// verhoogt de ondergrens met MIN_STEP en de bovengrens met MAX_STEP. Een dag
+// overslaan reset naar dag 1. Na dag STREAK_CAP stopt de verhoging.
+const DAILY_BASE_MIN: i64 = 10;
+const DAILY_BASE_MAX: i64 = 100;
+const DAILY_MIN_STEP: i64 = 1;
+const DAILY_MAX_STEP: i64 = 5;
+const DAILY_STREAK_CAP: i64 = 200;
 const DAILY_CUSTOM_ID: &str = "daily_claim"; // moet matchen met de embed-knop
 const COINS_CHANNEL: &str = "coins"; // publiek kanaal voor "X earned N coins today."
 // ------------------------------------------------------------------------
@@ -191,7 +197,8 @@ async fn handle_daily(
         .clone()
         .unwrap_or_else(|| mc.user.name.clone());
 
-    let elapsed = now - db::get_last_daily(&data.pool, &uid);
+    let last = db::get_last_daily(&data.pool, &uid);
+    let elapsed = now - last;
     if elapsed < DAILY_COOLDOWN {
         let left = DAILY_COOLDOWN - elapsed;
         let hrs = (left / 3600.0).floor() as i64;
@@ -205,22 +212,39 @@ async fn handle_daily(
         return Ok(());
     }
 
-    let amount = rand::thread_rng().gen_range(DAILY_MIN..=DAILY_MAX);
-    let total = db::award_daily(&data.pool, &uid, &name, amount, now);
-    let unit = if amount == 1 { "coin" } else { "coins" };
-    tracing::info!("daily: {name} +{amount} (totaal {total})");
+    // Streak: op tijd (binnen 48u sinds de vorige claim) → +1 dag, anders reset
+    // naar dag 1. Eerste claim (last == 0) = dag 1. Gecapt op DAILY_STREAK_CAP.
+    let streak = if last <= 0.0 || elapsed >= 2.0 * DAILY_COOLDOWN {
+        1
+    } else {
+        (db::get_daily_streak(&data.pool, &uid) + 1).min(DAILY_STREAK_CAP)
+    };
+    // Dag N: ondergrens/bovengrens schuiven mee met de streak.
+    let step = streak - 1;
+    let lo = DAILY_BASE_MIN + step * DAILY_MIN_STEP;
+    let hi = DAILY_BASE_MAX + step * DAILY_MAX_STEP;
+    let amount = rand::thread_rng().gen_range(lo..=hi);
+    let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
+    let day_word = if streak == 1 { "day" } else { "days" };
+    tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
 
     respond_ephemeral(
         ctx,
         mc,
-        &format!("🎁 You earned **{amount}** {unit} today! Your balance is now **{total}** 🪙"),
+        &format!(
+            "🔥 **{name}** checked in for **{streak}** {day_word}! \
+             You got **{amount}** Meadowcoins today! Balance: **{total}** 🪙"
+        ),
     )
     .await?;
 
     // Publiek regeltje in het #coins-kanaal (indien aanwezig in de guild).
     if let Some(chan) = find_coins_channel(ctx, data).await {
         let _ = chan
-            .say(&ctx.http, format!("{name} earned {amount} {unit} today."))
+            .say(
+                &ctx.http,
+                format!("{name} checked in for {streak} {day_word} and earned {amount} Meadowcoins!"),
+            )
             .await;
     }
     Ok(())

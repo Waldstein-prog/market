@@ -59,6 +59,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/buy", post(buy))
         .route("/use/gem", post(use_gem))
         .route("/use/boost", post(use_boost))
+        .route("/hytale/name", post(set_hytale_name_route))
         .route("/admin/market", get(admin_market))
         .route("/admin/shelf/add", post(admin_shelf_add))
         .route("/admin/shelf/rename", post(admin_shelf_rename))
@@ -400,6 +401,7 @@ fn require_admin(st: &AppState, headers: &HeaderMap) -> Option<(String, String)>
 #[derive(Deserialize)]
 struct HomeQuery {
     tab: Option<String>,
+    msg: Option<String>,
 }
 
 async fn index(
@@ -416,9 +418,18 @@ async fn index(
                 let (coins, _max, _pub, total_earned) = db::get_stats(&st.pool, &uid);
                 let grants = db::active_grants(&st.pool, &uid, now_secs());
                 let tab = q.tab.as_deref().unwrap_or("coins");
+                let notice = match &q.msg {
+                    Some(m) if !m.is_empty() => {
+                        format!("<div class=\"notice ok\">{}</div>", esc(m))
+                    }
+                    _ => String::new(),
+                };
                 (
                     chrome(&name, "home", is_admin(&uid), ""),
-                    inventory_home(&st.pool, &uid, &name, coins, total_earned, &grants, tab),
+                    format!(
+                        "{notice}{}",
+                        inventory_home(&st.pool, &uid, &name, coins, total_earned, &grants, tab)
+                    ),
                     true,
                 )
             } else {
@@ -588,21 +599,58 @@ fn inventory_home(
         pr = shelf("prism", "Prism"),
     );
 
-    // Boosts — Hytale-tickets (verbruikbaar).
+    // Boosts — Hytale-passen: whitelist-status, naam-invoer en Use-knoppen.
     let boosts = db::gems_by_category(pool, "boost");
     let boosts_panel = if boosts.is_empty() {
-        "<div class=\"soon\">🚀 No boosts available yet.</div>".to_string()
+        "<div class=\"soon\">🚀 No passes available yet.</div>".to_string()
     } else {
-        let perma = if db::has_perma_access(pool, uid) {
-            "<div class=\"notice ok\" style=\"margin:.2rem 0 1rem\">🔑 You have permanent Hytale access.</div>".to_string()
-        } else {
-            String::new()
+        let hname = db::get_hytale_name(pool, uid);
+        let has_name = !hname.is_empty();
+
+        // Whitelist-status: permanent, lopende afteller, of niets.
+        let status = match db::get_whitelist(pool, uid, now_secs()) {
+            Some((n, None)) => format!(
+                "<div class=\"notice ok\" style=\"margin:.2rem 0 1rem\">\
+                   🔑 Permanent Hytale access — whitelisted as <b>{}</b>.</div>",
+                esc(&n)
+            ),
+            Some((n, Some(exp))) => format!(
+                "<div class=\"grant\" data-exp=\"{exp}\" style=\"margin:.2rem 0 1rem\">\
+                   <span class=\"glabel\">🎟 Whitelisted as {}</span>\
+                   <span class=\"gtime\">…</span></div>\
+                 <script>(function(){{document.querySelectorAll('.grant[data-exp]').forEach(function(g){{\
+                   var exp=+g.dataset.exp;function t(){{var s=Math.max(0,exp-Date.now()/1000);\
+                   var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
+                   g.querySelector('.gtime').textContent=h+'h '+m+'m '+sec+'s';\
+                   if(s>0)setTimeout(t,1000);}}t();}});}})();</script>",
+                esc(&n)
+            ),
+            None => String::new(),
         };
+
+        // Hytale-naam instellen/wijzigen (nodig om te whitelisten).
+        let name_form = format!(
+            "<form method=\"post\" action=\"/hytale/name\" class=\"hname-form\" \
+               style=\"display:flex;gap:.4rem;align-items:center;margin:.2rem 0 1rem;flex-wrap:wrap\">\
+               <label class=\"k\">Hytale name</label>\
+               <input name=\"hytale_name\" value=\"{val}\" maxlength=\"32\" \
+                 pattern=\"[A-Za-z0-9_]{{1,32}}\" placeholder=\"your in-game name\" \
+                 style=\"flex:1;min-width:8rem\">\
+               <button class=\"btn small\" type=\"submit\">Save</button></form>",
+            val = esc(&hname),
+        );
+
         let slots: String = boosts
             .iter()
             .map(|b| boost_slot(b, owned.contains(&b.id)))
             .collect();
-        format!("{perma}<div class=\"shelf\">{slots}</div>")
+        let hint = if has_name {
+            String::new()
+        } else {
+            "<p class=\"muted\" style=\"margin:.2rem 0\">Set your Hytale name to activate a pass.</p>"
+                .to_string()
+        };
+        format!("{status}{name_form}{hint}<div class=\"shelf\">{slots}</div>")
     };
 
     let cls = |t: &str| if t == active { " on" } else { "" };
@@ -640,11 +688,8 @@ async fn market(
     let owned: std::collections::HashSet<i64> =
         db::owned_item_ids(&st.pool, &uid).into_iter().collect();
 
-    let day = (now_secs() / 86400.0) as i64;
-    let offers: String = db::shop_offers(&st.pool, day, 4)
-        .iter()
-        .map(|it| shop_slot(it, owned.contains(&it.id)))
-        .collect();
+    // Voorlopig toont de shop enkel de Hytale-passen (gems/boosters verborgen tot
+    // er deftige graphics zijn — de daily-offers/gem-code blijft bestaan voor later).
     let tickets: String = db::gems_by_category(&st.pool, "boost")
         .iter()
         .map(|it| shop_slot(it, owned.contains(&it.id)))
@@ -656,8 +701,7 @@ async fn market(
         "<div class=\"shophead\"><h1>🛒 Shop</h1>\
            <div class=\"purse-box\" data-from=\"{from}\">Purse 🪙 \
              <span class=\"purse-n\">{coins}</span></div></div>{notice}\
-         <p class=\"muted\">Today's picks — refreshed every 24h.</p>\
-         <div class=\"slots\">{offers}</div>\
+         <p class=\"muted\">Hytale server passes. Activate a pass from your Inventory → Boosts.</p>\
          <h2 class=\"shelf-title\">🎟 Hytale passes</h2><div class=\"shelf\">{tickets}</div>\
          <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
            var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
@@ -691,7 +735,7 @@ fn item_thumb(it: &db::Item) -> String {
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
 fn shop_slot(it: &db::Item, owned: bool) -> String {
-    let badge = if it.role_id.is_empty() {
+    let badge = if it.category != "boost" {
         String::new()
     } else if it.duration > 0 {
         format!("<div class=\"ibadge\">🎟 {}</div>", human_duration(it.duration))
@@ -1021,6 +1065,11 @@ struct BuyForm {
 }
 
 #[derive(Deserialize)]
+struct HytaleNameForm {
+    hytale_name: String,
+}
+
+#[derive(Deserialize)]
 struct MarketQuery {
     ok: Option<String>,
     err: Option<String>,
@@ -1052,38 +1101,74 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
     Redirect::to(&dest).into_response()
 }
 
-/// Een boost (Hytale-ticket) gebruiken: verbruik het exemplaar en pas het effect
-/// toe — tijdelijke rol (dagpas, 24u-teller) of permanente toegang.
+/// Geldige Hytale-naam? (`^[A-Za-z0-9_]{1,32}$`)
+fn valid_hytale_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Een pas gebruiken = de speler whitelisten op de Hytale-server (géén Discord-rol
+/// meer). Vereist een ingestelde Hytale-naam. Dagpas → +24u (stapelt bovenop de
+/// resterende tijd); permanente pas → permanente whitelist. market voedt enkel de
+/// grant in `hytale_whitelist`; de tale-bot whitelistet + bewaakt de timer.
 async fn use_boost(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
-    if let Some((uid, name)) = require_flowerborn(&st, &headers).await {
-        if db::owned_item_ids(&st.pool, &uid).contains(&f.item_id) {
-            if let Some(item) = db::get_item(&st.pool, f.item_id) {
-                if item.category == "boost" {
-                    db::consume_item(&st.pool, &uid, f.item_id);
-                    if item.duration > 0 {
-                        // Tijdelijke pas: rol met aftel-teller.
-                        if !item.role_id.is_empty() {
-                            let _ = st.dc.set_role(&uid, &item.role_id, true).await;
-                            db::add_role_grant(
-                                &st.pool,
-                                &uid,
-                                &item.role_id,
-                                now_secs() + item.duration as f64,
-                                &item.name,
-                            );
-                        }
-                    } else {
-                        // Permanente pas: permanente toegang (blokkeert de dagpas).
-                        db::set_perma_access(&st.pool, &uid, &name);
-                        if !item.role_id.is_empty() {
-                            let _ = st.dc.set_role(&uid, &item.role_id, true).await;
-                        }
-                    }
-                }
-            }
-        }
+    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let hname = db::get_hytale_name(&st.pool, &uid);
+    if !valid_hytale_name(&hname) {
+        return Redirect::to(&format!(
+            "/?tab=boosts&msg={}",
+            pct("Set your Hytale name first, then use your pass.")
+        ))
+        .into_response();
     }
-    Redirect::to("/?tab=boosts").into_response()
+    if !db::owned_item_ids(&st.pool, &uid).contains(&f.item_id) {
+        return Redirect::to("/?tab=boosts").into_response();
+    }
+    let Some(item) = db::get_item(&st.pool, f.item_id) else {
+        return Redirect::to("/?tab=boosts").into_response();
+    };
+    if item.category != "boost" {
+        return Redirect::to("/?tab=boosts").into_response();
+    }
+    db::consume_item(&st.pool, &uid, f.item_id);
+    let msg = if item.duration > 0 {
+        // Dagpas: whitelist voor de itemduur (normaal 24u), stapelt bovenop de resttijd.
+        let exp = db::grant_day_whitelist(&st.pool, &uid, &hname, item.duration as f64, now_secs());
+        if exp.is_finite() {
+            let left = (exp - now_secs()).max(0.0) as i64;
+            format!("✅ Whitelisted as {hname} — {} of access left.", human_duration(left))
+        } else {
+            format!("✅ You already have permanent access ({hname}).")
+        }
+    } else {
+        // Permanente pas: permanente whitelist (blokkeert de dagpas-aankoop).
+        db::set_perma_access(&st.pool, &uid, &name);
+        db::grant_perma_whitelist(&st.pool, &uid, &hname);
+        format!("🔑 Permanent Hytale access — whitelisted as {hname}.")
+    };
+    Redirect::to(&format!("/?tab=boosts&msg={}", pct(&msg))).into_response()
+}
+
+/// De Hytale-naam van het lid instellen/wijzigen (voor de whitelist).
+async fn set_hytale_name_route(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<HytaleNameForm>,
+) -> Response {
+    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let hname = f.hytale_name.trim();
+    let msg = if valid_hytale_name(hname) {
+        db::set_hytale_name(&st.pool, &uid, &name, hname);
+        format!("✅ Hytale name set to {hname}.")
+    } else {
+        "⚠️ Invalid Hytale name (use 1–32 letters, digits or underscore).".to_string()
+    };
+    Redirect::to(&format!("/?tab=boosts&msg={}", pct(&msg))).into_response()
 }
 
 /// Een ontgrendelde gem "gebruiken": zet je naamkleur op de gem-kleur.

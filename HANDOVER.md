@@ -1,4 +1,4 @@
-# Handover — Meadow Market (2026-07-11)
+# Handover — Meadow Market (2026-07-12)
 
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
@@ -8,7 +8,50 @@ serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmea
 > met de user in het Nederlands; de user laat de bouw grotendeels **zelfstandig** afwerken en
 > stuurt achteraf bij.
 
-## 📌 Sessie 2026-07-11 (laatste)
+## 📌 Sessie 2026-07-12 (laatste) — ALLES GEBOUWD + GETEST, ENKEL DEPLOY RESTEERT
+> **Volgende sessie: start hier.** Beide kanten zijn af, gebouwd en lokaal getest. Niets is
+> gedeployed of gecommit. De laatste stap (prod-deploy) werd door de auto-mode-classifier
+> geblokkeerd (algemene opdracht, prod-target niet benoemd) — user moet de deploy goedkeuren.
+
+**Market (`cargo build --release` ✓, lokaal e2e getest tegen de live rol-API):**
+- **Hytale-passen = echte whitelist.** Use van een pas geeft géén Discord-rol meer maar schrijft
+  een grant in nieuwe tabel `hytale_whitelist(user_id PK, hytale_name, expires REAL NULL=perma)`.
+  Dagpas **stapelt de itemduur** (`item.duration`, normaal 24u — volgt de admin-testwaarde, bv.
+  60s) bovenop de resttijd; permanente pas = `expires NULL` + `perma_access`. Koper zet eerst
+  z'n **Hytale-naam** (`coins.hytale_name`, route `POST /hytale/name`, regex `^[A-Za-z0-9_]{1,32}$`);
+  zonder geldige naam blokkeert Use server-side. **Shop toont voorlopig enkel de passen**
+  (daily-offers + gems verborgen, code bewaard achter `#[allow(dead_code)]`). Boosts-tab =
+  whitelist-status + live JS-afteller + naam-invoer.
+- **Daily-streaksysteem.** Dag 1 random `[10,100]`; elke opeenvolgende dag ondergrens +1 /
+  bovengrens +5 (dag 2 `[11,105]`, dag 200 `[209,1095]`); >48u sinds vorige claim → reset dag 1;
+  cap dag 200. Kolom `coins.daily_streak`; `award_daily(...,streak,...)`. Feedback (ephemeral +
+  #coins): "🔥 Name checked in for N day(s)! You got N Meadowcoins today! Balance: …".
+
+**tale-bot (`tale/bot/bot.py`, `py_compile` ✓, logica lokaal getest):**
+- **`reconcile_market()`** in de bestaande 5-min `pass_maintenance`-lus: leest market's
+  `hytale_whitelist` **READ-ONLY** (`market_grants()`, `file:…?mode=ro`, veilige no-op bij
+  afwezige tabel), doet FIFO `whitelist add/remove` (spam-arm: add enkel wie nog niet present,
+  remove enkel present + niet-beschermd + niet door lokale pas levend). Nieuwe `[market]`-config
+  (`enabled`/`coins_db`) in `config.example.toml` (default uit → op prod op `true` zetten).
+- **Rol-toegang VERWIJDERD** (user: "geen spelers, test-fase, make it work"): `on_member_update`,
+  `sync_whitelist()`/`/sync_whitelist`, en `/link` (+ rol-tak) eruit. Passen (market + eigen
+  `hytale_users`/Twitch) zijn nu de enige whitelist-bronnen. `/opt/market/coins.db` is al 644
+  (wereld-leesbaar) → geen perms-stap nodig.
+
+**⚠️ Deploy-sequence (nog te doen — user moet goedkeuren):**
+```
+cd /home/jo/lab/market && ./deploy/deploy.sh          # migreert prod-coins.db (additief)
+scp /home/jo/lab/tale/bot/bot.py hytale:/opt/hytale/bot/bot.py
+ssh hytale 'grep -q "^\[market\]" /opt/hytale/bot/config.toml || printf "\n[market]\nenabled = true\ncoins_db = \"/opt/market/coins.db\"\n" >> /opt/hytale/bot/config.toml'
+ssh hytale 'systemctl restart hytale-bot'
+```
+Daarna keten verifiëren: pas kopen+Use op de site → `hytale_whitelist`-rij → ≤5 min → `whitelist
+add <naam>` in `whitelist.json`. Reconcile forceerbaar i.p.v. 5 min wachten.
+**Test-waarden** `DEV_FEEDBACK=true`/`COOLDOWN=10s` in market `bot.rs` blijven bewust staan (dev-
+guild test). Vóór ECHTE prod-community terugzetten naar `false`/prod-cooldown. **Nog te committen:
+beide repos** (market subtree-push + tale). Los tale-side TODO: in-game welkom+resttijd bij join.
+
+## 📌 Sessie 2026-07-11
 - **DEV_FEEDBACK=true + COOLDOWN=10s** (test-waarden) staan in `src/bot.rs` en **draaien LIVE**
   op de dev-guild (gedeployed) — Waldstein test grondig de coins. ⚠️ **Vóór een echte prod-uitrol
   terugzetten** naar `DEV_FEEDBACK=false` + prod-cooldown. (Cooldown = per lid, één award per 10s.)

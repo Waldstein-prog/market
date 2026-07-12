@@ -64,8 +64,50 @@ gewenst.)
   read-only, sync naar de Hytale-whitelist via FIFO (add/remove op basis van expiry).
 
 ## Volgorde bij implementatie
-1. market DB+web: hytale_name-veld, meerdere dagpassen in inventory, Use=+24u-stapelen,
-   `hytale_whitelist`-tabel, shop→enkel passen.
-2. coins.db groeps-leesbaar (perms) — valt samen met de geparkeerde market-secrets-perms.
-3. tale-bot whitelist-reconcile + in-game welkom met resttijd.
-4. build (`cargo build --release`) → `market/deploy/deploy.sh` → test op dev-guild.
+1. ✅ **KLAAR (2026-07-12, lokaal getest)** — market DB+web: `coins.hytale_name`-veld +
+   `/hytale/name`-route (validatie `^[A-Za-z0-9_]{1,32}$`), meerdere dagpassen in inventory,
+   Use = whitelist (géén rol meer) met **+24u-stapelen**, `hytale_whitelist(user_id PK,
+   hytale_name, expires REAL NULL=perma)`-tabel, shop → **enkel de passen**. Boosts-tab toont
+   whitelist-status + live afteller + naam-invoer. E2e geverifieerd via HTTP tegen de live
+   rol-API (koop→Use→stapel 24u→48u→perma NULL, naam-gate, ongeldige naam geweigerd).
+   Rol-code (`add_role_grant`/`has_perma_access`/`shop_offers`) bewaard met `#[allow(dead_code)]`.
+   **Nog niet gedeployed.**
+2. ✅ **coins.db al leesbaar** — `/opt/market/coins.db` staat op mode **644 (wereld-leesbaar)**,
+   dus de bot-user (`hytale`) kan hem read-only openen. Geen extra perms-stap nodig (blijft zo
+   houden: als market later 640 market:market zet, moet `hytale` in de `market`-groep).
+3. ✅ **KLAAR (2026-07-12) — tale-bot whitelist-reconcile** in `tale/bot/bot.py`:
+   - `market_grants()` leest `hytale_whitelist` **READ-ONLY** (`file:…?mode=ro`, timeout 2s);
+     dedupt op naam (permanent wint), valideert `^[A-Za-z0-9_]{1,32}$`, en is een **veilige
+     no-op** bij ontbrekende DB/tabel (market nog niet uitgerold → `sqlite3.Error` → lege dict).
+   - `reconcile_market()` draait in de bestaande **5-min `pass_maintenance`-lus**: geldige/
+     permanente grant → `whitelist add` (enkel als nog niet zichtbaar → spam-arm, de add leert
+     de naam in names.json); verlopen → `whitelist remove` (enkel als nog present én niet
+     beschermd/niet door een lokale hytale_users-pas levend gehouden).
+   - Config: nieuwe `[market]`-sectie (`enabled`, `coins_db`) in `config.example.toml`
+     (default `enabled=false`). **Op prod moet `[market] enabled=true` + `coins_db` in
+     `/opt/hytale/bot/config.toml`** vóór het werkt.
+   - Logica lokaal getest (read-only lezer, dedup, add/remove-beslissingen, no-op bij
+     afwezige tabel). **Nog niet gedeployed.**
+   - ✅ **Rol-cutover in de code gedaan** (zoals de spec bovenaan vraagt): `has_whitelist_role`,
+     `sync_whitelist`, `on_member_update`, `/sync_whitelist` én `/link` zijn **verwijderd** uit
+     `bot.py`. Whitelisten loopt voortaan enkel via de passen (market + lokale `hytale_users` +
+     Twitch). ⚠️ **Deploy-nuance:** dit is een code-cutover, geen live cutover. De whitelist zelf
+     is persistent op de server en `reconcile_market` is **additief** (verwijdert enkel
+     market-verlopen namen, nooit rol-spelers), dus reeds-gewhiteliste spelers vallen niet weg —
+     maar zodra dit gedeployd wordt, worden **nieuwe rol-toekenningen niet meer gesynct**. Deploy
+     dus pas als market de bron wordt (of accepteer bewust dat de rol vanaf dan geen effect meer
+     heeft). Nog **niet gecommit als deploy-beslissing** — code is gecommit, deploy bewust
+     uitgesteld (2026-07-12).
+   - **Nog te doen (los, tale-side):** in-game welkom + resttijd bij join (vergt join-detectie
+     via de chat-bridge/serverlog; niet in deze reconcile).
+4. build ✅ (market `cargo build --release`) → `market/deploy/deploy.sh` → `[market]`-config op
+   de VPS + `systemctl restart hytale-bot` → test op dev-guild.
+
+## Ook gebouwd 2026-07-12 (los van de passen): daily-streaksysteem
+De daily-embedknop (`bot.rs`) heeft nu een **streak**: dag 1 = random `[10,100]`; elke
+opeenvolgende dag schuift ondergrens `+1` en bovengrens `+5` (dag 2 = `[11,105]`, dag 200 =
+`[209,1095]`). Een dag overslaan (>48u sinds vorige claim) reset naar dag 1; na dag 200 stopt de
+verhoging. Kolom `coins.daily_streak`; `award_daily` schrijft de streak mee. Feedback:
+"🔥 **Name** checked in for **N** day(s)! You got **N** Meadowcoins today! Balance: …".
+Formule numeriek geverifieerd tegen de spec. (Streak zelf is enkel via de Discord-knop te
+triggeren, niet via HTTP.)

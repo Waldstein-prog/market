@@ -21,7 +21,8 @@ pub fn init_pool(path: &str) -> DbPool {
             total_earned INTEGER NOT NULL DEFAULT 0,
             name_color   TEXT NOT NULL DEFAULT '',
             perma_access INTEGER NOT NULL DEFAULT 0,
-            discord_color TEXT NOT NULL DEFAULT ''
+            discord_color TEXT NOT NULL DEFAULT '',
+            daily_streak INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token    TEXT PRIMARY KEY,
@@ -68,6 +69,11 @@ pub fn init_pool(path: &str) -> DbPool {
             day     INTEGER NOT NULL,
             item_id INTEGER NOT NULL,
             PRIMARY KEY (day, item_id)
+        );
+        CREATE TABLE IF NOT EXISTS hytale_whitelist (
+            user_id     TEXT PRIMARY KEY,   -- Discord-user (één Hytale-account per lid)
+            hytale_name TEXT NOT NULL,      -- de in-game naam om te whitelisten
+            expires     REAL                -- NULL = permanent, anders epoch-seconden
         );",
     )
     .expect("kan tabel niet aanmaken");
@@ -81,6 +87,8 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "name_color", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "perma_access", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "discord_color", "TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "coins", "hytale_name", "TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "coins", "daily_streak", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "category", "TEXT NOT NULL DEFAULT ''");
@@ -150,6 +158,8 @@ fn seed_horseshoe(pool: &DbPool) {
 
 /// De dagelijkse shop-selectie: `n` items voor `day`, stabiel bewaard in
 /// daily_shop. Pool = alle koopbare niet-boost items (gems + boosters).
+/// (Tijdelijk ongebruikt: shop toont voorlopig enkel de Hytale-passen.)
+#[allow(dead_code)]
 pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut ids: Vec<i64> = {
@@ -387,20 +397,41 @@ pub fn get_last_daily(pool: &DbPool, user_id: &str) -> f64 {
     .unwrap_or(0.0)
 }
 
-/// Daily-beloning: tel `amount` bij, zet last_daily (eigen 24u-cooldown),
-/// houd max_balance bij. Returnt het nieuwe totaal.
-pub fn award_daily(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64) -> i64 {
+/// De huidige daily-streak van een lid (0 als er nog geen daily geclaimd is).
+pub fn get_daily_streak(pool: &DbPool, user_id: &str) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT daily_streak FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("query daily_streak")
+    .unwrap_or(0)
+}
+
+/// Daily-beloning: tel `amount` bij, zet last_daily (eigen 24u-cooldown) en de
+/// nieuwe `streak`, houd max_balance bij. Returnt het nieuwe totaal.
+pub fn award_daily(
+    pool: &DbPool,
+    user_id: &str,
+    username: &str,
+    amount: i64,
+    streak: i64,
+    ts: f64,
+) -> i64 {
     let conn = pool.get().expect("db");
     conn.execute(
-        "INSERT INTO coins (user_id, username, coins, last_daily, max_balance, total_earned)
-         VALUES (?1, ?2, ?3, ?4, ?3, ?3)
+        "INSERT INTO coins (user_id, username, coins, last_daily, daily_streak, max_balance, total_earned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?3, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
              coins        = coins + excluded.coins,
              username     = excluded.username,
              last_daily   = excluded.last_daily,
+             daily_streak = excluded.daily_streak,
              max_balance  = MAX(max_balance, coins + excluded.coins),
              total_earned = total_earned + excluded.coins",
-        params![user_id, username, amount, ts],
+        params![user_id, username, amount, ts, streak],
     )
     .expect("insert daily");
     conn.query_row(
@@ -739,7 +770,8 @@ pub fn set_perma_access(pool: &DbPool, uid: &str, username: &str) {
     .expect("set perma_access");
 }
 
-/// Heeft dit lid permanente toegang?
+/// Heeft dit lid permanente toegang? (behouden voor toekomstig gebruik.)
+#[allow(dead_code)]
 pub fn has_perma_access(pool: &DbPool, uid: &str) -> bool {
     let conn = pool.get().expect("db");
     conn.query_row(
@@ -751,6 +783,98 @@ pub fn has_perma_access(pool: &DbPool, uid: &str) -> bool {
     .expect("query perma_access")
     .unwrap_or(0)
         != 0
+}
+
+// --- Hytale-whitelist (passen = echte whitelist, geen Discord-rol) -------
+
+/// De opgeslagen Hytale-naam van een lid (leeg = nog niet ingesteld).
+pub fn get_hytale_name(pool: &DbPool, uid: &str) -> String {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT hytale_name FROM coins WHERE user_id = ?1",
+        params![uid],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .expect("query hytale_name")
+    .unwrap_or_default()
+}
+
+/// Bewaar/actualiseer de Hytale-naam van een lid. Verzet meteen de naam op een
+/// eventueel lopende whitelist-grant (dezelfde speler, andere in-game naam).
+pub fn set_hytale_name(pool: &DbPool, uid: &str, username: &str, hytale_name: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coins (user_id, username, hytale_name) VALUES (?1, ?2, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET hytale_name = excluded.hytale_name,
+                                            username = excluded.username",
+        params![uid, username, hytale_name],
+    )
+    .expect("set hytale_name");
+    conn.execute(
+        "UPDATE hytale_whitelist SET hytale_name = ?2 WHERE user_id = ?1",
+        params![uid, hytale_name],
+    )
+    .ok();
+}
+
+/// De actieve whitelist-grant van een lid: (hytale_name, expires).
+/// `expires` = None ⇒ permanent. Geeft None als er geen (geldige) grant is.
+pub fn get_whitelist(pool: &DbPool, uid: &str, now: f64) -> Option<(String, Option<f64>)> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT hytale_name, expires FROM hytale_whitelist WHERE user_id = ?1",
+        params![uid],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?)),
+    )
+    .optional()
+    .expect("query whitelist")
+    .filter(|(_, exp)| exp.map_or(true, |e| e > now))
+}
+
+/// Ken een tijdelijke pas toe: stapelt `add_secs` (de itemduur, normaal 24u) bovenop de
+/// resterende tijd (reset niet). Al permanent ⇒ ongemoeid. Retourneert de nieuwe
+/// vervaltijd (epoch). `add_secs` volgt de item-duur zodat een admin een testwaarde
+/// (bv. 60s) kan zetten om verloop te testen.
+pub fn grant_day_whitelist(pool: &DbPool, uid: &str, hytale_name: &str, add_secs: f64, now: f64) -> f64 {
+    let conn = pool.get().expect("db");
+    let existing: Option<Option<f64>> = conn
+        .query_row(
+            "SELECT expires FROM hytale_whitelist WHERE user_id = ?1",
+            params![uid],
+            |r| r.get::<_, Option<f64>>(0),
+        )
+        .optional()
+        .expect("query whitelist expires");
+    // Bestaande permanente grant: niets te stapelen.
+    if let Some(None) = existing {
+        return f64::INFINITY;
+    }
+    let base = match existing {
+        Some(Some(exp)) if exp > now => exp,
+        _ => now,
+    };
+    let new_exp = base + add_secs;
+    conn.execute(
+        "INSERT INTO hytale_whitelist (user_id, hytale_name, expires) VALUES (?1, ?2, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET hytale_name = excluded.hytale_name,
+                                            expires = excluded.expires",
+        params![uid, hytale_name, new_exp],
+    )
+    .expect("grant day whitelist");
+    new_exp
+}
+
+/// Ken een permanente whitelist toe (permanente pas).
+pub fn grant_perma_whitelist(pool: &DbPool, uid: &str, hytale_name: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO hytale_whitelist (user_id, hytale_name, expires) VALUES (?1, ?2, NULL)
+         ON CONFLICT(user_id) DO UPDATE SET hytale_name = excluded.hytale_name,
+                                            expires = NULL",
+        params![uid, hytale_name],
+    )
+    .expect("grant perma whitelist");
 }
 
 /// Ontgrendelde item-id's (bingokaart) van een lid.
@@ -829,6 +953,8 @@ pub fn get_name_color(pool: &DbPool, uid: &str) -> String {
 }
 
 /// Registreer een tijdelijke rol-toekenning die op `expires_at` weer weg moet.
+/// (Passen gebruiken nu whitelist i.p.v. rollen; behouden voor gem-/kleurrollen.)
+#[allow(dead_code)]
 pub fn add_role_grant(pool: &DbPool, uid: &str, role_id: &str, expires_at: f64, label: &str) {
     let conn = pool.get().expect("db");
     conn.execute(
