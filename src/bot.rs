@@ -349,19 +349,17 @@ fn chest_odds_embed() -> serenity::CreateEmbed {
         .colour(0xF1_C4_0F)
 }
 
-/// `!chest` — toon de prijsverdeling (huidig + voorstel). ENKEL op de dev-guild;
-/// op een latere prod-guild reageert dit commando nooit.
-#[poise::command(prefix_command)]
+/// Poise-check: laat een commando enkel toe op de dev-guild. Faalt de check (bv. op
+/// een prod-guild), dan draait het commando NIET en wordt ook `pre_command` (de
+/// bericht-opruiming) overgeslagen — dus volledig inert op prod.
+async fn dev_guild_only(ctx: Context<'_>) -> Result<bool, Error> {
+    Ok(ctx.guild_id().map(|g| g.get()) == Some(DEV_GUILD_ID))
+}
+
+/// `!chest` — toon de prijsverdeling (huidig + fijnkorrelig voorstel). Enkel dev-guild.
+/// Het commando-bericht wordt centraal opgeruimd door de `pre_command`-hook.
+#[poise::command(prefix_command, check = "dev_guild_only")]
 pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
-    if ctx.guild_id().map(|g| g.get()) != Some(DEV_GUILD_ID) {
-        return Ok(());
-    }
-    // Ruim het commando-bericht op (properder kanaal); faalt dat, toon toch de embed.
-    if let poise::Context::Prefix(pctx) = ctx {
-        if let Err(e) = pctx.msg.delete(ctx.serenity_context()).await {
-            tracing::warn!("kan !chest-bericht niet verwijderen: {e}");
-        }
-    }
     ctx.send(poise::CreateReply::default().embed(chest_odds_embed()))
         .await?;
     Ok(())
@@ -603,6 +601,18 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(PREFIX.to_string()),
                 ..Default::default()
+            },
+            // Steeds: wis het commando-bericht vóór uitvoering (properder kanaal).
+            // Draait ná de checks (zie run_invocation), dus niet op een guild waar de
+            // check faalt → een dev-only commando raakt prod ook hiermee niet aan.
+            pre_command: |ctx| {
+                Box::pin(async move {
+                    if let poise::Context::Prefix(pctx) = ctx {
+                        if let Err(e) = pctx.msg.delete(ctx.serenity_context()).await {
+                            tracing::warn!("kan commando-bericht niet verwijderen: {e}");
+                        }
+                    }
+                })
             },
             event_handler: |ctx, event, framework, data| {
                 Box::pin(event_handler(ctx, event, framework, data))
