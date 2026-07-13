@@ -18,6 +18,10 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
+- **/admin/coins — twee checkboxes "current" + "all time"** naast Add/Set: de bewerking raakt
+  enkel de aangevinkte rekening(en) (`coins` en/of `total_earned`). Aanleiding: Faybelle deed
+  Add −270 → correct van huidig saldo af, maar all-time bleef ongewijzigd. Denk aan: undo die
+  bij Set/Add op `total_earned` óók total_earned herstelt (nu enkel `coins` in `admin_undo`).
 - **Info-pagina op de site** (accordion): de titels (`##`) tonen, klik = uitleg uit-/invouwen; bold
   respecteren. Bron-tekst (dev #meadowmarket, Faybelle-bericht `1526255690413510783`):
   ```
