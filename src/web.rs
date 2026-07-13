@@ -348,6 +348,8 @@ a.link{{color:{MEADOW}}}
 .shelf .slot{{flex:0 0 auto;width:136px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
+.shelf.shop .slot{{width:180px}}
+.shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
 .nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap}}
 .swatch{{flex:1 1 140px;text-align:center;padding:.7rem;border-radius:11px;
@@ -826,7 +828,7 @@ async fn market(
                 return String::new();
             }
             format!(
-                "<h2 class=\"shelf-title\">{title}</h2><div class=\"shelf\">{slots}</div>",
+                "<h2 class=\"shelf-title\">{title}</h2><div class=\"shelf shop\">{slots}</div>",
                 title = esc(title),
             )
         })
