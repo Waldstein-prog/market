@@ -313,7 +313,7 @@ async fn event_handler(
                     respond_ephemeral(
                         ctx,
                         mc,
-                        "🚧 The Meadow Market website is still under construction — coming soon! For now you earn & claim right here in Discord.",
+                        "🚧 The Meadow Market website is still under construction — coming soon!",
                     )
                     .await?;
                 } else if mc.data.custom_id == MARKET_INFO_CUSTOM_ID {
@@ -518,7 +518,7 @@ fn chest_embed(pop_ts: i64, joiners: usize) -> serenity::CreateEmbed {
         desc.push_str(&format!("\nNeeds **{need}** more {p}."));
     }
     serenity::CreateEmbed::new()
-        .title("🎁 A treasure chest appeared!")
+        .title("🎁 Fortuna's Favour")
         .description(desc)
         .image("attachment://chest.png") // grote chest onderaan
         .thumbnail("attachment://coin.png") // coin rechtsboven
