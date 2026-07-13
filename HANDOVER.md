@@ -47,6 +47,9 @@ Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten 
   Boosters** precies zoals Manage. ⚠️ Gems zonder afbeelding renderen als gekleurde bolletjes —
   graphics zijn de reden dat ze eerder verborgen waren; shop is nog **niet zichtbaar voor members**
   (site-gate), dus veilig om verder te polijsten.
+- **Shop-itemkaders verbreed** (`66ce175`): shop-shelves dragen nu een `.shelf.shop`-modifier —
+  kaarten **136px→180px** en naam `white-space:nowrap`+ellipsis, zodat "Hytale Permanent Pass" op
+  **één regel** past i.p.v. te wrappen. De gems-shelf op de Inventory-pagina blijft 136px.
 
 ## ✅ Sessie (2026-07-13 avond) — server-log + chest-fix, LIVE
 - **Pro server-log op de website (admin-only)** — GEBOUWD + **GEDEPLOYED** (draait op prod,
