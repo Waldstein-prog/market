@@ -7,11 +7,12 @@
 //! - `/admin`       de Fase-I rol-toggle (intern beheertool, ongewijzigd).
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Form, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Form, Multipart, Path, Query, Request, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{COOKIE, SET_COOKIE},
     },
+    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -100,6 +101,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/api/toggle", post(api_toggle))
         .route("/api/balance", get(api_balance))
         .route("/healthz", get(|| async { "ok" }))
+        .layer(middleware::from_fn_with_state(state.clone(), gate))
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8700));
@@ -108,6 +110,32 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .expect("kan poort 8700 niet binden");
     tracing::info!("Web-server luistert op http://0.0.0.0:8700");
     axum::serve(listener, app).await.expect("web-server crashte");
+}
+
+/// Toegangs-gate: niet-admins zien enkel de publieke /info-pagina (+ afbeeldingen,
+/// login/oauth, healthz). Alle andere paden → redirect naar /info. Admins houden
+/// volle toegang tot de hele site (tijdelijk, tot de site publiek opengaat).
+async fn gate(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let public = path == "/info"
+        || path.starts_with("/img/")
+        || path == "/login"
+        || path == "/auth/callback"
+        || path == "/logout"
+        || path == "/healthz"
+        || path == "/favicon.ico";
+    if public {
+        return next.run(req).await;
+    }
+    let admin = cookie(req.headers(), "session")
+        .and_then(|t| db::get_session(&st.pool, &t))
+        .map(|(uid, _)| is_admin(&uid))
+        .unwrap_or(false);
+    if admin {
+        next.run(req).await
+    } else {
+        Redirect::to("/info").into_response()
+    }
 }
 
 // --- helpers ------------------------------------------------------------
