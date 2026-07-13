@@ -112,6 +112,7 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "discord_color", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "hytale_name", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "daily_streak", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "admin_undo", "prev_earned", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "category", "TEXT NOT NULL DEFAULT ''");
@@ -472,20 +473,60 @@ fn current_coins(conn: &rusqlite::Connection, user_id: &str) -> i64 {
 /// Zet het saldo op een absolute waarde (startwaarde): coins + total_earned +
 /// max_balance = `value`, zodat het lid meteen het juiste level heeft en op het
 /// All-time-leaderboard verschijnt. Returnt het vorige saldo.
-pub fn admin_set_coins(pool: &DbPool, user_id: &str, username: &str, value: i64) -> i64 {
+/// Alle all-time-verdiensten (user_id → total_earned).
+pub fn all_earned(pool: &DbPool) -> std::collections::HashMap<String, i64> {
     let conn = pool.get().expect("db");
-    let prev = current_coins(&conn, user_id);
+    let mut stmt = conn
+        .prepare("SELECT user_id, total_earned FROM coins")
+        .expect("prepare all_earned");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .expect("query all_earned");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// Pas het saldo aan. `set`=true → zet op `val`; anders tel `val` erbij. `current`
+/// raakt `coins`, `alltime` raakt `total_earned` (naar keuze beide). `max_balance`
+/// volgt het (mogelijk nieuwe) saldo. Returnt (vorig coins, vorig total_earned).
+pub fn admin_adjust(
+    pool: &DbPool,
+    user_id: &str,
+    username: &str,
+    val: i64,
+    set: bool,
+    current: bool,
+    alltime: bool,
+) -> (i64, i64) {
+    let conn = pool.get().expect("db");
+    let (pc, pe): (i64, i64) = conn
+        .query_row(
+            "SELECT coins, total_earned FROM coins WHERE user_id = ?1",
+            params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .expect("q adjust")
+        .unwrap_or((0, 0));
+    let coins = if current {
+        if set { val } else { pc + val }
+    } else {
+        pc
+    };
+    let earned = if alltime {
+        if set { val } else { pe + val }
+    } else {
+        pe
+    };
     conn.execute(
-        "INSERT INTO coins (user_id, username, coins, total_earned, max_balance) VALUES (?1, ?2, ?3, ?3, ?3)
+        "INSERT INTO coins (user_id, username, coins, total_earned, max_balance) VALUES (?1, ?2, ?3, ?4, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
-             coins = excluded.coins,
-             total_earned = excluded.coins,
+             coins = ?3, total_earned = ?4,
              username = excluded.username,
-             max_balance = MAX(max_balance, excluded.coins)",
-        params![user_id, username, value],
+             max_balance = MAX(max_balance, ?3)",
+        params![user_id, username, coins, earned],
     )
-    .expect("admin set coins");
-    prev
+    .expect("admin adjust");
+    (pc, pe)
 }
 
 /// Tel een (mogelijk negatief) bedrag bij het saldo; returnt het vorige saldo.
@@ -506,44 +547,51 @@ pub fn admin_add_coins(pool: &DbPool, user_id: &str, username: &str, delta: i64)
 }
 
 /// Bewaar de laatste ingreep (enige rij) zodat ze ongedaan gemaakt kan worden.
-pub fn admin_record_undo(pool: &DbPool, user_id: &str, username: &str, prev_coins: i64) {
+pub fn admin_record_undo(
+    pool: &DbPool,
+    user_id: &str,
+    username: &str,
+    prev_coins: i64,
+    prev_earned: i64,
+) {
     let conn = pool.get().expect("db");
     conn.execute(
-        "INSERT INTO admin_undo (id, user_id, username, prev_coins) VALUES (1, ?1, ?2, ?3)
+        "INSERT INTO admin_undo (id, user_id, username, prev_coins, prev_earned) VALUES (1, ?1, ?2, ?3, ?4)
          ON CONFLICT(id) DO UPDATE SET
              user_id = excluded.user_id,
              username = excluded.username,
-             prev_coins = excluded.prev_coins",
-        params![user_id, username, prev_coins],
+             prev_coins = excluded.prev_coins,
+             prev_earned = excluded.prev_earned",
+        params![user_id, username, prev_coins, prev_earned],
     )
     .expect("record undo");
 }
 
-/// De laatste ongedaan-maakbare ingreep: (user_id, username, prev_coins).
-pub fn admin_get_undo(pool: &DbPool) -> Option<(String, String, i64)> {
+/// De laatste ongedaan-maakbare ingreep: (user_id, username, prev_coins, prev_earned).
+pub fn admin_get_undo(pool: &DbPool) -> Option<(String, String, i64, i64)> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT user_id, username, prev_coins FROM admin_undo WHERE id = 1",
+        "SELECT user_id, username, prev_coins, prev_earned FROM admin_undo WHERE id = 1",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )
     .optional()
     .expect("get undo")
 }
 
-/// Maak de laatste ingreep ongedaan: zet het saldo terug en wis de undo-rij.
-/// Returnt (username, hersteld_saldo) als er iets te herstellen was.
-pub fn admin_apply_undo(pool: &DbPool) -> Option<(String, i64)> {
-    let (uid, username, prev) = admin_get_undo(pool)?;
+/// Maak de laatste ingreep ongedaan: zet coins + total_earned terug en wis de
+/// undo-rij. Returnt (username, coins, total_earned) als er iets te herstellen was.
+pub fn admin_apply_undo(pool: &DbPool) -> Option<(String, i64, i64)> {
+    let (uid, username, pc, pe) = admin_get_undo(pool)?;
     let conn = pool.get().expect("db");
     conn.execute(
-        "UPDATE coins SET coins = ?2 WHERE user_id = ?1",
-        params![uid, prev],
+        "UPDATE coins SET coins = ?2, total_earned = ?3 WHERE user_id = ?1",
+        params![uid, pc, pe],
     )
     .expect("apply undo");
     conn.execute("DELETE FROM admin_undo WHERE id = 1", [])
         .expect("clear undo");
-    Some((username, prev))
+    Some((username, pc, pe))
 }
 
 // --- leave/rejoin archief -----------------------------------------------

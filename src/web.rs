@@ -369,6 +369,7 @@ a.link{{color:{MEADOW}}}
 .ctable .cbal{{font-variant-numeric:tabular-nums;color:#cfe0c8;white-space:nowrap}}
 .ctable .cbal .mc{{height:1em;vertical-align:-.15em}}
 .coinform{{display:flex;gap:.4rem;align-items:center;margin:0;flex-wrap:wrap}}
+.coinform .cbx{{font-size:.72rem;color:#9db095;display:inline-flex;align-items:center;gap:.2rem;white-space:nowrap;cursor:pointer}}
 .coinform input[type=number]{{width:90px;padding:.32rem;border:1px solid #2c3d2a;border-radius:7px;background:#0e1510;color:#e8f0e4;font:inherit}}
 .undoform{{margin:0}}
 .undonote{{font-size:.8rem}}
@@ -1449,6 +1450,10 @@ struct CoinOp {
     #[serde(default)]
     username: String,
     amount: i64,
+    #[serde(default)]
+    cur: Option<String>, // checkbox "current" (coins)
+    #[serde(default)]
+    alltime: Option<String>, // checkbox "all time" (total_earned)
 }
 
 #[derive(Deserialize)]
@@ -1469,6 +1474,7 @@ async fn admin_coins(
     let sort = q.sort.as_deref().unwrap_or("desc"); // az | za | asc | desc
 
     let balances = db::all_balances(&st.pool);
+    let earned = db::all_earned(&st.pool);
     let archives = db::all_archives(&st.pool);
 
     // Namen uit de prod-guild, aangevuld met archief-namen / id's.
@@ -1520,6 +1526,7 @@ async fn admin_coins(
         .iter()
         .map(|uid| {
             let bal = *balances.get(uid).unwrap_or(&0);
+            let ea = *earned.get(uid).unwrap_or(&0);
             let nm = esc(names.get(uid).map(|s| s.as_str()).unwrap_or(uid));
             let archive = match archives.get(uid) {
                 Some((c, _e, _n)) => format!(
@@ -1535,10 +1542,13 @@ async fn admin_coins(
             };
             format!(
                 "<tr><td class=\"cname\">{nm}</td><td class=\"cbal\">{MC} {bal}</td>\
+                 <td class=\"cbal\">{MC} {ea}</td>\
                  <td class=\"cact\"><form method=\"post\" class=\"coinform\">\
                    <input type=\"hidden\" name=\"user_id\" value=\"{uid}\">\
                    <input type=\"hidden\" name=\"username\" value=\"{nm}\">\
                    <input type=\"number\" name=\"amount\" value=\"0\" required>\
+                   <label class=\"cbx\"><input type=\"checkbox\" name=\"cur\" value=\"1\" checked> current</label>\
+                   <label class=\"cbx\"><input type=\"checkbox\" name=\"alltime\" value=\"1\" checked> all&nbsp;time</label>\
                    <button class=\"btn small\" formaction=\"/admin/coins/add\">Add</button>\
                    <button class=\"btn small ghost\" formaction=\"/admin/coins/set\">Set</button>\
                  </form>{archive}</td></tr>"
@@ -1547,11 +1557,11 @@ async fn admin_coins(
         .collect();
 
     let undo = match db::admin_get_undo(&st.pool) {
-        Some((_id, uname, prev)) => format!(
+        Some((_id, uname, pc, pe)) => format!(
             "<form method=\"post\" action=\"/admin/coins/undo\" class=\"undoform\" \
-               title=\"Undo the last change ({nm} → {prev})\">\
+               title=\"Undo the last change ({nm} → current {pc}, all-time {pe})\">\
                <button class=\"btn small\" type=\"submit\">↶ Undo</button></form>\
-             <span class=\"muted undonote\">last: <b>{nm}</b> → revert to {prev}</span>",
+             <span class=\"muted undonote\">last: <b>{nm}</b> → revert to current {pc} / all-time {pe}</span>",
             nm = esc(&uname),
         ),
         None => "<span class=\"undoform\"><button class=\"btn small ghost\" type=\"button\" disabled \
@@ -1576,7 +1586,7 @@ async fn admin_coins(
     let body = format!(
         "<div class=\"chead\"><h1>🪙 Coins management</h1>{undo}</div>\
          <div class=\"ctoolbar\">{sorts}</div>{note}\
-         <table class=\"ctable\"><thead><tr><th>Member</th><th>Balance</th><th>Adjust</th></tr></thead>\
+         <table class=\"ctable\"><thead><tr><th>Member</th><th>Balance</th><th>All-time</th><th>Adjust</th></tr></thead>\
          <tbody>{rows}</tbody></table>{AUTO_REFRESH_JS}"
     );
     Html(shell(
@@ -1588,17 +1598,28 @@ async fn admin_coins(
     .into_response()
 }
 
+/// Voer een Add/Set uit op de aangevinkte rekening(en) en bewaar de undo.
+fn apply_coin_op(st: &AppState, f: &CoinOp, set: bool) {
+    let uid = f.user_id.trim();
+    if uid.is_empty() {
+        return;
+    }
+    let current = f.cur.is_some();
+    let alltime = f.alltime.is_some();
+    if !current && !alltime {
+        return; // geen rekening aangevinkt → niks doen
+    }
+    let (pc, pe) = db::admin_adjust(&st.pool, uid, &f.username, f.amount, set, current, alltime);
+    db::admin_record_undo(&st.pool, uid, &f.username, pc, pe);
+}
+
 async fn admin_coins_add(
     State(st): State<AppState>,
     headers: HeaderMap,
     Form(f): Form<CoinOp>,
 ) -> Response {
     if require_admin(&st, &headers).is_some() {
-        let uid = f.user_id.trim();
-        if !uid.is_empty() {
-            let prev = db::admin_add_coins(&st.pool, uid, &f.username, f.amount);
-            db::admin_record_undo(&st.pool, uid, &f.username, prev);
-        }
+        apply_coin_op(&st, &f, false);
     }
     Redirect::to("/admin/coins").into_response()
 }
@@ -1609,11 +1630,7 @@ async fn admin_coins_set(
     Form(f): Form<CoinOp>,
 ) -> Response {
     if require_admin(&st, &headers).is_some() {
-        let uid = f.user_id.trim();
-        if !uid.is_empty() {
-            let prev = db::admin_set_coins(&st.pool, uid, &f.username, f.amount);
-            db::admin_record_undo(&st.pool, uid, &f.username, prev);
-        }
+        apply_coin_op(&st, &f, true);
     }
     Redirect::to("/admin/coins").into_response()
 }
