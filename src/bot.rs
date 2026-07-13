@@ -392,7 +392,7 @@ async fn handle_daily(
         let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
             .say(
                 &ctx.http,
-                format!("{name} checked in for {streak} {day_word} and earned {amount} {COIN_EMOJI}!"),
+                format!("<@{uid}> checked in for **{streak}** {day_word} and earned **{amount}** {COIN_EMOJI}!"),
             )
             .await;
     }
