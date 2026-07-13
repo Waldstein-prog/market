@@ -32,7 +32,7 @@ const HOURLY_SHOUTOUT_TEST: bool = false;
 const HOURLY_TEST_INTERVAL: f64 = 2.0 * 60.0; // test: interval én venster (s)
 const HOURLY_TEST_MIN: i64 = 3; // test-drempel
 // De custom Meadowcoins-emoji (guild-emoji). Bots moeten <:naam:id> sturen, niet :naam:.
-const COIN_EMOJI: &str = "<:Meadowcoins:1526149523288883220>";
+const COIN_EMOJI: &str = "<:Meadowcoins:1526188363110023308>"; // Magic Meadow-emoji; bot zit in prod → rendert op beide guilds
 const PREFIX: &str = "!"; // deze berichten leveren geen coins op (oude commando-syntax)
 // --- daily-beloning (embed-knop) ----------------------------------------
 const DAILY_COOLDOWN: f64 = 20.0 * 3600.0; // minstens 20u tussen twee claims
@@ -47,6 +47,7 @@ const DAILY_MAX_STEP: i64 = 5;
 const DAILY_STREAK_CAP: i64 = 200;
 const DAILY_CUSTOM_ID: &str = "daily_claim"; // moet matchen met de embed-knop
 const SITE_ACCESS_CUSTOM_ID: &str = "site_access"; // "site"-knop → under-construction (website nog niet open)
+const MARKET_INFO_CUSTOM_ID: &str = "market_info"; // "Info"-knop → ephemeral uitleg
 // --- treasure chest -----------------------------------------------------
 // Chatten ≥ CHEST_DISTINCT_USERS verschillende mensen binnen CHEST_WINDOW in
 // hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
@@ -313,6 +314,19 @@ async fn event_handler(
                         ctx,
                         mc,
                         "🚧 The Meadow Market website is still under construction — coming soon! For now you earn & claim right here in Discord.",
+                    )
+                    .await?;
+                } else if mc.data.custom_id == MARKET_INFO_CUSTOM_ID {
+                    respond_ephemeral(
+                        ctx,
+                        mc,
+                        &format!(
+                            "ℹ️ **How Meadow Market works**\n\
+                             • Chat in the community to earn {COIN_EMOJI} Meadowcoins.\n\
+                             • Claim your **daily** below for a streak bonus — the longer your streak, the more you earn (every 20h; keep it alive by claiming within 30h).\n\
+                             • Spend coins on **Gems**, **Boosts** and **Meadowland Access Passes**.\n\
+                             • Climb the **leaderboard**!"
+                        ),
                     )
                     .await?;
                 }

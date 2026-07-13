@@ -28,7 +28,7 @@ use crate::discord_rest::Discord;
 const SESSION_MAX_AGE: i64 = 90 * 24 * 3600; // ~90 dagen: voelt als "één keer inloggen"
 const MEADOW: &str = "#6b9b52";
 // Meadowcoins-emoji als inline afbeelding (Discord-CDN); schaalt mee met font-size (1em).
-const MC: &str = "<img class=\"mc\" src=\"https://cdn.discordapp.com/emojis/1526149523288883220.png?size=48\" alt=\"coins\">";
+const MC: &str = "<img class=\"mc\" src=\"https://cdn.discordapp.com/emojis/1526188363110023308.png?size=48\" alt=\"coins\">";
 // Ticket-afbeelding voor de 24h-pas, ingebakken in de binary (geserveerd op /img/ticket.png).
 const TICKET_IMG: &[u8] = include_bytes!("../artwork/24hHytale.png");
 // Prod-guild (Magic Meadow): de coins-beheerpagina + kanalen-picklist lezen hiervan.
