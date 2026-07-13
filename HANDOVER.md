@@ -18,6 +18,23 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
+- **Info-pagina op de site** (accordion): de titels (`##`) tonen, klik = uitleg uit-/invouwen; bold
+  respecteren. Bron-tekst (dev #meadowmarket, Faybelle-bericht `1526255690413510783`):
+  ```
+  # Earning Coins in the Magic Meadow
+  You can earn Meadowcoins in many different ways:
+  ## 🪙 Chatting in the main channels
+  Every message gives you 1 to 3 coins, earnable every 30 seconds.
+  ## 🪙 Leveling up
+  You get a level-up reward for each level you gain!
+  ## 🪙 Gain Fortuna's Favor by being active in chat with multiple people at once!
+  A special treasure chest can appear during active chat hours. You need multiple people to open these.
+  ## 🪙 Checking in daily in the Meadow Market and building a streak.
+  Every day you can check in to gain coins. The higher your streak, the higher your min and max amounts become.
+  ## 🪙 (WIP) Registering your Birthday
+  By registering your Birthday, you can claim a Birthday present!
+  ```
+  (🪙 = de custom Meadowcoins-emoji op Discord; op de site de coin-`img`/emoji gebruiken.)
 
 ## 🌐 Discord-guilds & kanalen
 - **Dev-guild** (WaldsteinDevZone): `652452615879262220` — nog steeds `cfg.guild_id` (bot-gateway),
