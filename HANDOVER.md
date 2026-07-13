@@ -18,27 +18,9 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
-- **/admin/coins — twee checkboxes "current" + "all time"** naast Add/Set: de bewerking raakt
-  enkel de aangevinkte rekening(en) (`coins` en/of `total_earned`). Aanleiding: Faybelle deed
-  Add −270 → correct van huidig saldo af, maar all-time bleef ongewijzigd. Denk aan: undo die
-  bij Set/Add op `total_earned` óók total_earned herstelt (nu enkel `coins` in `admin_undo`).
-- **Info-pagina op de site** (accordion): de titels (`##`) tonen, klik = uitleg uit-/invouwen; bold
-  respecteren. Bron-tekst (dev #meadowmarket, Faybelle-bericht `1526255690413510783`):
-  ```
-  # Earning Coins in the Magic Meadow
-  You can earn Meadowcoins in many different ways:
-  ## 🪙 Chatting in the main channels
-  Every message gives you 1 to 3 coins, earnable every 30 seconds.
-  ## 🪙 Leveling up
-  You get a level-up reward for each level you gain!
-  ## 🪙 Gain Fortuna's Favor by being active in chat with multiple people at once!
-  A special treasure chest can appear during active chat hours. You need multiple people to open these.
-  ## 🪙 Checking in daily in the Meadow Market and building a streak.
-  Every day you can check in to gain coins. The higher your streak, the higher your min and max amounts become.
-  ## 🪙 (WIP) Registering your Birthday
-  By registering your Birthday, you can claim a Birthday present!
-  ```
-  (🪙 = de custom Meadowcoins-emoji op Discord; op de site de coin-`img`/emoji gebruiken.)
+- **(WIP) Birthday-present**: registreer verjaardag → claim een cadeau (staat als "WIP" op /info).
+- **Faybelle's oude −270** zit enkel in `coins`, niet in `total_earned` (van vóór de checkbox-fix) —
+  evt. gelijktrekken via Set met enkel "all time" aangevinkt.
 
 ## 🌐 Discord-guilds & kanalen
 - **Dev-guild** (WaldsteinDevZone): `652452615879262220` — nog steeds `cfg.guild_id` (bot-gateway),
@@ -49,14 +31,47 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
   - Progressieve activering: coin-**verdienen** hangt aan de **coin-kanalenlijst** (DB-tabel
     `coin_channels`, beheerd op **/admin/channels**). **Lege lijst = nergens verdienen.** Voeg een
     prod-kanaal toe → verdienen + shout-outs + weekly + level-ups worden daar vanzelf actief.
-  - Reeds op **prod** gericht (hardcoded consts in `bot.rs`): uurlijkse shout-out + level-up → prod
-    #coins; weekly leaderboard → prod #general. Daily-check-in-melding gebruikt nog `find_coins_channel`
-    (dev). Coins-beheerpagina + kanalen-picklist lezen van prod (`COINS_GUILD_ID` in `web.rs`).
+  - **Prod-gerichte consts in `bot.rs`**: uurlijkse shout-out + level-up + **daily-melding** → prod
+    #coins; weekly leaderboard → prod #general; **fortuna-log → prod** (`1526181603624226938`),
+    meadowmarket-log **uit**; coin-emoji = **prod-emoji** `1526188363110023308` (bot zit in beide
+    guilds → rendert overal). Natuurlijke **chests spawnen ENKEL in prod #general**
+    (`CHEST_SPAWN_CHANNEL_ID`). Coins-beheerpagina + kanalen-picklist lezen van prod (`COINS_GUILD_ID`).
+  - **`!chest`/`!chestodds`** = dev-guild-only (test-spawn).
 
-## 📌 Sessie 2026-07-13 — PROD-OPZET, ECONOMIE-UITBREIDING, ADMIN-TOOLS
-> **Volgende sessie: start hier.** Alles hieronder is **gedeployed** op de dev-VPS (systemd
-> `market`), maar **NOG NIET gecommit/gepusht** (git-schuld — één grote reeks). ⚠️ Veel
-> **testwaarden** staan nog aan (zie onderaan).
+## 📌 Sessie 2026-07-13 (avond) — 🚀 GO-LIVE op Magic Meadow
+> **Volgende sessie: start hier.** Alles is **gecommit + gepusht** (`market-gh main`) én live.
+> **We zijn LIVE gegaan** met prod-waarden; de community verdient/claimt nu echt.
+
+- **Prod-waarden gezet** (chest pop 10min, cooldown 50min, distinct-chatters 3, hourly shout-out
+  op HH:01 ≥100/uur, `COIN_FEEDBACK=false`, chest min-2-joiners). Enige dev-test = `!chest` (spawnt
+  op prod-timing) + de ticker-interval.
+- **Saldi handmatig gezet** door Faybelle (18 users) — historisch verdiend → via de go-live-fix
+  krijgen Add/Set nu `total_earned` mee (backfill gedaan: alle 18 `coins == total_earned`).
+- **DB-backup** van de prod-`coins.db` staat in `~/backups/coins.db.prod-20260713-164737` (+ een
+  volledige map-tarball `~/backups/market-backup-*.tar.gz`).
+- **Streak-preseeds** (7 users, `last_daily`+`daily_streak`, coins ongemoeid) — bv. FayBelle dag 3,
+  Yâ-Ôd dag 2. Waldstein-venster verlopen (streak reset bij volgende claim, aanvaard). Server-TZ =
+  **Europe/Brussels** gezet (code rekent op absolute epoch, dus TZ is cosmetisch).
+- **Daily → prod**: `DAILY_COOLDOWN` 24u→**20u**; aparte **`DAILY_STREAK_WINDOW` 30u** (binnen 30u
+  opnieuw klikken = streak behouden). Daily-melding in #coins **tagt** de member + getallen vet.
+  **DEBUG-regel** in fortuna-log (admins): `🔧 daily — @user got N · streak S · rolled in [lo–hi]`.
+  Geen ephemeral meer bij een geslaagde daily (stille ack). Cooldown-ephemeral = "⏳ Too soon!…".
+- **Meadowmarket-embed LIVE** in Magic Meadow **#🧺market** (`1403810528039665745`, hernoemd van
+  meadowmarket): titel `# 🧺 Meadow Market 💎`, bulletlijst (bold), knoppen **Check In**
+  (`daily_claim`, coin-emoji) · **🧺 Visit Meadow Market** (`site_access` → under-construction) ·
+  **ℹ️ Info** (link → `/info`).
+- **Publieke `/info`-pagina** (accordion via `<details>`, klik = uit/invouwen) met de earning-uitleg.
+- **🔒 Site-gate** (`gate`-middleware in `web.rs`): **niet-admins → redirect naar `/info`**; enkel
+  `/info`, `/img/*`, login/oauth, `/healthz` publiek; admins (Waldstein/FayBelle) houden volle
+  toegang. Tijdelijk tot de site publiek opengaat.
+- **Chest-herwerking**: titel **"🎁 Fortuna's Favor"**; **live M:SS-aftel-timer** (ticker elke 2s,
+  embed-edit); chest + coin via **vaste URL** (`/img/chest.png` + emoji-CDN) i.p.v. attachments;
+  te-laat-ephemeral = "make sure you click within X minutes".
+- **/admin/coins**: **current/all-time-checkboxes** bij Add/Set (beide default aan) + **All-time-
+  kolom**; **undo herstelt beide** (`admin_undo.prev_earned` toegevoegd). Coin-emoji op de site =
+  prod-emoji-CDN.
+
+### Vroeger deze dag (voormiddag/namiddag) — prod-opzet & economie-uitbreiding
 
 **Discord-serverbeheer (via REST-API, geen code):** in de dev-guild een **Hytale**-, **Archive**-
 (open) en **Marketplace**-categorie gemaakt; oude kanalen (geen juli-2026-activiteit) naar Archive
@@ -105,15 +120,12 @@ genoeg → titel wisselt naar "open"; pop = origineel **verwijderen** + **nieuw*
 **Nieuwe DB-tabellen (idempotent gemigreerd):** `earn_log`, `admin_undo`, `coin_archive`,
 `coin_channels`, `coin_suggest` (laatste ongebruikt).
 
-**⚠️ TESTWAARDEN — terugzetten vóór echte prod-community** (in `bot.rs`):
-`CHEST_POP_DELAY` **1 min** (prod 10) · `CHEST_CHANNEL_COOLDOWN` **2 min** (prod 50) ·
-`CHEST_DISTINCT_USERS` **2** (prod 3) · `HOURLY_SHOUTOUT_TEST` **true** (→ elke 2 min, ≥3; prod =
-HH:01, ≥100/uur) · `COIN_FEEDBACK` **false** (per-bericht reply uit). NB: `CHEST_MIN_JOINERS` = 2 =
-**definitief** (ook prod).
+> ℹ️ De testwaarden uit deze voormiddag/namiddag zijn bij **go-live (avond) allemaal op de prod-
+> waarden gezet** — zie de go-live-sectie bovenaan.
 
-**Nog open / mogelijk vervolg:** git committen + pushen (dev-VPS draait vooruit op de repo); daily-
-melding → prod #coins; daily/chest-level-ups ook cadeau geven; gem-naamkleur-font (TODO); `cfg.guild_id`
-ooit naar prod als de bot-gateway naar Magic Meadow moet.
+**Nog open / mogelijk vervolg:** daily/chest-level-ups ook cadeau geven (nu enkel bericht-level-ups);
+`cfg.guild_id` ooit naar prod als de **bot-gateway** volledig naar Magic Meadow moet (raakt ook de
+Hytale-pas-rolgrants + site-rolcheck — geen simpele flip); website publiek openstellen (site-gate weg).
 
 ## 📌 Sessie 2026-07-12 (avond) — MARKET-FEATURES + TREASURE CHEST
 > **Volgende sessie: start hier.** Alles hieronder is gecommit + gepusht (`tale-gh` +
