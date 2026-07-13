@@ -64,7 +64,6 @@ const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
 // als attachments aan het chest-bericht en via attachment:// in de embed getoond:
 // chest = grote image (onderaan), coin = thumbnail (rechtsboven).
 const CHEST_IMG: &[u8] = include_bytes!("../artwork/treasure chest.png");
-const CHEST_COIN_IMG: &[u8] = include_bytes!("../artwork/coin.png");
 const CRYING_IMG: &[u8] = include_bytes!("../artwork/crying.png"); // getoond als de chest despawnt
 // Prijsverdeling: (gewicht in ‰ (per duizend), min, max coins). Som = CHEST_TIER_TOTAL.
 // CHEST_TIERS = de ACTUELE (live) verdeling die de trekking gebruikt (coarse, zoals
@@ -521,7 +520,9 @@ fn chest_embed(pop_ts: i64, joiners: usize) -> serenity::CreateEmbed {
         .title("🎁 Fortuna's Favour")
         .description(desc)
         .image("attachment://chest.png") // grote chest onderaan
-        .thumbnail("attachment://coin.png") // coin rechtsboven
+        // Coin klein rechtsboven via een vaste URL (Meadowcoins-emoji-CDN) — betrouwbaarder
+        // dan een attachment-thumbnail bij een edit.
+        .thumbnail("https://cdn.discordapp.com/emojis/1526188363110023308.png?size=96")
         .colour(0xF1_C4_0F)
 }
 
@@ -542,7 +543,6 @@ async fn do_spawn_chest(
     let builder = serenity::CreateMessage::new()
         .embed(chest_embed(pop_ts, 0))
         .add_file(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"))
-        .add_file(serenity::CreateAttachment::bytes(CHEST_COIN_IMG, "coin.png"))
         .components(vec![serenity::CreateActionRow::Buttons(vec![button])]);
     let sent = channel_id.send_message(&http, builder).await?;
     let msg_id = sent.id.get();
@@ -662,8 +662,7 @@ async fn handle_chest_click(
         // Afbeeldingen opnieuw meesturen (keep_all bleek ze soms te droppen bij een
         // edit) zodat de chest-graphic altijd zichtbaar blijft na een klik.
         let atts = serenity::EditAttachments::new()
-            .add(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"))
-            .add(serenity::CreateAttachment::bytes(CHEST_COIN_IMG, "coin.png"));
+            .add(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"));
         let builder = serenity::EditMessage::new()
             .embeds(vec![chest_embed(pop_ts, n)])
             .attachments(atts);
