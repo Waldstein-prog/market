@@ -15,6 +15,10 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
 ## 📝 Open TODO's
+- **Pro server-log op de website (admin-only)**: activiteiten-/serverlog tonen op de site,
+  enkel zichtbaar voor admins. O.a. treasure-chest-events (wie klikte, wie won) persisteren
+  i.p.v. enkel in RAM — nu zijn de klikkers van een gepopte chest onherstelbaar (staan nergens
+  in `coins.db` of het log-kanaal). Overweeg tabel `chest_clicks` + een `/admin/log`-pagina.
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
