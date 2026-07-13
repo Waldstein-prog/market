@@ -20,8 +20,8 @@ const COIN_WEIGHTS: [(u32, i64); 3] = [(80, 1), (19, 2), (1, 3)];
 const DEV_FEEDBACK: bool = false; // cooldown-terugkoppeling per bericht (dev-only; laat uit → geen ⏳-spam in #general)
 const COIN_FEEDBACK: bool = false; // toon de speler in #general zijn coin-award ("+N coins! Total: X")
 const COIN_CHANNEL_ID: u64 = 1229046340793663488; // #general: enkel hier coins per bericht (0 = overal). De chest-detectie volgt ditzelfde kanaal.
-const FORTUNA_LOG_CHANNEL_ID: u64 = 1526159841444237385; // #fortuna-log (LOGS): elke coin-verdienste wordt hier gelogd (0 = uit)
-const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 1526163086556528640; // #meadowmarket-log (LOGS): saldo-updates (0 = uit)
+const FORTUNA_LOG_CHANNEL_ID: u64 = 1526181603624226938; // Magic Meadow #fortuna-log: elke coin-verdienste (0 = uit)
+const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 0; // saldo-log uit op prod (fortuna-log dekt de verdiensten)
 const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
 const PROD_GENERAL_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow ☀️general (weekly zaterdag 15u)
 const PROD_GUILD_ID: u64 = 1296469405651435592; // Magic Meadow — leave/rejoin-archief triggert enkel hier
@@ -35,7 +35,8 @@ const HOURLY_TEST_MIN: i64 = 3; // test-drempel
 const COIN_EMOJI: &str = "<:Meadowcoins:1526149523288883220>";
 const PREFIX: &str = "!"; // deze berichten leveren geen coins op (oude commando-syntax)
 // --- daily-beloning (embed-knop) ----------------------------------------
-const DAILY_COOLDOWN: f64 = 24.0 * 3600.0; // 24u tussen twee claims
+const DAILY_COOLDOWN: f64 = 20.0 * 3600.0; // minstens 20u tussen twee claims
+const DAILY_STREAK_WINDOW: f64 = 30.0 * 3600.0; // binnen 30u opnieuw klikken → streak behouden (anders reset)
 // Streak-daily: dag 1 = random in [BASE_MIN, BASE_MAX]. Elke opeenvolgende dag
 // verhoogt de ondergrens met MIN_STEP en de bovengrens met MAX_STEP. Een dag
 // overslaan reset naar dag 1. Na dag STREAK_CAP stopt de verhoging.
@@ -45,7 +46,7 @@ const DAILY_MIN_STEP: i64 = 1;
 const DAILY_MAX_STEP: i64 = 5;
 const DAILY_STREAK_CAP: i64 = 200;
 const DAILY_CUSTOM_ID: &str = "daily_claim"; // moet matchen met de embed-knop
-const COINS_CHANNEL: &str = "coins"; // publiek kanaal voor "X earned N coins today."
+const SITE_ACCESS_CUSTOM_ID: &str = "site_access"; // "site"-knop → under-construction (website nog niet open)
 // --- treasure chest -----------------------------------------------------
 // Chatten ≥ CHEST_DISTINCT_USERS verschillende mensen binnen CHEST_WINDOW in
 // hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
@@ -95,6 +96,7 @@ const DEV_GUILD_ID: u64 = 652452615879262220;
 
 pub struct Data {
     pub pool: DbPool,
+    #[allow(dead_code)] // behouden voor toekomstige config-afhankelijke features
     pub cfg: Config,
     // Gedeelde treasure-chest-staat (interne mutability; korte sync-secties, nooit
     // over een await vastgehouden).
@@ -305,6 +307,14 @@ async fn event_handler(
                     handle_daily(ctx, mc, data).await?;
                 } else if mc.data.custom_id == CHEST_CUSTOM_ID {
                     handle_chest_click(ctx, mc, data).await?;
+                } else if mc.data.custom_id == SITE_ACCESS_CUSTOM_ID {
+                    // Website nog niet open voor de community → under-construction-feedback.
+                    respond_ephemeral(
+                        ctx,
+                        mc,
+                        "🚧 The Meadow Market website is still under construction — coming soon! For now you earn & claim right here in Discord.",
+                    )
+                    .await?;
                 }
             }
         }
@@ -343,9 +353,9 @@ async fn handle_daily(
         return Ok(());
     }
 
-    // Streak: op tijd (binnen 48u sinds de vorige claim) → +1 dag, anders reset
+    // Streak: opnieuw geklikt binnen DAILY_STREAK_WINDOW (30u) → +1 dag, anders reset
     // naar dag 1. Eerste claim (last == 0) = dag 1. Gecapt op DAILY_STREAK_CAP.
-    let streak = if last <= 0.0 || elapsed >= 2.0 * DAILY_COOLDOWN {
+    let streak = if last <= 0.0 || elapsed >= DAILY_STREAK_WINDOW {
         1
     } else {
         (db::get_daily_streak(&data.pool, &uid) + 1).min(DAILY_STREAK_CAP)
@@ -370,12 +380,12 @@ async fn handle_daily(
     )
     .await?;
 
-    // Publiek regeltje in het #coins-kanaal (indien aanwezig in de guild).
-    if let Some(chan) = find_coins_channel(ctx, data).await {
-        let _ = chan
+    // Publiek regeltje in prod #coins.
+    if PROD_COINS_CHANNEL_ID != 0 {
+        let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
             .say(
                 &ctx.http,
-                format!("{name} checked in for {streak} {day_word} and earned {amount} Meadowcoins!"),
+                format!("{name} checked in for {streak} {day_word} and earned {amount} {COIN_EMOJI}!"),
             )
             .await;
     }
@@ -736,20 +746,6 @@ async fn pop_chest(
     {
         tracing::warn!("kan chest-resultaat niet posten in {channel_id}: {e}");
     }
-}
-
-/// Zoek het tekstkanaal met de naam `COINS_CHANNEL` in de geconfigureerde guild.
-async fn find_coins_channel(ctx: &serenity::Context, data: &Data) -> Option<serenity::ChannelId> {
-    let raw: u64 = data.cfg.guild_id.parse().ok()?;
-    if raw == 0 {
-        return None;
-    }
-    let gid = serenity::GuildId::new(raw);
-    let channels = gid.channels(&ctx.http).await.ok()?;
-    channels
-        .into_iter()
-        .find(|(_, ch)| ch.name == COINS_CHANNEL && ch.kind == serenity::ChannelType::Text)
-        .map(|(id, _)| id)
 }
 
 /// Achtergrondtaak: trek verlopen tijdelijke rollen (bv. 24u-tickets) weer in.
