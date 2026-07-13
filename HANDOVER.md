@@ -8,6 +8,92 @@ serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmea
 > met de user in het Nederlands; de user laat de bouw grotendeels **zelfstandig** afwerken en
 > stuurt achteraf bij.
 
+## ⛔ NOOIT DM's
+De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, absolute user-regel
+(2026-07-13, met nadruk). Alle feedback = **publiek kanaalbericht** of een **ephemeral** (enkel
+mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
+(message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
+
+## 📝 Open TODO's
+- **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
+  via een gem (swatch-preview). Cosmetische verfijning.
+- **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
+
+## 🌐 Discord-guilds & kanalen
+- **Dev-guild** (WaldsteinDevZone): `652452615879262220` — nog steeds `cfg.guild_id` (bot-gateway),
+  test-omgeving. Dev #coins `1525189157104648343`, dev #fortuna-log `1526159841444237385`.
+- **Prod-guild** (Magic Meadow): `1296469405651435592`. Bot = Fortuna `1524865923771793668`.
+  - **☀️general** `1296469405651435594` · **🪙coins (meadowcoins)** `1403044480218824794` ·
+    **🧺meadowmarket** `1403810528039665745` · **fortuna-log** `1526181603624226938`.
+  - Progressieve activering: coin-**verdienen** hangt aan de **coin-kanalenlijst** (DB-tabel
+    `coin_channels`, beheerd op **/admin/channels**). **Lege lijst = nergens verdienen.** Voeg een
+    prod-kanaal toe → verdienen + shout-outs + weekly + level-ups worden daar vanzelf actief.
+  - Reeds op **prod** gericht (hardcoded consts in `bot.rs`): uurlijkse shout-out + level-up → prod
+    #coins; weekly leaderboard → prod #general. Daily-check-in-melding gebruikt nog `find_coins_channel`
+    (dev). Coins-beheerpagina + kanalen-picklist lezen van prod (`COINS_GUILD_ID` in `web.rs`).
+
+## 📌 Sessie 2026-07-13 — PROD-OPZET, ECONOMIE-UITBREIDING, ADMIN-TOOLS
+> **Volgende sessie: start hier.** Alles hieronder is **gedeployed** op de dev-VPS (systemd
+> `market`), maar **NOG NIET gecommit/gepusht** (git-schuld — één grote reeks). ⚠️ Veel
+> **testwaarden** staan nog aan (zie onderaan).
+
+**Discord-serverbeheer (via REST-API, geen code):** in de dev-guild een **Hytale**-, **Archive**-
+(open) en **Marketplace**-categorie gemaakt; oude kanalen (geen juli-2026-activiteit) naar Archive
+verplaatst, recente naar hun categorie. **LOGS**-kanalen aangemaakt: **fortuna-log** (coin-
+verdiensten) + **meadowmarket-log** (saldo-updates). Nieuwe categorieën vereisten *Manage Channels*
+op de bot-rol (Fortuna) — user zette dat aan.
+
+**Coin-economie (bot):**
+- **Verdienen enkel in kanalen op `coin_channels`** (DB, /admin/channels) i.p.v. één vaste kanaal-ID.
+  Guild-gate weg (kanaal-ID is guild-uniek). **Lege lijst = nergens.**
+- **Gewogen kans per bericht: 80% → 1 · 19% → 2 · 1% → 3** (`COIN_WEIGHTS`).
+- Elke verdienste → **#fortuna-log** (`Naam + **N** 🪙`) + saldo → **#meadowmarket-log** (via `log_earn`,
+  ook voor daily + chest). Alle 🪙 vervangen door de **custom `Meadowcoins`-emoji**
+  (`<:Meadowcoins:1526149523288883220>`); op de **site** als inline `<img>` (Discord-CDN, klasse `.mc`).
+- **Level-up-cadeau**: bij level-wissel **+1% van het saldo** + **publiek** bericht in het kanaal én
+  prod #coins (NOOIT DM). ⚠️ Enkel bij **bericht**-verdiensten (daily/chest-level-ups nog niet).
+- **Uurlijkse ≥100-shout-out** (`hourly_shoutouts`) → **prod #coins**. **TEST-modus** aan.
+- **Weekly leaderboard**: **zaterdag 15:00 Brussel** (EU-DST zelf berekend, geen chrono) → embed in
+  **prod #general**; site-tab **"This week"** naast All-time/Now. `earn_log` bewaart **8 dagen**.
+
+**Treasure chest (grondig herwerkt):** artwork ingebakken (`treasure chest.png`, `coin.png`,
+`crying.png`, `24hHytale.png` in `artwork/`). Spawn-embed: chest groot + coin-thumbnail, kop-tekst
+`### …grand prize! It will **despawn/open** <t:…:R>` (live aftel-timer). **Min. 2 deelnemers**
+(`CHEST_MIN_JOINERS`, ook prod) anders **despawn** → *"Fortuna cries…"*-embed met `crying.png`. Bij
+genoeg → titel wisselt naar "open"; pop = origineel **verwijderen** + **nieuw** embed onderaan
+(*"The Magic Chest opened!"*, winnaar getagd, geen balance). Elke klik werkt de embed live bij
+(need-teller). **`!chest`** (spawn) en **`!chestodds`** = **dev-guild-only** commando's.
+
+**Levelsysteem herzien (`web.rs`, `db::level_of`):** **0-based** (beginner = Level 0) en **oneindig**
+(formule `50 × 1.6^level`, geen cap). Level-tiers-embed staat in **dev #coins**.
+
+**Admin-tools (site):**
+- **/admin/coins** (nav "🪙 Coins"): leest **prod-leden** (`COINS_GUILD_ID`), toont **iedereen** (ook
+  0-coin), 4 sorteerknoppen (A–Z, Z–A, Coins ↑/↓), **Add/Set**, **↶ Undo** (altijd zichtbaar, DB-
+  backed), **auto-refresh** 20s. `admin_add_coins`/`admin_set_coins` raken enkel `coins` (niet
+  total_earned). ⚠️ De **suggestie/seed/Confirm-flow is VERLATEN** (saldo-uitlezen werkte niet;
+  seed-knop + toggle verwijderd) — startwaarden worden **manueel** gezet. Handlers/routes bestaan nog
+  dormant (`coin_suggest`-tabel ongebruikt).
+- **/admin/channels** (nav "📋 Channels"): coin-kanalenlijst, picklist (prod-tekstkanalen), rode ✕.
+- **Leave/rejoin-archief**: `GuildMemberRemoval` → `archive_on_leave` (saldo+earned gearchiveerd,
+  gereset naar 0). Op /admin/coins: **Restore** / **Discard** per vertrokken lid.
+- **Leaderboard**: gefilterd op **≥1 coin** (min 1 om erop te staan).
+
+**24h-pas-icoon** = `24hHytale.png` (ingebakken, `/img/ticket.png`); pas-kaders verruimd (geen afkap).
+
+**Nieuwe DB-tabellen (idempotent gemigreerd):** `earn_log`, `admin_undo`, `coin_archive`,
+`coin_channels`, `coin_suggest` (laatste ongebruikt).
+
+**⚠️ TESTWAARDEN — terugzetten vóór echte prod-community** (in `bot.rs`):
+`CHEST_POP_DELAY` **1 min** (prod 10) · `CHEST_CHANNEL_COOLDOWN` **2 min** (prod 50) ·
+`CHEST_DISTINCT_USERS` **2** (prod 3) · `HOURLY_SHOUTOUT_TEST` **true** (→ elke 2 min, ≥3; prod =
+HH:01, ≥100/uur) · `COIN_FEEDBACK` **false** (per-bericht reply uit). NB: `CHEST_MIN_JOINERS` = 2 =
+**definitief** (ook prod).
+
+**Nog open / mogelijk vervolg:** git committen + pushen (dev-VPS draait vooruit op de repo); daily-
+melding → prod #coins; daily/chest-level-ups ook cadeau geven; gem-naamkleur-font (TODO); `cfg.guild_id`
+ooit naar prod als de bot-gateway naar Magic Meadow moet.
+
 ## 📌 Sessie 2026-07-12 (avond) — MARKET-FEATURES + TREASURE CHEST
 > **Volgende sessie: start hier.** Alles hieronder is gecommit + gepusht (`tale-gh` +
 > `market-gh` subtree) én **gedeployed** op de dev-guild. Reeks kleine iteraties, live getest.

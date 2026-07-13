@@ -74,6 +74,29 @@ pub fn init_pool(path: &str) -> DbPool {
             user_id     TEXT PRIMARY KEY,   -- Discord-user (één Hytale-account per lid)
             hytale_name TEXT NOT NULL,      -- de in-game naam om te whitelisten
             expires     REAL                -- NULL = permanent, anders epoch-seconden
+        );
+        CREATE TABLE IF NOT EXISTS earn_log (
+            user_id     TEXT NOT NULL,      -- wie verdiende
+            amount      INTEGER NOT NULL,   -- hoeveel (chat/daily/chest)
+            ts          REAL NOT NULL       -- epoch-seconden van de verdienste
+        );
+        CREATE INDEX IF NOT EXISTS idx_earn_log_ts ON earn_log(ts);
+        CREATE TABLE IF NOT EXISTS admin_undo (
+            id         INTEGER PRIMARY KEY CHECK(id = 1), -- max één rij: de laatste ingreep
+            user_id    TEXT NOT NULL,
+            username   TEXT NOT NULL,
+            prev_coins INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS coin_archive (
+            user_id      TEXT PRIMARY KEY,   -- lid dat de server verliet
+            coins        INTEGER NOT NULL,   -- saldo bij vertrek
+            total_earned INTEGER NOT NULL,   -- all-time verdiend bij vertrek
+            username     TEXT NOT NULL,
+            ts           REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS coin_channels (
+            channel_id TEXT PRIMARY KEY,     -- enkel hier leveren berichten coins op
+            name       TEXT NOT NULL
         );",
     )
     .expect("kan tabel niet aanmaken");
@@ -376,12 +399,397 @@ pub fn award(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64)
         params![user_id, username, amount, ts],
     )
     .expect("insert award");
+    log_earn_event(&conn, user_id, amount, ts);
     conn.query_row(
         "SELECT coins FROM coins WHERE user_id = ?1",
         params![user_id],
         |r| r.get(0),
     )
     .expect("query totaal")
+}
+
+/// Log één verdienste in earn_log (voor het "≥100 coins dit uur"-overzicht).
+fn log_earn_event(conn: &rusqlite::Connection, user_id: &str, amount: i64, ts: f64) {
+    let _ = conn.execute(
+        "INSERT INTO earn_log (user_id, amount, ts) VALUES (?1, ?2, ?3)",
+        params![user_id, amount, ts],
+    );
+}
+
+/// Verdieners van ≥100 coins in het venster [since, until): (user_id, naam, totaal),
+/// aflopend. Gebruikt voor de uurlijkse shout-out.
+pub fn hourly_earners(pool: &DbPool, since: f64, until: f64, min: i64) -> Vec<(String, String, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.user_id, COALESCE(c.username, e.user_id), SUM(e.amount) AS total
+             FROM earn_log e LEFT JOIN coins c ON c.user_id = e.user_id
+             WHERE e.ts >= ?1 AND e.ts < ?2
+             GROUP BY e.user_id
+             HAVING total >= ?3
+             ORDER BY total DESC",
+        )
+        .expect("prepare hourly_earners");
+    let rows = stmt
+        .query_map(params![since, until, min], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })
+        .expect("query hourly_earners");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// Ruim earn_log-rijen ouder dan `before` op (rollend venster hoeft niet meer).
+pub fn prune_earn_log(pool: &DbPool, before: f64) {
+    let conn = pool.get().expect("db");
+    let _ = conn.execute("DELETE FROM earn_log WHERE ts < ?1", params![before]);
+}
+
+// --- admin coins-beheer -------------------------------------------------
+
+/// Alle saldi (user_id → coins) uit de coins-tabel.
+pub fn all_balances(pool: &DbPool) -> std::collections::HashMap<String, i64> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT user_id, coins FROM coins")
+        .expect("prepare all_balances");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .expect("query all_balances");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+fn current_coins(conn: &rusqlite::Connection, user_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT coins FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("q coins")
+    .unwrap_or(0)
+}
+
+/// Zet het saldo op een absolute waarde (startwaarde): coins + total_earned +
+/// max_balance = `value`, zodat het lid meteen het juiste level heeft en op het
+/// All-time-leaderboard verschijnt. Returnt het vorige saldo.
+pub fn admin_set_coins(pool: &DbPool, user_id: &str, username: &str, value: i64) -> i64 {
+    let conn = pool.get().expect("db");
+    let prev = current_coins(&conn, user_id);
+    conn.execute(
+        "INSERT INTO coins (user_id, username, coins, total_earned, max_balance) VALUES (?1, ?2, ?3, ?3, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET
+             coins = excluded.coins,
+             total_earned = excluded.coins,
+             username = excluded.username,
+             max_balance = MAX(max_balance, excluded.coins)",
+        params![user_id, username, value],
+    )
+    .expect("admin set coins");
+    prev
+}
+
+/// Tel een (mogelijk negatief) bedrag bij het saldo; returnt het vorige saldo.
+pub fn admin_add_coins(pool: &DbPool, user_id: &str, username: &str, delta: i64) -> i64 {
+    let conn = pool.get().expect("db");
+    let prev = current_coins(&conn, user_id);
+    let newv = prev + delta;
+    conn.execute(
+        "INSERT INTO coins (user_id, username, coins, max_balance) VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET
+             coins = ?3,
+             username = excluded.username,
+             max_balance = MAX(max_balance, ?3)",
+        params![user_id, username, newv],
+    )
+    .expect("admin add coins");
+    prev
+}
+
+/// Bewaar de laatste ingreep (enige rij) zodat ze ongedaan gemaakt kan worden.
+pub fn admin_record_undo(pool: &DbPool, user_id: &str, username: &str, prev_coins: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO admin_undo (id, user_id, username, prev_coins) VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+             user_id = excluded.user_id,
+             username = excluded.username,
+             prev_coins = excluded.prev_coins",
+        params![user_id, username, prev_coins],
+    )
+    .expect("record undo");
+}
+
+/// De laatste ongedaan-maakbare ingreep: (user_id, username, prev_coins).
+pub fn admin_get_undo(pool: &DbPool) -> Option<(String, String, i64)> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT user_id, username, prev_coins FROM admin_undo WHERE id = 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+    .expect("get undo")
+}
+
+/// Maak de laatste ingreep ongedaan: zet het saldo terug en wis de undo-rij.
+/// Returnt (username, hersteld_saldo) als er iets te herstellen was.
+pub fn admin_apply_undo(pool: &DbPool) -> Option<(String, i64)> {
+    let (uid, username, prev) = admin_get_undo(pool)?;
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE coins SET coins = ?2 WHERE user_id = ?1",
+        params![uid, prev],
+    )
+    .expect("apply undo");
+    conn.execute("DELETE FROM admin_undo WHERE id = 1", [])
+        .expect("clear undo");
+    Some((username, prev))
+}
+
+// --- leave/rejoin archief -----------------------------------------------
+
+/// Lid verliet de server: archiveer saldo + all-time en reset beide naar 0
+/// (verse start bij terugkeer). Returnt het gearchiveerde saldo, of None als er
+/// niets te bewaren viel (0/0 of onbekende user).
+pub fn archive_on_leave(pool: &DbPool, user_id: &str, ts: f64) -> Option<i64> {
+    let conn = pool.get().expect("db");
+    let row: Option<(i64, i64, String)> = conn
+        .query_row(
+            "SELECT coins, total_earned, username FROM coins WHERE user_id = ?1",
+            params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .expect("q leave");
+    let (coins, earned, username) = row?;
+    if coins == 0 && earned == 0 {
+        return None;
+    }
+    conn.execute(
+        "INSERT INTO coin_archive (user_id, coins, total_earned, username, ts) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(user_id) DO UPDATE SET
+             coins = excluded.coins, total_earned = excluded.total_earned,
+             username = excluded.username, ts = excluded.ts",
+        params![user_id, coins, earned, username, ts],
+    )
+    .expect("archive");
+    conn.execute(
+        "UPDATE coins SET coins = 0, total_earned = 0, max_balance = 0 WHERE user_id = ?1",
+        params![user_id],
+    )
+    .expect("reset on leave");
+    Some(coins)
+}
+
+/// Alle archief-rijen: user_id → (coins, total_earned, username).
+pub fn all_archives(pool: &DbPool) -> std::collections::HashMap<String, (i64, i64, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT user_id, coins, total_earned, username FROM coin_archive")
+        .expect("prepare archives");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?),
+            ))
+        })
+        .expect("query archives");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// Geef het gearchiveerde saldo + all-time terug aan het lid en wis het archief.
+pub fn restore_archive(pool: &DbPool, user_id: &str) {
+    let conn = pool.get().expect("db");
+    let row: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT coins, total_earned FROM coin_archive WHERE user_id = ?1",
+            params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .expect("q restore");
+    if let Some((coins, earned)) = row {
+        conn.execute(
+            "INSERT INTO coins (user_id, username, coins, total_earned, max_balance)
+             VALUES (?1, '', ?2, ?3, ?2)
+             ON CONFLICT(user_id) DO UPDATE SET
+                 coins = ?2, total_earned = ?3, max_balance = MAX(max_balance, ?2)",
+            params![user_id, coins, earned],
+        )
+        .expect("restore");
+        conn.execute("DELETE FROM coin_archive WHERE user_id = ?1", params![user_id])
+            .expect("del archive");
+    }
+}
+
+/// Wis het archief van een lid zonder iets terug te geven.
+pub fn discard_archive(pool: &DbPool, user_id: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM coin_archive WHERE user_id = ?1", params![user_id])
+        .expect("discard archive");
+}
+
+// --- coin-kanalen (waar coins verdiend kunnen worden) -------------------
+
+/// Alle kanalen waar coins verdiend mogen worden: (channel_id, name).
+pub fn coin_channels(pool: &DbPool) -> Vec<(String, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT channel_id, name FROM coin_channels ORDER BY name")
+        .expect("prepare coin_channels");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query coin_channels");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// Mag er in dit kanaal verdiend worden?
+pub fn is_coin_channel(pool: &DbPool, channel_id: u64) -> bool {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT 1 FROM coin_channels WHERE channel_id = ?1",
+        params![channel_id.to_string()],
+        |_| Ok(()),
+    )
+    .optional()
+    .expect("q coin_channel")
+    .is_some()
+}
+
+pub fn add_coin_channel(pool: &DbPool, channel_id: &str, name: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coin_channels (channel_id, name) VALUES (?1, ?2)
+         ON CONFLICT(channel_id) DO UPDATE SET name = excluded.name",
+        params![channel_id, name],
+    )
+    .expect("add coin_channel");
+}
+
+pub fn remove_coin_channel(pool: &DbPool, channel_id: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "DELETE FROM coin_channels WHERE channel_id = ?1",
+        params![channel_id],
+    )
+    .expect("remove coin_channel");
+}
+
+// --- weekly leaderboard + Brusselse tijd (EU-DST) -----------------------
+
+/// Weekly leaderboard: (user_id, username, verdiend sinds `since`), aflopend, ≥1.
+pub fn leaderboard_week(pool: &DbPool, since: f64, limit: i64) -> Vec<(String, String, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.user_id, COALESCE(c.username, e.user_id), SUM(e.amount) AS total
+             FROM earn_log e LEFT JOIN coins c ON c.user_id = e.user_id
+             WHERE e.ts >= ?1
+             GROUP BY e.user_id
+             HAVING total >= 1
+             ORDER BY total DESC, username ASC
+             LIMIT ?2",
+        )
+        .expect("prepare week");
+    let rows = stmt
+        .query_map(params![since, limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })
+        .expect("query week");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (d - 1);
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+/// 0 = zondag … 6 = zaterdag
+fn weekday_from_days(z: i64) -> i64 {
+    (z % 7 + 4).rem_euclid(7)
+}
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+fn last_sunday_days(year: i64, month: i64) -> i64 {
+    let z = days_from_civil(year, month, days_in_month(year, month));
+    z - weekday_from_days(z)
+}
+/// Brussel-offset (s) op een UTC-epoch: +2u zomertijd, +1u wintertijd (EU-regels:
+/// zomertijd van laatste zondag maart 01:00 UTC tot laatste zondag oktober 01:00 UTC).
+fn brussels_offset(utc: i64) -> i64 {
+    let (y, _, _) = civil_from_days(utc.div_euclid(86400));
+    let mar = last_sunday_days(y, 3) * 86400 + 3600;
+    let oct = last_sunday_days(y, 10) * 86400 + 3600;
+    if utc >= mar && utc < oct {
+        7200
+    } else {
+        3600
+    }
+}
+/// Epoch (UTC) van de meest recente zaterdag 15:00 Brusselse tijd (≤ now).
+pub fn last_saturday_1500_brussels(now: f64) -> f64 {
+    let now_i = now as i64;
+    let off = brussels_offset(now_i);
+    let local = now_i + off;
+    let day = local.div_euclid(86400);
+    let days_since_sat = (weekday_from_days(day) - 6).rem_euclid(7);
+    let mut boundary = (day - days_since_sat) * 86400 + 15 * 3600;
+    if boundary > local {
+        boundary -= 7 * 86400;
+    }
+    (boundary - off) as f64
+}
+/// Eerstvolgende zaterdag 15:00 Brusselse tijd (> now).
+pub fn next_saturday_1500_brussels(now: f64) -> f64 {
+    let mut b = last_saturday_1500_brussels(now);
+    while b <= now {
+        b += 7.0 * 86400.0;
+    }
+    b
+}
+
+/// Levelnummer (0-based, oneindig) uit verdiende coins. Zelfde formule als de site
+/// (`level_info` in web.rs): 50 × 1.6^level per stap.
+pub fn level_of(earned: i64) -> i64 {
+    let (base, growth) = (50.0_f64, 1.6_f64);
+    let mut level = 0i64;
+    let mut floor = 0i64;
+    loop {
+        let cost = (base * growth.powi(level as i32)).round() as i64;
+        if cost <= 0 || floor.checked_add(cost).is_none() || earned < floor + cost {
+            return level;
+        }
+        floor += cost;
+        level += 1;
+    }
 }
 
 /// Unix-tijdstip van de laatste daily-claim (0.0 als de user er nog geen deed).
@@ -434,6 +842,7 @@ pub fn award_daily(
         params![user_id, username, amount, ts, streak],
     )
     .expect("insert daily");
+    log_earn_event(&conn, user_id, amount, ts);
     conn.query_row(
         "SELECT coins FROM coins WHERE user_id = ?1",
         params![user_id],
@@ -482,6 +891,7 @@ pub fn leaderboard_now(pool: &DbPool, limit: i64) -> Vec<(String, String, i64)> 
     lb_query(
         pool,
         "SELECT user_id, username, coins FROM coins
+         WHERE coins > 0
          ORDER BY coins DESC, username ASC LIMIT ?1",
         limit,
     )
@@ -492,6 +902,7 @@ pub fn leaderboard_alltime(pool: &DbPool, limit: i64) -> Vec<(String, String, i6
     lb_query(
         pool,
         "SELECT user_id, username, total_earned FROM coins
+         WHERE total_earned > 0
          ORDER BY total_earned DESC, username ASC LIMIT ?1",
         limit,
     )

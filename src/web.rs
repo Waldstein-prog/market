@@ -27,6 +27,14 @@ use crate::discord_rest::Discord;
 
 const SESSION_MAX_AGE: i64 = 90 * 24 * 3600; // ~90 dagen: voelt als "één keer inloggen"
 const MEADOW: &str = "#6b9b52";
+// Meadowcoins-emoji als inline afbeelding (Discord-CDN); schaalt mee met font-size (1em).
+const MC: &str = "<img class=\"mc\" src=\"https://cdn.discordapp.com/emojis/1526149523288883220.png?size=48\" alt=\"coins\">";
+// Ticket-afbeelding voor de 24h-pas, ingebakken in de binary (geserveerd op /img/ticket.png).
+const TICKET_IMG: &[u8] = include_bytes!("../artwork/24hHytale.png");
+// Prod-guild (Magic Meadow): de coins-beheerpagina + kanalen-picklist lezen hiervan.
+const COINS_GUILD_ID: &str = "1296469405651435592";
+// Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
+const AUTO_REFRESH_JS: &str = "<script>setInterval(function(){var a=document.activeElement;if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'))return;location.reload();},20000);</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 
 #[derive(Clone)]
@@ -66,11 +74,21 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/add", post(admin_item_add))
         .route("/admin/item/update", post(admin_item_update))
         .route("/admin/item/delete", post(admin_item_delete))
+        .route("/admin/coins", get(admin_coins))
+        .route("/admin/coins/add", post(admin_coins_add))
+        .route("/admin/coins/set", post(admin_coins_set))
+        .route("/admin/coins/undo", post(admin_coins_undo))
+        .route("/admin/coins/restore", post(admin_coins_restore))
+        .route("/admin/coins/discard", post(admin_coins_discard))
+        .route("/admin/channels", get(admin_channels))
+        .route("/admin/channels/add", post(admin_channels_add))
+        .route("/admin/channels/remove", post(admin_channels_remove))
         .route(
             "/admin/item/image",
             post(admin_item_image).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route("/uploads/{name}", get(serve_upload))
+        .route("/img/ticket.png", get(serve_ticket))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", get(logout))
@@ -198,6 +216,7 @@ body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
 .subtab.on{{background:#141d14;color:#e8f0e4;border-color:#3a4d38}}
 .panel{{display:none}}
 .panel.on{{display:block}}
+.mc{{height:1em;width:auto;vertical-align:-0.15em}}
 .earned{{font-size:2.6rem;font-weight:800;color:{MEADOW};text-align:center;margin:.2rem 0 0;line-height:1}}
 .levelrow{{display:flex;align-items:center;gap:.6rem;margin:1.1rem 0}}
 .lvlbadge{{background:{MEADOW};color:#0e1510;font-weight:800;border-radius:9px;
@@ -272,8 +291,9 @@ a.link{{color:{MEADOW}}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
 .notice.err{{background:#3a201c;color:#f0c9c0;border:1px solid #6e352c}}
 .shelf{{display:flex;gap:.6rem;overflow-x:auto;padding:.2rem 0 .5rem}}
-.shelf .slot{{flex:0 0 auto;width:112px}}
+.shelf .slot{{flex:0 0 auto;width:136px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
+.shelf .slot .name{{white-space:normal;overflow:visible}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
 .nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap}}
 .swatch{{flex:1 1 140px;text-align:center;padding:.7rem;border-radius:11px;
@@ -303,6 +323,29 @@ a.link{{color:{MEADOW}}}
 .aitem select{{width:100%;padding:.32rem;border:1px solid #2c3d2a;border-radius:7px;
   background:#0e1510;color:#e8f0e4;font:inherit;font-size:.8rem}}
 .ibadge{{font-size:.72rem;font-weight:700;color:#cdbb6a}}
+.chead{{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}}
+.chead h1{{margin:.2rem 0}}
+.ctable{{width:100%;border-collapse:collapse;margin-top:.6rem}}
+.ctable th,.ctable td{{padding:.45rem .6rem;border-bottom:1px solid #26331f;text-align:left;vertical-align:middle}}
+.ctable th{{color:#9db095;font-size:.78rem;font-weight:700}}
+.ctable .cbal{{font-variant-numeric:tabular-nums;color:#cfe0c8;white-space:nowrap}}
+.ctable .cbal .mc{{height:1em;vertical-align:-.15em}}
+.coinform{{display:flex;gap:.4rem;align-items:center;margin:0;flex-wrap:wrap}}
+.coinform input[type=number]{{width:90px;padding:.32rem;border:1px solid #2c3d2a;border-radius:7px;background:#0e1510;color:#e8f0e4;font:inherit}}
+.undoform{{margin:0}}
+.undonote{{font-size:.8rem}}
+.archline{{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-top:.35rem;font-size:.8rem}}
+.archline .amuted{{color:#c7a86a}}
+.archline .mc,.sugline .mc{{height:1em;vertical-align:-.15em}}
+.iform{{margin:0}}
+.ctoolbar{{display:flex;gap:.5rem;flex-wrap:wrap;margin:.4rem 0 .2rem}}
+.sugline{{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-bottom:.35rem;font-size:.8rem}}
+.sugline .smuted{{color:#8fb37a}}
+.chlist{{list-style:none;padding:0;margin:.4rem 0;display:flex;flex-direction:column;gap:.35rem}}
+.chrow{{display:flex;align-items:center;gap:.6rem;background:#141d14;border:1px solid #2c3d2a;border-radius:9px;padding:.4rem .7rem}}
+.chrow .chname{{font-weight:600;color:#e8f0e4}}
+.chrm{{margin-left:auto;background:#7a2f28;color:#f3d9d4;border:0;border-radius:7px;width:1.7rem;height:1.7rem;font-weight:800;cursor:pointer;line-height:1}}
+.chrm:hover{{filter:brightness(1.1)}}
 .prow{{display:flex;gap:.3rem}}
 .iupload{{display:flex;gap:.3rem;align-items:center}}
 .plus{{width:64px;height:64px;border-radius:12px;border:1px dashed #3a4d38;
@@ -356,7 +399,12 @@ fn nav_html(active: &str, admin: bool) -> String {
         format!("<a{cls} href=\"{href}\">{label}</a>")
     };
     let admin_link = if admin {
-        item("/admin/market", "admin", "⚙ Manage")
+        format!(
+            "{}{}{}",
+            item("/admin/market", "admin", "⚙ Manage"),
+            item("/admin/coins", "admincoins", "🪙 Coins"),
+            item("/admin/channels", "adminchannels", "📋 Channels")
+        )
     } else {
         String::new()
     };
@@ -381,25 +429,27 @@ fn chrome(name: &str, active: &str, admin: bool, extra: &str) -> String {
 }
 
 // --- levelsysteem (op basis van coins ooit verdiend) --------------------
-const MAX_LEVEL: i64 = 10;
-const LEVEL_BASE: f64 = 50.0; // coins nodig van level 1 → 2
+// Beginner = Level 0; na genoeg coins naar Level 1, enz. GEEN cap: elk volgend
+// level kost 1.6× het vorige, dus levels lopen oneindig door (formule, geen tabel).
+const LEVEL_BASE: f64 = 50.0; // coins nodig van level 0 → 1
 const LEVEL_GROWTH: f64 = 1.6; // exponentiële groei per level
 
-/// Coins (verdiend) nodig om van level `l` naar `l+1` te gaan.
+/// Coins (verdiend) nodig om van level `l` naar `l+1` te gaan (l vanaf 0).
 fn level_cost(l: i64) -> i64 {
-    (LEVEL_BASE * LEVEL_GROWTH.powi((l - 1) as i32)).round() as i64
+    (LEVEL_BASE * LEVEL_GROWTH.powi(l as i32)).round() as i64
 }
 
-/// (level 1..=MAX, coins in dit level, coins nodig voor dit level).
-/// Op max level: (MAX, verdiend-boven-drempel, 0).
+/// (level ≥0, coins in dit level, coins nodig voor dit level). Oneindig veel
+/// levels: het niveau wordt dynamisch berekend uit `earned`, geen bovengrens.
 fn level_info(earned: i64) -> (i64, i64, i64) {
-    let mut level = 1i64;
+    let mut level = 0i64;
     let mut floor = 0i64;
     loop {
-        if level >= MAX_LEVEL {
-            return (MAX_LEVEL, earned - floor, 0);
-        }
         let cost = level_cost(level);
+        // Vangnet tegen f64/i64-overflow bij absurde waarden (praktisch onbereikbaar).
+        if cost <= 0 || floor.checked_add(cost).is_none() {
+            return (level, earned - floor, cost.max(1));
+        }
         if earned < floor + cost {
             return (level, earned - floor, cost);
         }
@@ -548,13 +598,13 @@ fn inventory_home(
     };
 
     let coins_panel = format!(
-        "<div class=\"earned\">🪙 <span data-bal>{coins}</span></div>\
+        "<div class=\"earned\">{MC} <span data-bal>{coins}</span></div>\
          <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">current balance</p>\
          <div class=\"levelrow\"><span class=\"lvlbadge\" data-lvl>Lv {lvl}</span>\
            <div class=\"bar\"><div class=\"fill\" data-fill style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\" data-lvlnm>{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Coins earned all-time</span>\
-           <span>🪙 <b data-earned>{total_earned}</b></span></div>{grants}",
+           <span>{MC} <b data-earned>{total_earned}</b></span></div>{grants}",
         grants = grants_html(grants),
     );
 
@@ -661,7 +711,7 @@ fn inventory_home(
     let cls = |t: &str| if t == active { " on" } else { "" };
     format!(
         "<div class=\"subtabs\">\
-           <button class=\"subtab{ca}\" data-t=\"coins\">🪙 Coins</button>\
+           <button class=\"subtab{ca}\" data-t=\"coins\">{MC} Coins</button>\
            <button class=\"subtab{cg}\" data-t=\"gems\">💎 Gems</button>\
            <button class=\"subtab{cb}\" data-t=\"boosts\">🚀 Boosts</button></div>\
          <div class=\"panel{ca}\" id=\"p-coins\">{coins_panel}</div>\
@@ -705,7 +755,7 @@ async fn market(
 
     let body = format!(
         "<div class=\"shophead\"><h1>🛒 Shop</h1>\
-           <div class=\"purse-box\" data-from=\"{from}\">Purse 🪙 \
+           <div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
              <span class=\"purse-n\" data-bal>{coins}</span></div></div>{notice}\
          <p class=\"muted\">Hytale server passes — buying a pass whitelists you instantly.</p>\
          <h2 class=\"shelf-title\">🎟 Hytale passes</h2><div class=\"shelf\">{tickets}</div>\
@@ -735,6 +785,10 @@ fn thumb_html(image: &str, color: &str) -> String {
 }
 
 fn item_thumb(it: &db::Item) -> String {
+    // De 24h-pas (boost met looptijd) krijgt het vaste ticket-icoon.
+    if it.category == "boost" && it.duration > 0 {
+        return "<img src=\"/img/ticket.png\" alt=\"24h Hytale pass\">".to_string();
+    }
     thumb_html(&it.image, &it.color)
 }
 
@@ -772,7 +826,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
     format!(
         "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div>\
-         <div class=\"price\">🪙 {price}</div>{badge}{action}</div>",
+         <div class=\"price\">{MC} {price}</div>{badge}{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
         price = it.price,
@@ -804,7 +858,7 @@ fn lb_list(rows: &[(String, String, i64)], me: &str) -> String {
             format!(
                 "<li{me_cls}><span class=\"rk\">{rk}</span>\
                  <span class=\"nm\">{name}</span>\
-                 <span class=\"amt\">🪙 {val}</span></li>",
+                 <span class=\"amt\">{MC} {val}</span></li>",
                 name = esc(uname),
             )
         })
@@ -819,14 +873,18 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
     };
     let all_list = lb_list(&db::leaderboard_alltime(&st.pool, 50), &me);
     let now_list = lb_list(&db::leaderboard_now(&st.pool, 50), &me);
+    let week_since = db::last_saturday_1500_brussels(now_secs());
+    let week_list = lb_list(&db::leaderboard_week(&st.pool, week_since, 50), &me);
 
     let body = format!(
         "<h1>🏆 Leaderboard</h1>\
          <div class=\"subtabs\">\
            <button class=\"subtab on\" data-t=\"alltime\">All-time</button>\
+           <button class=\"subtab\" data-t=\"week\">This week</button>\
            <button class=\"subtab\" data-t=\"now\">Now</button></div>\
          <p class=\"muted\" id=\"lb-hint\">Ranked by coins earned all-time.</p>\
          <div class=\"panel on\" id=\"p-alltime\">{all_list}</div>\
+         <div class=\"panel\" id=\"p-week\">{week_list}</div>\
          <div class=\"panel\" id=\"p-now\">{now_list}</div>\
          <script>(function(){{var ts=document.querySelectorAll('.subtab'),\
            h=document.getElementById('lb-hint');\
@@ -835,7 +893,8 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
              document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
              document.getElementById('p-'+b.dataset.t).classList.add('on');\
              h.textContent=b.dataset.t==='now'?'Ranked by current balance.':\
-               'Ranked by coins earned all-time.';}});}});}})();</script>"
+               (b.dataset.t==='week'?'Ranked by coins earned this week (since Saturday 15:00).':\
+               'Ranked by coins earned all-time.');}});}});}})();</script>"
     );
     Html(shell("Leaderboard — Meadow Market", &chrome(&name, "leaderboard", is_admin(&me), ""), true, &body))
         .into_response()
@@ -1347,6 +1406,331 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
 }
 
 #[derive(Deserialize)]
+struct CoinOp {
+    user_id: String,
+    #[serde(default)]
+    username: String,
+    amount: i64,
+}
+
+#[derive(Deserialize)]
+struct CoinsQuery {
+    #[serde(default)]
+    sort: Option<String>,
+}
+
+/// Admin coins-beheer (prod-guild): alle leden (ook 0-coin), Add/Set, undo, archief.
+async fn admin_coins(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<CoinsQuery>,
+) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let sort = q.sort.as_deref().unwrap_or("desc"); // az | za | asc | desc
+
+    let balances = db::all_balances(&st.pool);
+    let archives = db::all_archives(&st.pool);
+
+    // Namen uit de prod-guild, aangevuld met archief-namen / id's.
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let note = match st.dc.list_members(COINS_GUILD_ID).await {
+        Ok(members) => {
+            for (id, n) in members {
+                names.insert(id, n);
+            }
+            String::new()
+        }
+        Err(e) => format!(
+            "<p class=\"notice err\">Couldn't fetch the member list ({}).</p>",
+            esc(&e)
+        ),
+    };
+
+    // Iedereen tonen: alle leden + wie een saldo of archief heeft.
+    let mut uids: std::collections::HashSet<String> = names.keys().cloned().collect();
+    for (id, b) in &balances {
+        if *b != 0 {
+            uids.insert(id.clone());
+        }
+    }
+    uids.extend(archives.keys().cloned());
+    for id in &uids {
+        names.entry(id.clone()).or_insert_with(|| {
+            archives
+                .get(id)
+                .map(|(_, _, n)| n.clone())
+                .unwrap_or_else(|| id.clone())
+        });
+    }
+
+    let name_of = |id: &String| names.get(id).map(|s| s.to_lowercase()).unwrap_or_default();
+    let bal_of = |id: &String| *balances.get(id).unwrap_or(&0);
+    let mut list: Vec<String> = uids.into_iter().collect();
+    match sort {
+        "az" => list.sort_by_key(name_of),
+        "za" => {
+            list.sort_by_key(name_of);
+            list.reverse();
+        }
+        "asc" => list.sort_by(|a, b| bal_of(a).cmp(&bal_of(b)).then_with(|| name_of(a).cmp(&name_of(b)))),
+        _ => list.sort_by(|a, b| bal_of(b).cmp(&bal_of(a)).then_with(|| name_of(a).cmp(&name_of(b)))),
+    }
+
+    let rows: String = list
+        .iter()
+        .map(|uid| {
+            let bal = *balances.get(uid).unwrap_or(&0);
+            let nm = esc(names.get(uid).map(|s| s.as_str()).unwrap_or(uid));
+            let archive = match archives.get(uid) {
+                Some((c, _e, _n)) => format!(
+                    "<div class=\"archline\"><span class=\"amuted\">left the server with {MC} {c}</span>\
+                     <form method=\"post\" action=\"/admin/coins/restore\" class=\"iform\">\
+                       <input type=\"hidden\" name=\"user_id\" value=\"{uid}\">\
+                       <button class=\"btn small\">Restore</button></form>\
+                     <form method=\"post\" action=\"/admin/coins/discard\" class=\"iform\">\
+                       <input type=\"hidden\" name=\"user_id\" value=\"{uid}\">\
+                       <button class=\"btn small ghost\">Discard</button></form></div>"
+                ),
+                None => String::new(),
+            };
+            format!(
+                "<tr><td class=\"cname\">{nm}</td><td class=\"cbal\">{MC} {bal}</td>\
+                 <td class=\"cact\"><form method=\"post\" class=\"coinform\">\
+                   <input type=\"hidden\" name=\"user_id\" value=\"{uid}\">\
+                   <input type=\"hidden\" name=\"username\" value=\"{nm}\">\
+                   <input type=\"number\" name=\"amount\" value=\"0\" required>\
+                   <button class=\"btn small\" formaction=\"/admin/coins/add\">Add</button>\
+                   <button class=\"btn small ghost\" formaction=\"/admin/coins/set\">Set</button>\
+                 </form>{archive}</td></tr>"
+            )
+        })
+        .collect();
+
+    let undo = match db::admin_get_undo(&st.pool) {
+        Some((_id, uname, prev)) => format!(
+            "<form method=\"post\" action=\"/admin/coins/undo\" class=\"undoform\" \
+               title=\"Undo the last change ({nm} → {prev})\">\
+               <button class=\"btn small\" type=\"submit\">↶ Undo</button></form>\
+             <span class=\"muted undonote\">last: <b>{nm}</b> → revert to {prev}</span>",
+            nm = esc(&uname),
+        ),
+        None => "<span class=\"undoform\"><button class=\"btn small ghost\" type=\"button\" disabled \
+                 title=\"Nothing to undo yet\">↶ Undo</button></span>\
+                 <span class=\"muted undonote\">nothing to undo yet</span>"
+            .to_string(),
+    };
+
+    // Sorteerknoppen: A–Z, Z–A, coins ↑ (oplopend), coins ↓ (aflopend).
+    let sbtn = |key: &str, label: &str| {
+        let on = if sort == key { " on" } else { "" };
+        format!("<a class=\"btn small ghost{on}\" href=\"/admin/coins?sort={key}\">{label}</a>")
+    };
+    let sorts = format!(
+        "{}{}{}{}",
+        sbtn("az", "A–Z"),
+        sbtn("za", "Z–A"),
+        sbtn("asc", "Coins ↑"),
+        sbtn("desc", "Coins ↓")
+    );
+
+    let body = format!(
+        "<div class=\"chead\"><h1>🪙 Coins management</h1>{undo}</div>\
+         <div class=\"ctoolbar\">{sorts}</div>{note}\
+         <table class=\"ctable\"><thead><tr><th>Member</th><th>Balance</th><th>Adjust</th></tr></thead>\
+         <tbody>{rows}</tbody></table>{AUTO_REFRESH_JS}"
+    );
+    Html(shell(
+        "Coins — Meadow Market",
+        &chrome(&name, "admincoins", true, ""),
+        true,
+        &body,
+    ))
+    .into_response()
+}
+
+async fn admin_coins_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<CoinOp>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let uid = f.user_id.trim();
+        if !uid.is_empty() {
+            let prev = db::admin_add_coins(&st.pool, uid, &f.username, f.amount);
+            db::admin_record_undo(&st.pool, uid, &f.username, prev);
+        }
+    }
+    Redirect::to("/admin/coins").into_response()
+}
+
+async fn admin_coins_set(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<CoinOp>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let uid = f.user_id.trim();
+        if !uid.is_empty() {
+            let prev = db::admin_set_coins(&st.pool, uid, &f.username, f.amount);
+            db::admin_record_undo(&st.pool, uid, &f.username, prev);
+        }
+    }
+    Redirect::to("/admin/coins").into_response()
+}
+
+async fn admin_coins_undo(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::admin_apply_undo(&st.pool);
+    }
+    Redirect::to("/admin/coins").into_response()
+}
+
+#[derive(Deserialize)]
+struct UidForm {
+    user_id: String,
+}
+
+async fn admin_coins_restore(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<UidForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let uid = f.user_id.trim();
+        if !uid.is_empty() {
+            db::restore_archive(&st.pool, uid);
+        }
+    }
+    Redirect::to("/admin/coins").into_response()
+}
+
+async fn admin_coins_discard(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<UidForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let uid = f.user_id.trim();
+        if !uid.is_empty() {
+            db::discard_archive(&st.pool, uid);
+        }
+    }
+    Redirect::to("/admin/coins").into_response()
+}
+
+// --- admin: coin-kanalen ------------------------------------------------
+
+#[derive(Deserialize)]
+struct ChannelAdd {
+    channel: String,
+}
+#[derive(Deserialize)]
+struct ChannelRemove {
+    channel_id: String,
+}
+
+/// Beheer de lijst van kanalen waar coins verdiend kunnen worden.
+async fn admin_channels(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let current = db::coin_channels(&st.pool);
+    let current_ids: std::collections::HashSet<&String> =
+        current.iter().map(|(id, _)| id).collect();
+
+    let (options, note) = match st.dc.list_channels(COINS_GUILD_ID).await {
+        Ok(chans) => {
+            let opts: String = chans
+                .iter()
+                .filter(|(id, _)| !current_ids.contains(id))
+                .map(|(id, n)| {
+                    format!(
+                        "<option value=\"{id}|{n}\">#{nm}</option>",
+                        nm = esc(n),
+                        n = esc(n)
+                    )
+                })
+                .collect();
+            (opts, String::new())
+        }
+        Err(e) => (
+            String::new(),
+            format!(
+                "<p class=\"notice err\">Couldn't fetch the channel list ({}).</p>",
+                esc(&e)
+            ),
+        ),
+    };
+
+    let list = if current.is_empty() {
+        "<li class=\"muted\">No channels yet — coins can't be earned anywhere until you add one.</li>"
+            .to_string()
+    } else {
+        current
+            .iter()
+            .map(|(id, n)| {
+                format!(
+                    "<li class=\"chrow\"><span class=\"chname\">#{nm}</span>\
+                     <form method=\"post\" action=\"/admin/channels/remove\" class=\"iform\" title=\"Remove\">\
+                       <input type=\"hidden\" name=\"channel_id\" value=\"{id}\">\
+                       <button class=\"chrm\" type=\"submit\">✕</button></form></li>",
+                    nm = esc(n)
+                )
+            })
+            .collect()
+    };
+
+    let body = format!(
+        "<h1>📋 Coin channels</h1>\
+         <p class=\"muted\">Members earn coins <b>only</b> in the channels below. Empty list = \
+         nowhere.</p>{note}\
+         <ul class=\"chlist\">{list}</ul>\
+         <form method=\"post\" action=\"/admin/channels/add\" class=\"addbar\">\
+           <select name=\"channel\" required>\
+             <option value=\"\" disabled selected>Pick a channel…</option>{options}</select>\
+           <button class=\"btn\" type=\"submit\">＋ Add</button></form>{AUTO_REFRESH_JS}"
+    );
+    Html(shell(
+        "Coin channels — Meadow Market",
+        &chrome(&name, "adminchannels", true, ""),
+        true,
+        &body,
+    ))
+    .into_response()
+}
+
+async fn admin_channels_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ChannelAdd>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        if let Some((id, nm)) = f.channel.split_once('|') {
+            if !id.trim().is_empty() {
+                db::add_coin_channel(&st.pool, id.trim(), nm.trim());
+            }
+        }
+    }
+    Redirect::to("/admin/channels").into_response()
+}
+
+async fn admin_channels_remove(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ChannelRemove>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let id = f.channel_id.trim();
+        if !id.is_empty() {
+            db::remove_coin_channel(&st.pool, id);
+        }
+    }
+    Redirect::to("/admin/channels").into_response()
+}
+
+#[derive(Deserialize)]
 struct ShelfAdd {
     title: String,
 }
@@ -1501,6 +1885,15 @@ async fn admin_item_image(
         }
     }
     Redirect::to("/admin/market").into_response()
+}
+
+/// De ingebakken 24h-pas ticket-afbeelding serveren.
+async fn serve_ticket() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        TICKET_IMG,
+    )
+        .into_response()
 }
 
 /// Bewaarde afbeelding serveren vanuit de uploads-map (met naam-sanitatie).

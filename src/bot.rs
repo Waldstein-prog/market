@@ -15,10 +15,24 @@ use crate::db::{self, DbPool};
 
 // --- dev-instellingen (later aanpassen) ---------------------------------
 const COOLDOWN: f64 = 30.0; // seconden tussen twee toekenningen per lid
-const MIN_COINS: i64 = 1;
-const MAX_COINS: i64 = 3;
-const DEV_FEEDBACK: bool = false; // per bericht coins/cooldown terugkoppelen (dev-only)
-const TEST_CHANNEL_ID: u64 = 1253362520530489397; // dev-only: enkel hier coins per bericht (0 = overal)
+// Gewogen kans per bericht: 80% → 1 coin, 19% → 2 coins, 1% → 3 coins. Som = 100.
+const COIN_WEIGHTS: [(u32, i64); 3] = [(80, 1), (19, 2), (1, 3)];
+const DEV_FEEDBACK: bool = false; // cooldown-terugkoppeling per bericht (dev-only; laat uit → geen ⏳-spam in #general)
+const COIN_FEEDBACK: bool = false; // toon de speler in #general zijn coin-award ("+N coins! Total: X")
+const COIN_CHANNEL_ID: u64 = 1229046340793663488; // #general: enkel hier coins per bericht (0 = overal). De chest-detectie volgt ditzelfde kanaal.
+const FORTUNA_LOG_CHANNEL_ID: u64 = 1526159841444237385; // #fortuna-log (LOGS): elke coin-verdienste wordt hier gelogd (0 = uit)
+const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 1526163086556528640; // #meadowmarket-log (LOGS): saldo-updates (0 = uit)
+const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
+const PROD_GENERAL_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow ☀️general (weekly zaterdag 15u)
+const PROD_GUILD_ID: u64 = 1296469405651435592; // Magic Meadow — leave/rejoin-archief triggert enkel hier
+const HOURLY_SHOUTOUT_MIN: i64 = 100; // drempel voor de uurlijkse shout-out (coins verdiend in het afgelopen uur)
+// TEST-modus: vuur elke HOURLY_TEST_INTERVAL sec met venster = die interval en een
+// lage drempel, i.p.v. op het uur. Zet op false voor prod (dan HH:01 + ≥100/uur).
+const HOURLY_SHOUTOUT_TEST: bool = false;
+const HOURLY_TEST_INTERVAL: f64 = 2.0 * 60.0; // test: interval én venster (s)
+const HOURLY_TEST_MIN: i64 = 3; // test-drempel
+// De custom Meadowcoins-emoji (guild-emoji). Bots moeten <:naam:id> sturen, niet :naam:.
+const COIN_EMOJI: &str = "<:Meadowcoins:1526149523288883220>";
 const PREFIX: &str = "!"; // deze berichten leveren geen coins op (oude commando-syntax)
 // --- daily-beloning (embed-knop) ----------------------------------------
 const DAILY_COOLDOWN: f64 = 24.0 * 3600.0; // 24u tussen twee claims
@@ -37,11 +51,19 @@ const COINS_CHANNEL: &str = "coins"; // publiek kanaal voor "X earned N coins to
 // hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
 // CHEST_POP_DELAY later popt hij en wint één random klikker CHEST_PRIZE coin(s).
 const CHEST_ENABLED: bool = true;
-const CHEST_DISTINCT_USERS: usize = 2; // TEST-waarde (weinig testers); prod = 3
+const CHEST_DISTINCT_USERS: usize = 3; // aantal verschillende chatters binnen CHEST_WINDOW om te spawnen
 const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatters"-telling
-const CHEST_POP_DELAY: u64 = 3 * 60; // seconden tussen verschijnen en poppen
-const CHEST_CHANNEL_COOLDOWN: f64 = 30.0 * 60.0; // rust per kanaal na een chest (anti-spam)
+const CHEST_POP_DELAY: u64 = 10 * 60; // seconden tussen verschijnen en poppen. Embedtekst leest dit dynamisch.
+const CHEST_CHANNEL_COOLDOWN: f64 = 50.0 * 60.0; // rust per kanaal na een chest (anti-spam)
+const CHEST_MIN_JOINERS: usize = 2; // minstens zoveel deelnemers, anders despawnt de chest (niks weggegeven)
+const CHEST_SPAWN_ON_START: bool = false; // (was test) — nu vervangen door het !chest dev-commando
 const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
+// Artwork ingebakken in de binary (geen losse bestanden bij deploy nodig). Gehangen
+// als attachments aan het chest-bericht en via attachment:// in de embed getoond:
+// chest = grote image (onderaan), coin = thumbnail (rechtsboven).
+const CHEST_IMG: &[u8] = include_bytes!("../artwork/treasure chest.png");
+const CHEST_COIN_IMG: &[u8] = include_bytes!("../artwork/coin.png");
+const CRYING_IMG: &[u8] = include_bytes!("../artwork/crying.png"); // getoond als de chest despawnt
 // Prijsverdeling: (gewicht in ‰ (per duizend), min, max coins). Som = CHEST_TIER_TOTAL.
 // CHEST_TIERS = de ACTUELE (live) verdeling die de trekking gebruikt (coarse, zoals
 // gevraagd). CHEST_TIERS_PROPOSAL = een fijnkorreliger VOORSTEL, enkel getoond in de
@@ -80,10 +102,13 @@ pub struct Data {
 }
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-/// Eén lopende (nog niet gepopte) chest: het kanaal + de deelnemers die klikten.
+/// Eén lopende (nog niet gepopte) chest: het kanaal, de deelnemers die klikten,
+/// en het pop-tijdstip (unix) zodat de embed bij elke klik met dezelfde live
+/// aftel-timer herbouwd kan worden.
 struct Chest {
     channel_id: u64,
     joiners: Vec<(String, String)>, // (uid, weergavenaam), ontdubbeld op uid
+    pop_ts: i64,
 }
 
 /// Per-guild gedeelde chest-boekhouding.
@@ -107,6 +132,33 @@ fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
+/// Gewogen coin-award per bericht volgens COIN_WEIGHTS (80/19/1 %).
+fn coin_amount() -> i64 {
+    let mut roll = rand::thread_rng().gen_range(0..100);
+    for (w, n) in COIN_WEIGHTS {
+        if roll < w {
+            return n;
+        }
+        roll -= w;
+    }
+    1 // vangnet (som != 100)
+}
+
+/// Log een coin-verdienste: `got N coins` → #fortuna-log, `balance: X` →
+/// #meadowmarket-log (getallen in vet). Gebruikt voor berichten, daily én chest.
+async fn log_earn(http: &serenity::Http, name: &str, amount: i64, total: i64) {
+    if FORTUNA_LOG_CHANNEL_ID != 0 {
+        let _ = serenity::ChannelId::new(FORTUNA_LOG_CHANNEL_ID)
+            .say(http, format!("{name} + **{amount}** {COIN_EMOJI}"))
+            .await;
+    }
+    if MEADOWMARKET_LOG_CHANNEL_ID != 0 {
+        let _ = serenity::ChannelId::new(MEADOWMARKET_LOG_CHANNEL_ID)
+            .say(http, format!("{name} balance: **{total}** {COIN_EMOJI}"))
+            .await;
+    }
+}
+
 async fn handle_message(
     ctx: &serenity::Context,
     msg: &serenity::Message,
@@ -119,16 +171,10 @@ async fn handle_message(
     if msg.content.starts_with(PREFIX) {
         return Ok(());
     }
-    // dev-test: coins per bericht enkel in het testkanaal (indien gezet)
-    if TEST_CHANNEL_ID != 0 && msg.channel_id.get() != TEST_CHANNEL_ID {
+    // Coins per bericht enkel in kanalen op de admin-beheerde coin-kanalenlijst.
+    // Lege lijst = nergens coins (progressieve activering).
+    if !db::is_coin_channel(&data.pool, msg.channel_id.get()) {
         return Ok(());
-    }
-    // enkel binnen de geconfigureerde guild (indien gezet)
-    if !data.cfg.guild_id.is_empty() {
-        match msg.guild_id {
-            Some(g) if g.to_string() == data.cfg.guild_id => {}
-            _ => return Ok(()),
-        }
     }
 
     let now = now_secs();
@@ -141,11 +187,35 @@ async fn handle_message(
         .unwrap_or_else(|| msg.author.name.clone());
 
     if elapsed >= COOLDOWN {
-        let amount = rand::thread_rng().gen_range(MIN_COINS..=MAX_COINS);
+        let old_earned = db::get_stats(&data.pool, &uid).3; // total_earned vóór award
+        let amount = coin_amount();
         let total = db::award(&data.pool, &uid, &name, amount, now);
         tracing::info!("{name}: +{amount} coins (totaal {total})");
-        if DEV_FEEDBACK {
-            msg.reply(ctx, format!("🪙 +{amount} coins! Total: **{total}**"))
+        log_earn(&ctx.http, &name, amount, total).await;
+        // Level-up? → 1% van het saldo cadeau + privé-melding (DM) aan het lid.
+        let new_level = db::level_of(old_earned + amount);
+        if new_level > db::level_of(old_earned) {
+            let gift = total / 100; // 1% van het saldo
+            if gift > 0 {
+                db::admin_add_coins(&data.pool, &uid, &name, gift);
+            }
+            let new_bal = total + gift;
+            let txt = if gift > 0 {
+                format!("🎉 <@{uid}> reached **Level {new_level}**! A **1% bonus** landed in their purse: **+{gift}** {COIN_EMOJI} — balance now **{new_bal}**.")
+            } else {
+                format!("🎉 <@{uid}> reached **Level {new_level}**! 🚀")
+            };
+            // NOOIT een DM. Publiek bericht in het kanaal waar men levelde + in prod #coins.
+            let _ = msg.channel_id.say(&ctx.http, txt.as_str()).await;
+            // Ook in prod #coins, tenzij men net dáár levelde (geen dubbel bericht).
+            if PROD_COINS_CHANNEL_ID != 0 && msg.channel_id.get() != PROD_COINS_CHANNEL_ID {
+                let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+                    .say(&ctx.http, txt.as_str())
+                    .await;
+            }
+        }
+        if COIN_FEEDBACK {
+            msg.reply(ctx, format!("{COIN_EMOJI} +{amount} coins! Total: **{total}**"))
                 .await?;
         }
     } else {
@@ -200,9 +270,34 @@ async fn event_handler(
                     Err(e) => tracing::warn!("kan leden niet ophalen voor {gname}: {e}"),
                 }
             }
+            // TEST: meteen een chest in #general posten om de graphics te checken.
+            if CHEST_SPAWN_ON_START {
+                if let Err(e) = do_spawn_chest(
+                    ctx.http.clone(),
+                    serenity::ChannelId::new(COIN_CHANNEL_ID),
+                    data.chest.clone(),
+                    data.pool.clone(),
+                )
+                .await
+                {
+                    tracing::warn!("kan test-chest niet spawnen: {e}");
+                }
+            }
         }
         serenity::FullEvent::Message { new_message } => {
             handle_message(ctx, new_message, data).await?;
+        }
+        serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } => {
+            // Lid verliet de prod-server → saldo archiveren + resetten (verse start bij terugkeer).
+            if guild_id.get() == PROD_GUILD_ID {
+                let uid = user.id.to_string();
+                if let Some(archived) = db::archive_on_leave(&data.pool, &uid, now_secs()) {
+                    tracing::info!(
+                        "{} verliet de server — {archived} coins gearchiveerd, saldo gereset",
+                        user.name
+                    );
+                }
+            }
         }
         serenity::FullEvent::InteractionCreate { interaction } => {
             if let serenity::Interaction::Component(mc) = interaction {
@@ -263,13 +358,14 @@ async fn handle_daily(
     let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
     let day_word = if streak == 1 { "day" } else { "days" };
     tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
+    log_earn(&ctx.http, &name, amount, total).await;
 
     respond_ephemeral(
         ctx,
         mc,
         &format!(
             "🔥 **{name}** checked in for **{streak}** {day_word}! \
-             You got **{amount}** Meadowcoins today! Balance: **{total}** 🪙"
+             You got **{amount}** Meadowcoins today! Balance: **{total}** {COIN_EMOJI}"
         ),
     )
     .await?;
@@ -339,7 +435,7 @@ fn tier_lines(tiers: &[(u32, i64, i64)]) -> String {
 fn chest_odds_embed() -> serenity::CreateEmbed {
     serenity::CreateEmbed::new()
         .title("🎁 Treasure chest — coin odds")
-        .description("What a popped chest can pay out. Odds are per pop; the winner is a random opener.")
+        .description("What an opened chest can pay out. Odds are per opening; the winner is a random opener.")
         .field("📊 Current (live)", tier_lines(&CHEST_TIERS), false)
         .field(
             "🔬 Proposal — finer-grained",
@@ -356,12 +452,97 @@ async fn dev_guild_only(ctx: Context<'_>) -> Result<bool, Error> {
     Ok(ctx.guild_id().map(|g| g.get()) == Some(DEV_GUILD_ID))
 }
 
-/// `!chest` — toon de prijsverdeling (huidig + fijnkorrelig voorstel). Enkel dev-guild.
-/// Het commando-bericht wordt centraal opgeruimd door de `pre_command`-hook.
+/// `!chest` — spawn meteen een treasure chest in dit kanaal (om te testen). Enkel
+/// dev-guild. Het commando-bericht wordt door de `pre_command`-hook opgeruimd.
 #[poise::command(prefix_command, check = "dev_guild_only")]
 pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
+    let data = ctx.data();
+    do_spawn_chest(
+        ctx.serenity_context().http.clone(),
+        ctx.channel_id(),
+        data.chest.clone(),
+        data.pool.clone(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// `!chestodds` — toon de prijsverdeling (huidig + fijnkorrelig voorstel). Enkel dev-guild.
+#[poise::command(prefix_command, check = "dev_guild_only")]
+pub async fn chestodds(ctx: Context<'_>) -> Result<(), Error> {
     ctx.send(poise::CreateReply::default().embed(chest_odds_embed()))
         .await?;
+    Ok(())
+}
+
+/// Bouw de chest-embed voor het huidige aantal deelnemers. Onder de drempel
+/// (CHEST_MIN_JOINERS) toont hij "It will despawn <t:R>." + "Needs N more
+/// participant(s)."; zodra er genoeg deelnemers zijn verdwijnt die regel en
+/// wordt het "It will open <t:R>.". Herbruikt bij spawn én bij elke klik.
+fn chest_embed(pop_ts: i64, joiners: usize) -> serenity::CreateEmbed {
+    let enough = joiners >= CHEST_MIN_JOINERS;
+    let verb = if enough { "open" } else { "despawn" };
+    // ### = iets groter (Markdown-header) op één regel (geen grote tussenruimte tussen
+    // twee headers). Discord klapt meerdere spaties in tot één, dus een geforceerde
+    // wrap na "grand prize!" kan niet — de regel wrapt vanzelf op de vensterbreedte.
+    let mut desc = format!(
+        "### See if you win the **grand prize**! It will **{verb}** <t:{pop_ts}:R>."
+    );
+    if !enough {
+        let need = CHEST_MIN_JOINERS - joiners;
+        let p = if need == 1 { "participant" } else { "participants" };
+        desc.push_str(&format!("\nNeeds **{need}** more {p}."));
+    }
+    serenity::CreateEmbed::new()
+        .title("🎁 A treasure chest appeared!")
+        .description(desc)
+        .image("attachment://chest.png") // grote chest onderaan
+        .thumbnail("attachment://coin.png") // coin rechtsboven
+        .colour(0xF1_C4_0F)
+}
+
+/// Post een chest-bericht (knop + afbeeldingen), registreer het in de tracker en
+/// plan de pop. Herbruikt door de gewone spawn én de test-spawn bij startup.
+async fn do_spawn_chest(
+    http: Arc<serenity::Http>,
+    channel_id: serenity::ChannelId,
+    tracker: Arc<Mutex<ChestTracker>>,
+    pool: DbPool,
+) -> Result<(), Error> {
+    let button = serenity::CreateButton::new(CHEST_CUSTOM_ID)
+        .emoji('🎁')
+        .label("Try your luck")
+        .style(serenity::ButtonStyle::Success);
+    // Pop-tijd als unix-timestamp: Discord's relatieve <t:…:R> telt er live naar af.
+    let pop_ts = (now_secs() + CHEST_POP_DELAY as f64) as i64;
+    let builder = serenity::CreateMessage::new()
+        .embed(chest_embed(pop_ts, 0))
+        .add_file(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"))
+        .add_file(serenity::CreateAttachment::bytes(CHEST_COIN_IMG, "coin.png"))
+        .components(vec![serenity::CreateActionRow::Buttons(vec![button])]);
+    let sent = channel_id.send_message(&http, builder).await?;
+    let msg_id = sent.id.get();
+
+    tracker.lock().unwrap().chests.insert(
+        msg_id,
+        Chest {
+            channel_id: channel_id.get(),
+            joiners: Vec::new(),
+            pop_ts,
+        },
+    );
+    tracing::info!(
+        "treasure chest gespawned in kanaal {} (bericht {msg_id})",
+        channel_id.get()
+    );
+
+    let http2 = http.clone();
+    let pool2 = pool.clone();
+    let tracker2 = tracker.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(CHEST_POP_DELAY)).await;
+        pop_chest(http2, pool2, tracker2, channel_id, msg_id).await;
+    });
     Ok(())
 }
 
@@ -405,49 +586,18 @@ async fn maybe_spawn_chest(
         return Ok(());
     }
 
-    // Stuur het chest-bericht met de "Open"-knop.
-    let button = serenity::CreateButton::new(CHEST_CUSTOM_ID)
-        .emoji('🎁')
-        .label("Try your luck")
-        .style(serenity::ButtonStyle::Success);
-    let embed = serenity::CreateEmbed::new()
-        .title("🎁 A treasure chest appeared!")
-        .description(
-            "You lot got the channel buzzing. Click **Try your luck** to hop in — \
-             it pops in 3 minutes and one lucky opener wins a prize!",
-        )
-        .colour(0xF1_C4_0F);
-    let builder = serenity::CreateMessage::new()
-        .embed(embed)
-        .components(vec![serenity::CreateActionRow::Buttons(vec![button])]);
-    let sent = match msg.channel_id.send_message(&ctx.http, builder).await {
-        Ok(m) => m,
-        Err(e) => {
-            // Zending mislukt → reservering vrijgeven zodat een volgende poging kan.
-            data.chest.lock().unwrap().active.remove(&chan);
-            return Err(e.into());
-        }
-    };
-    let msg_id = sent.id.get();
-
-    // Registreer de lopende chest en plan de pop.
-    data.chest.lock().unwrap().chests.insert(
-        msg_id,
-        Chest {
-            channel_id: chan,
-            joiners: Vec::new(),
-        },
-    );
-    tracing::info!("treasure chest gespawned in kanaal {chan} (bericht {msg_id})");
-
-    let http = ctx.http.clone();
-    let pool = data.pool.clone();
-    let tracker = data.chest.clone();
-    let channel_id = msg.channel_id;
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(CHEST_POP_DELAY)).await;
-        pop_chest(http, pool, tracker, channel_id, msg_id).await;
-    });
+    // `active` is al gereserveerd onder de lock → spawnen; bij fout weer vrijgeven.
+    if let Err(e) = do_spawn_chest(
+        ctx.http.clone(),
+        msg.channel_id,
+        data.chest.clone(),
+        data.pool.clone(),
+    )
+    .await
+    {
+        data.chest.lock().unwrap().active.remove(&chan);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -466,34 +616,49 @@ async fn handle_chest_click(
         .unwrap_or_else(|| mc.user.name.clone());
 
     // None = chest bestaat niet (meer); Some(0) = zat er al in; Some(n≥1) = toegevoegd.
-    let joined = {
+    // edit = Some((pop_ts, n)) enkel bij een échte nieuwe deelnemer → embed bijwerken.
+    let (joined, edit) = {
         let mut t = data.chest.lock().unwrap();
         match t.chests.get_mut(&msg_id) {
-            None => None,
+            None => (None, None),
             Some(c) => {
                 if c.joiners.iter().any(|(u, _)| u == &uid) {
-                    Some(0)
+                    (Some(0), None)
                 } else {
                     c.joiners.push((uid.clone(), name));
-                    Some(c.joiners.len())
+                    let n = c.joiners.len();
+                    (Some(n), Some((c.pop_ts, n)))
                 }
             }
         }
     };
+    // Nieuwe deelnemer → werk de chest-embed bij (need-teller daalt; bij genoeg
+    // deelnemers verdwijnt die regel en wordt "despawn" → "open").
+    if let Some((pop_ts, n)) = edit {
+        // Afbeeldingen opnieuw meesturen (keep_all bleek ze soms te droppen bij een
+        // edit) zodat de chest-graphic altijd zichtbaar blijft na een klik.
+        let atts = serenity::EditAttachments::new()
+            .add(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"))
+            .add(serenity::CreateAttachment::bytes(CHEST_COIN_IMG, "coin.png"));
+        let builder = serenity::EditMessage::new()
+            .embeds(vec![chest_embed(pop_ts, n)])
+            .attachments(atts);
+        if let Err(e) = mc.channel_id.edit_message(&ctx.http, mc.message.id, builder).await {
+            tracing::warn!("kan chest-embed niet bijwerken: {e}");
+        }
+    }
     let text = match joined {
-        None => "📦 Too late — this chest already popped.".to_string(),
-        Some(0) => "🎁 You're already in! Sit tight for the pop.".to_string(),
-        Some(n) => format!(
-            "🎁 You're in! **{n}** {} waiting for the pop.",
-            if n == 1 { "opener" } else { "openers" }
-        ),
+        None => "📦 Too late — this chest already opened.".to_string(),
+        Some(0) => "🎁 You're already in! Sit tight for the opening.".to_string(),
+        Some(_) => "🎁 You're successfully trying to open the chest!".to_string(),
     };
     respond_ephemeral(ctx, mc, &text).await?;
     Ok(())
 }
 
-/// Pop de chest (na CHEST_POP_DELAY): kies een random klikker, ken de prijs toe en
-/// werk het bericht bij. Geeft het kanaal vrij en zet de anti-spam-cooldown.
+/// Pop de chest (na CHEST_POP_DELAY): kies een random klikker, ken de prijs toe,
+/// verwijder het originele chest-bericht en post het resultaat als NIEUW embed
+/// onderaan het kanaal. Geeft het kanaal vrij en zet de anti-spam-cooldown.
 async fn pop_chest(
     http: Arc<serenity::Http>,
     pool: DbPool,
@@ -516,40 +681,60 @@ async fn pop_chest(
         }
     };
 
-    let embed = if joiners.is_empty() {
-        serenity::CreateEmbed::new()
-            .title("📦 The chest crumbled to dust")
-            .description("Nobody opened it in time.")
-            .colour(0x95_A5_A6)
-    } else {
-        let idx = rand::thread_rng().gen_range(0..joiners.len());
-        let (winner_uid, winner_name) = &joiners[idx];
-        let prize = chest_prize();
-        let total = db::award(&pool, winner_uid, winner_name, prize, now_secs());
-        let coin_word = if prize == 1 { "coin" } else { "coins" };
-        let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };
-        tracing::info!(
-            "chest gepopt: {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
-            joiners.len()
-        );
-        serenity::CreateEmbed::new()
-            .title("💰 The chest popped!")
-            .description(format!(
-                "Out of {} lucky {opener_word}, <@{winner_uid}> wins \
-                 **{prize} {coin_word}**!\nBalance: **{total}** 🪙",
-                joiners.len()
-            ))
-            .colour(0x6B_9B_52)
-    };
-
-    let edit = serenity::EditMessage::new()
-        .embeds(vec![embed])
-        .components(vec![]); // knop verwijderen
+    // Origineel (met chest-afbeelding) altijd verwijderen — anders raken de
+    // attachments los van de embed en toont Discord de coin op volledige grootte.
     if let Err(e) = channel_id
-        .edit_message(http.as_ref(), serenity::MessageId::new(msg_id), edit)
+        .delete_message(http.as_ref(), serenity::MessageId::new(msg_id))
         .await
     {
-        tracing::warn!("kan chest-bericht {msg_id} niet bijwerken: {e}");
+        tracing::warn!("kan chest-bericht {msg_id} niet verwijderen: {e}");
+    }
+
+    // Te weinig deelnemers → despawn: niks weggeven, wel een "Fortuna cries"-embed.
+    if joiners.len() < CHEST_MIN_JOINERS {
+        tracing::info!(
+            "chest despawned in kanaal {channel_id} (te weinig deelnemers: {})",
+            joiners.len()
+        );
+        let who = if joiners.is_empty() { "**No one**" } else { "**Only one**" };
+        let embed = serenity::CreateEmbed::new()
+            .title("Fortuna cries...")
+            .description(format!("{who} tried to open my chest"))
+            .image("attachment://crying.png")
+            .colour(0x95_A5_A6);
+        let builder = serenity::CreateMessage::new()
+            .embed(embed)
+            .add_file(serenity::CreateAttachment::bytes(CRYING_IMG, "crying.png"));
+        if let Err(e) = channel_id.send_message(http.as_ref(), builder).await {
+            tracing::warn!("kan despawn-embed niet posten in {channel_id}: {e}");
+        }
+        return;
+    }
+
+    // Genoeg deelnemers → open: random winnaar, prijs, log, resultaat onderaan.
+    let idx = rand::thread_rng().gen_range(0..joiners.len());
+    let (winner_uid, winner_name) = &joiners[idx];
+    let prize = chest_prize();
+    let total = db::award(&pool, winner_uid, winner_name, prize, now_secs());
+    log_earn(http.as_ref(), winner_name, prize, total).await;
+    let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };
+    tracing::info!(
+        "chest geopend: {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
+        joiners.len()
+    );
+    let embed = serenity::CreateEmbed::new()
+        .title("The Magic Chest opened!")
+        .description(format!(
+            "Out of **{}** {opener_word}, <@{winner_uid}> got lucky!\n\
+             They won **{prize}** {COIN_EMOJI} !!!",
+            joiners.len()
+        ))
+        .colour(0x6B_9B_52);
+    if let Err(e) = channel_id
+        .send_message(http.as_ref(), serenity::CreateMessage::new().embed(embed))
+        .await
+    {
+        tracing::warn!("kan chest-resultaat niet posten in {channel_id}: {e}");
     }
 }
 
@@ -584,6 +769,85 @@ async fn role_grant_sweeper(pool: DbPool, cfg: Config) {
     }
 }
 
+/// Post om HH:01 een shout-out in #coins voor iedereen die in het net afgelopen
+/// klok-uur ≥ HOURLY_SHOUTOUT_MIN coins verdiende. Geen bericht als niemand de
+/// drempel haalde. State zit in de DB (earn_log) → overleeft een herstart.
+async fn hourly_shoutouts(http: Arc<serenity::Http>, pool: DbPool) {
+    loop {
+        let (since, until, min) = if HOURLY_SHOUTOUT_TEST {
+            // TEST: elke HOURLY_TEST_INTERVAL sec; venster = die laatste interval.
+            tokio::time::sleep(std::time::Duration::from_secs_f64(HOURLY_TEST_INTERVAL)).await;
+            let until = now_secs();
+            (until - HOURLY_TEST_INTERVAL, until, HOURLY_TEST_MIN)
+        } else {
+            // PROD: slaap tot de eerstvolgende HH:01; venster = net afgelopen klok-uur.
+            let now = now_secs();
+            let boundary = (now / 3600.0).floor() * 3600.0; // huidig hele uur (:00)
+            let mut fire = boundary + 60.0; // :01
+            if fire <= now {
+                fire += 3600.0;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs_f64(fire - now)).await;
+            let hour_end = (now_secs() / 3600.0).floor() * 3600.0;
+            (hour_end - 3600.0, hour_end, HOURLY_SHOUTOUT_MIN)
+        };
+
+        let earners = db::hourly_earners(&pool, since, until, min);
+        for (uid, _name, total) in &earners {
+            let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+                .say(
+                    &http,
+                    format!("<@{uid}>, wow you've earned **{total}** {COIN_EMOJI} over the last hour! Well done!"),
+                )
+                .await;
+        }
+        if !earners.is_empty() {
+            tracing::info!("shout-out: {} lid/leden ≥{min} coins", earners.len());
+        }
+        // Bewaar ~8 dagen earn_log (het weekly leaderboard leest ervan).
+        db::prune_earn_log(&pool, now_secs() - 8.0 * 86400.0);
+    }
+}
+
+/// Post elke zaterdag 15:00 (Brusselse tijd) het weekly leaderboard als embed in
+/// het prod #general. Geen bericht als niemand deze week iets verdiende.
+async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
+    loop {
+        let now = now_secs();
+        let fire = db::next_saturday_1500_brussels(now);
+        tokio::time::sleep(std::time::Duration::from_secs_f64((fire - now).max(1.0))).await;
+
+        // Venster = de net afgelopen week: sinds de vorige zaterdag 15:00.
+        let since = db::last_saturday_1500_brussels(now_secs()) - 7.0 * 86400.0;
+        let top = db::leaderboard_week(&pool, since, 10);
+        if top.is_empty() {
+            continue;
+        }
+        let medal = |i: usize| match i {
+            0 => "👑",
+            1 => "🥈",
+            2 => "🥉",
+            _ => "🌼",
+        };
+        let lines: String = top
+            .iter()
+            .enumerate()
+            .map(|(i, (uid, _n, total))| {
+                format!("{} <@{uid}> — **{total}** {COIN_EMOJI}\n", medal(i))
+            })
+            .collect();
+        let embed = serenity::CreateEmbed::new()
+            .title("🏆 Weekly leaderboard")
+            .description(format!("Top earners of the past week!\n\n{lines}"))
+            .colour(0x6B_9B_52);
+        if PROD_GENERAL_CHANNEL_ID != 0 {
+            let _ = serenity::ChannelId::new(PROD_GENERAL_CHANNEL_ID)
+                .send_message(http.as_ref(), serenity::CreateMessage::new().embed(embed))
+                .await;
+        }
+    }
+}
+
 pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     let token = cfg.bot_token.clone();
     let intents = serenity::GatewayIntents::GUILDS
@@ -597,7 +861,7 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     // Enkel !chest (dev-only info-commando). Het !coins-leaderboard is verwijderd.
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![chest()],
+            commands: vec![chest(), chestodds()],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(PREFIX.to_string()),
                 ..Default::default()
@@ -619,8 +883,16 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
             },
             ..Default::default()
         })
-        .setup(move |_ctx, _ready, _framework| {
+        .setup(move |ctx, _ready, _framework| {
+            let hourly_pool = pool.clone();
+            let hourly_http = ctx.http.clone();
+            let weekly_pool = pool.clone();
+            let weekly_http = ctx.http.clone();
             Box::pin(async move {
+                // Uurlijkse shout-out voor wie ≥100 coins verdiende in het afgelopen uur.
+                tokio::spawn(hourly_shoutouts(hourly_http, hourly_pool));
+                // Weekly leaderboard elke zaterdag 15:00 (Brussel) in prod #general.
+                tokio::spawn(weekly_leaderboard(weekly_http, weekly_pool));
                 Ok(Data {
                     pool,
                     cfg,
