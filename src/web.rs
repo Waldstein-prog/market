@@ -82,6 +82,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/coins/undo", post(admin_coins_undo))
         .route("/admin/coins/restore", post(admin_coins_restore))
         .route("/admin/coins/discard", post(admin_coins_discard))
+        .route("/admin/log", get(admin_log))
         .route("/admin/channels", get(admin_channels))
         .route("/admin/channels/add", post(admin_channels_add))
         .route("/admin/channels/remove", post(admin_channels_remove))
@@ -439,10 +440,11 @@ fn nav_html(active: &str, admin: bool) -> String {
     };
     let admin_link = if admin {
         format!(
-            "{}{}{}",
+            "{}{}{}{}",
             item("/admin/market", "admin", "⚙ Manage"),
             item("/admin/coins", "admincoins", "🪙 Coins"),
-            item("/admin/channels", "adminchannels", "📋 Channels")
+            item("/admin/channels", "adminchannels", "📋 Channels"),
+            item("/admin/log", "adminlog", "📜 Log")
         )
     } else {
         String::new()
@@ -1684,6 +1686,126 @@ struct ChannelAdd {
 #[derive(Deserialize)]
 struct ChannelRemove {
     channel_id: String,
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    #[serde(default)]
+    cat: Option<String>, // filter op categorie ('' / afwezig = alles)
+}
+
+/// Server-logboek (admin): alle gelogde events, nieuwste eerst, filterbaar op
+/// categorie. Nu vooral chest-events (spawn/join/win/despawn/te-laat); later
+/// breiden we de categorieën en filters uit.
+async fn admin_log(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LogQuery>,
+) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let cats = db::log_categories(&st.pool);
+    let active = q.cat.as_deref().filter(|c| !c.is_empty());
+    let rows = db::recent_log(&st.pool, active, 500);
+
+    // Filterknoppen: "Alles" + één knop per voorkomende categorie.
+    let chip = |key: Option<&str>, label: &str| {
+        let on = active == key;
+        let href = match key {
+            Some(k) => format!("/admin/log?cat={k}"),
+            None => "/admin/log".to_string(),
+        };
+        let cls = if on { "chip on" } else { "chip" };
+        format!("<a class=\"{cls}\" href=\"{href}\">{}</a>", esc(label))
+    };
+    let mut filters = chip(None, "All");
+    for c in &cats {
+        filters.push_str(&chip(Some(c), c));
+    }
+
+    // Eén gekleurd label per event-type (uitbreidbaar; onbekend = grijs).
+    let badge = |cat: &str, event: &str| -> String {
+        let (bg, txt) = match (cat, event) {
+            ("chest", "spawn") => ("#3b5bdb", "🎁 spawn"),
+            ("chest", "join") => ("#2f9e44", "✅ join"),
+            ("chest", "already_in") => ("#868e96", "↩ already in"),
+            ("chest", "too_late") => ("#e8590c", "⏰ too late"),
+            ("chest", "win") => ("#f08c00", "🏆 win"),
+            ("chest", "despawn") => ("#adb5bd", "💧 despawn"),
+            _ => ("#868e96", event),
+        };
+        format!(
+            "<span class=\"badge\" style=\"background:{bg}\">{}</span>",
+            esc(txt)
+        )
+    };
+
+    let body_rows: String = if rows.is_empty() {
+        "<tr><td colspan=\"5\" class=\"muted\">No events logged yet.</td></tr>".to_string()
+    } else {
+        rows.iter()
+            .map(|r| {
+                let actor = if r.actor_name.is_empty() {
+                    "<span class=\"muted\">—</span>".to_string()
+                } else {
+                    esc(&r.actor_name)
+                };
+                let amt = match r.amount {
+                    Some(a) => format!("<b>{a}</b>"),
+                    None => "<span class=\"muted\">—</span>".to_string(),
+                };
+                format!(
+                    "<tr>\
+                       <td class=\"tsc\"><span class=\"ts\" data-ts=\"{ts}\"></span></td>\
+                       <td>{badge}</td>\
+                       <td>{actor}</td>\
+                       <td class=\"amt\">{amt}</td>\
+                       <td class=\"det\">{detail}</td>\
+                     </tr>",
+                    ts = r.ts as i64,
+                    badge = badge(&r.category, &r.event),
+                    detail = esc(&r.detail),
+                )
+            })
+            .collect()
+    };
+
+    // Klok-script: zet de epoch-tijden om naar de lokale tijd van de kijker.
+    let ts_js = "<script>document.querySelectorAll('.ts').forEach(function(e){\
+        var t=parseInt(e.dataset.ts,10);if(t)e.textContent=new Date(t*1000)\
+        .toLocaleString([], {month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});});</script>";
+
+    let style = "<style>\
+        .chips{display:flex;flex-wrap:wrap;gap:.4rem;margin:.6rem 0 1rem}\
+        .chip{padding:.25rem .7rem;border-radius:999px;background:#e9ecef;color:#495057;\
+          text-decoration:none;font-size:.85rem;border:1px solid transparent}\
+        .chip.on{background:#495057;color:#fff}\
+        table.log{width:100%;border-collapse:collapse;font-size:.9rem}\
+        table.log th,table.log td{padding:.4rem .5rem;text-align:left;border-bottom:1px solid #e9ecef;vertical-align:top}\
+        table.log th{font-size:.75rem;text-transform:uppercase;letter-spacing:.03em;color:#868e96}\
+        .tsc{white-space:nowrap;color:#495057;font-variant-numeric:tabular-nums}\
+        .badge{display:inline-block;padding:.12rem .5rem;border-radius:.4rem;color:#fff;font-size:.8rem;white-space:nowrap}\
+        .amt{text-align:right;white-space:nowrap}\
+        .det{color:#495057}\
+        </style>";
+
+    let body = format!(
+        "{style}<h1>📜 Server log</h1>\
+         <p class=\"muted\">Every logged event, newest first (last 500). \
+         Use this to see exactly who triggered a chest, who joined, who was too late, and who won.</p>\
+         <div class=\"chips\">{filters}</div>\
+         <table class=\"log\"><thead><tr>\
+           <th>When</th><th>Event</th><th>Who</th><th>Amount</th><th>Detail</th>\
+         </tr></thead><tbody>{body_rows}</tbody></table>{ts_js}{AUTO_REFRESH_JS}"
+    );
+    Html(shell(
+        "Server log — Meadow Market",
+        &chrome(&name, "adminlog", true, ""),
+        true,
+        &body,
+    ))
+    .into_response()
 }
 
 /// Beheer de lijst van kanalen waar coins verdiend kunnen worden.

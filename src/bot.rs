@@ -116,8 +116,9 @@ struct Chest {
 /// Per-guild gedeelde chest-boekhouding.
 #[derive(Default)]
 struct ChestTracker {
-    // per kanaal: recente (uid, ts) om "N verschillende chatters binnen het venster" te tellen
-    recent: HashMap<u64, Vec<(String, f64)>>,
+    // per kanaal: recente (uid, naam, ts) om "N verschillende chatters binnen het venster"
+    // te tellen én om bij een spawn te kunnen loggen wie de chest uitlokte.
+    recent: HashMap<u64, Vec<(String, String, f64)>>,
     // per kanaal: tot wanneer er geen nieuwe chest mag verschijnen (cooldown)
     cooldown_until: HashMap<u64, f64>,
     // kanalen met een chest die nog moet poppen (voorkomt dubbele spawns)
@@ -280,6 +281,7 @@ async fn event_handler(
                     data.chest.clone(),
                     data.pool.clone(),
                     CHEST_POP_DELAY,
+                    &[],
                 )
                 .await
                 {
@@ -480,6 +482,7 @@ pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
         data.chest.clone(),
         data.pool.clone(),
         CHEST_POP_DELAY, // prod-timing
+        &[],
     )
     .await?;
     Ok(())
@@ -529,7 +532,8 @@ async fn do_spawn_chest(
     tracker: Arc<Mutex<ChestTracker>>,
     pool: DbPool,
     pop_delay: u64,
-) -> Result<(), Error> {
+    triggers: &[(String, String)], // chatters die de chest uitlokten (leeg bij handmatig/test)
+) -> Result<u64, Error> {
     let button = serenity::CreateButton::new(CHEST_CUSTOM_ID)
         .emoji('🎁')
         .label("Try your luck")
@@ -552,6 +556,24 @@ async fn do_spawn_chest(
     tracing::info!(
         "treasure chest gespawned in kanaal {} (bericht {msg_id})",
         channel_id.get()
+    );
+    // Logboek: de chest verscheen, met (indien natuurlijk) wie hem uitlokte.
+    let who = triggers
+        .iter()
+        .map(|(_, n)| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    db::log_event(
+        &pool,
+        now_secs(),
+        &db::LogEntry::new("chest", "spawn")
+            .channel(channel_id.get())
+            .reference(msg_id)
+            .detail(if who.is_empty() {
+                "handmatig gespawned".to_string()
+            } else {
+                format!("uitgelokt door: {who}")
+            }),
     );
 
     // Pop-taak: na pop_delay de chest openen/despawnen.
@@ -585,7 +607,7 @@ async fn do_spawn_chest(
             }
         }
     });
-    Ok(())
+    Ok(msg_id)
 }
 
 /// Registreer de chatter en spawn — bij ≥ CHEST_DISTINCT_USERS verschillende
@@ -606,27 +628,41 @@ async fn maybe_spawn_chest(
     let now = now_secs();
     let chan = msg.channel_id.get();
     let uid = msg.author.id.to_string();
+    let name = msg
+        .author
+        .global_name
+        .clone()
+        .unwrap_or_else(|| msg.author.name.clone());
 
     // Beslis onder de lock: registreer de chatter, prune het venster, tel distinct.
-    let spawn = {
+    // Bij een spawn houden we de triggerende chatters (uid, naam) bij om te loggen.
+    let (spawn, triggers) = {
         let mut t = data.chest.lock().unwrap();
         let on_cd = t.cooldown_until.get(&chan).is_some_and(|&u| u > now);
         let active = t.active.contains(&chan);
         let distinct = {
             let v = t.recent.entry(chan).or_default();
-            v.retain(|(_, ts)| now - *ts < CHEST_WINDOW); // verlopen entries weg
-            v.retain(|(u, _)| u != &uid); // oude entry van deze uid weg (verse ts erbij)
-            v.push((uid.clone(), now));
-            v.iter().map(|(u, _)| u.as_str()).collect::<HashSet<_>>().len()
+            v.retain(|(_, _, ts)| now - *ts < CHEST_WINDOW); // verlopen entries weg
+            v.retain(|(u, _, _)| u != &uid); // oude entry van deze uid weg (verse ts erbij)
+            v.push((uid.clone(), name.clone(), now));
+            v.iter().map(|(u, _, _)| u.as_str()).collect::<HashSet<_>>().len()
         };
         let go = !on_cd && !active && distinct >= CHEST_DISTINCT_USERS;
+        let mut triggers: Vec<(String, String)> = Vec::new();
         if go {
             if let Some(v) = t.recent.get_mut(&chan) {
+                // Ontdubbel op uid (nieuwste naam wint) → de chatters die de chest uitlokten.
+                let mut seen = HashSet::new();
+                for (u, n, _) in v.iter().rev() {
+                    if seen.insert(u.clone()) {
+                        triggers.push((u.clone(), n.clone()));
+                    }
+                }
                 v.clear(); // venster resetten zodat het niet blijft hertriggeren
             }
             t.active.insert(chan); // meteen reserveren → geen dubbele spawn
         }
-        go
+        (go, triggers)
     };
     if !spawn {
         return Ok(());
@@ -639,6 +675,7 @@ async fn maybe_spawn_chest(
         data.chest.clone(),
         data.pool.clone(),
         CHEST_POP_DELAY,
+        &triggers,
     )
     .await
     {
@@ -672,13 +709,29 @@ async fn handle_chest_click(
                 if c.joiners.iter().any(|(u, _)| u == &uid) {
                     (Some(0), None)
                 } else {
-                    c.joiners.push((uid.clone(), name));
+                    c.joiners.push((uid.clone(), name.clone()));
                     let n = c.joiners.len();
                     (Some(n), Some((c.pop_ts, n)))
                 }
             }
         }
     };
+    // Logboek: elke klik vastleggen — óók een te late klik (chest al gepopt),
+    // want net dát verklaart een "ontbrekende" deelnemer bij de opening.
+    let (log_event, log_detail) = match joined {
+        None => ("too_late", "klikte nadat de chest al weg was".to_string()),
+        Some(0) => ("already_in", "klikte opnieuw (zat er al in)".to_string()),
+        Some(n) => ("join", format!("deelnemer #{n}")),
+    };
+    db::log_event(
+        &data.pool,
+        now_secs(),
+        &db::LogEntry::new("chest", log_event)
+            .actor(&uid, &name)
+            .channel(mc.channel_id.get())
+            .reference(msg_id)
+            .detail(log_detail),
+    );
     // Nieuwe deelnemer → werk de chest-embed bij (need-teller daalt; bij genoeg
     // deelnemers verdwijnt die regel en wordt "despawn" → "open").
     if let Some((pop_ts, n)) = edit {
@@ -710,6 +763,22 @@ async fn pop_chest(
     channel_id: serenity::ChannelId,
     msg_id: u64,
 ) {
+    // Harde fix voor "verdwenen deelnemer": sluit éérst het klik-venster door de
+    // knop te verwijderen — en dat WHILE de chest nog in de map zit, zodat klikken
+    // die net nog binnenkomen gewoon als deelnemer geteld worden (niet stil als
+    // "te laat" sneuvelen in het gaatje tussen map-verwijdering en bericht-wissen).
+    // Pas nadat de knop weg is, nemen we de deelnemerslijst vast en trekken we.
+    if let Err(e) = channel_id
+        .edit_message(
+            http.as_ref(),
+            serenity::MessageId::new(msg_id),
+            serenity::EditMessage::new().components(vec![]),
+        )
+        .await
+    {
+        tracing::warn!("kan chest-knop niet sluiten vóór pop ({msg_id}): {e}");
+    }
+
     // Haal de chest eruit, geef het kanaal vrij, zet de cooldown.
     let joiners = {
         let mut t = tracker.lock().unwrap();
@@ -734,11 +803,31 @@ async fn pop_chest(
         tracing::warn!("kan chest-bericht {msg_id} niet verwijderen: {e}");
     }
 
+    // Namen van alle deelnemers (voor het logboek-detail).
+    let joiner_names = joiners
+        .iter()
+        .map(|(_, n)| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
     // Te weinig deelnemers → despawn: niks weggeven, wel een "Fortuna cries"-embed.
     if joiners.len() < CHEST_MIN_JOINERS {
         tracing::info!(
             "chest despawned in kanaal {channel_id} (te weinig deelnemers: {})",
             joiners.len()
+        );
+        db::log_event(
+            &pool,
+            now_secs(),
+            &db::LogEntry::new("chest", "despawn")
+                .channel(channel_id.get())
+                .reference(msg_id)
+                .amount(joiners.len() as i64)
+                .detail(if joiner_names.is_empty() {
+                    "0 deelnemers".to_string()
+                } else {
+                    format!("{} deelnemer(s): {joiner_names}", joiners.len())
+                }),
         );
         let who = if joiners.is_empty() { "**No one**" } else { "**Only one**" };
         let embed = serenity::CreateEmbed::new()
@@ -765,6 +854,19 @@ async fn pop_chest(
     tracing::info!(
         "chest geopend: {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
         joiners.len()
+    );
+    db::log_event(
+        &pool,
+        now_secs(),
+        &db::LogEntry::new("chest", "win")
+            .actor(winner_uid, winner_name)
+            .channel(channel_id.get())
+            .reference(msg_id)
+            .amount(prize)
+            .detail(format!(
+                "won uit {} deelnemer(s): {joiner_names}",
+                joiners.len()
+            )),
     );
     let embed = serenity::CreateEmbed::new()
         .title("The Magic Chest opened!")

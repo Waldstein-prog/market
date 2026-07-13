@@ -97,7 +97,21 @@ pub fn init_pool(path: &str) -> DbPool {
         CREATE TABLE IF NOT EXISTS coin_channels (
             channel_id TEXT PRIMARY KEY,     -- enkel hier leveren berichten coins op
             name       TEXT NOT NULL
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS server_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         REAL NOT NULL,               -- epoch-seconden
+            category   TEXT NOT NULL,               -- 'chest', later 'coins'|'daily'|'admin'|...
+            event      TEXT NOT NULL,               -- 'spawn'|'join'|'already_in'|'too_late'|'win'|'despawn'|...
+            actor_uid  TEXT NOT NULL DEFAULT '',    -- wie de actie deed (leeg = systeem)
+            actor_name TEXT NOT NULL DEFAULT '',
+            channel_id TEXT NOT NULL DEFAULT '',
+            ref_id     TEXT NOT NULL DEFAULT '',     -- groepeer-id (bv. chest-bericht-id)
+            amount     INTEGER,                       -- prijs/aantal, NULL indien nvt
+            detail     TEXT NOT NULL DEFAULT ''       -- vrije tekst / lijst deelnemers
+        );
+        CREATE INDEX IF NOT EXISTS idx_server_log_ts  ON server_log(ts);
+        CREATE INDEX IF NOT EXISTS idx_server_log_cat ON server_log(category, ts);",
     )
     .expect("kan tabel niet aanmaken");
 
@@ -1442,4 +1456,140 @@ pub fn delete_role_grant(pool: &DbPool, id: i64) {
     let conn = pool.get().expect("db");
     conn.execute("DELETE FROM role_grants WHERE id = ?1", params![id])
         .expect("delete role_grant");
+}
+
+// --- server-event-log (generiek, uitbreidbaar) --------------------------
+// Eén rij per event. `category` groepeert (nu enkel 'chest', later 'coins',
+// 'daily', 'admin', ...). `ref_id` bindt events van hetzelfde object samen
+// (bv. alle join/win/despawn van één chest via het chest-bericht-id).
+
+/// Eén te loggen event. Vul enkel de relevante velden; de rest blijft leeg/None.
+#[derive(Default)]
+pub struct LogEntry {
+    pub category: String,
+    pub event: String,
+    pub actor_uid: String,
+    pub actor_name: String,
+    pub channel_id: String,
+    pub ref_id: String,
+    pub amount: Option<i64>,
+    pub detail: String,
+}
+
+impl LogEntry {
+    /// Kortere constructie: `LogEntry::new("chest", "join")` + `.actor(...)` enz.
+    pub fn new(category: &str, event: &str) -> Self {
+        LogEntry {
+            category: category.into(),
+            event: event.into(),
+            ..Default::default()
+        }
+    }
+    pub fn actor(mut self, uid: &str, name: &str) -> Self {
+        self.actor_uid = uid.into();
+        self.actor_name = name.into();
+        self
+    }
+    pub fn channel(mut self, channel_id: u64) -> Self {
+        self.channel_id = channel_id.to_string();
+        self
+    }
+    pub fn reference(mut self, ref_id: u64) -> Self {
+        self.ref_id = ref_id.to_string();
+        self
+    }
+    pub fn amount(mut self, amount: i64) -> Self {
+        self.amount = Some(amount);
+        self
+    }
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+}
+
+/// Schrijf één event weg. Faalt nooit hard (logboek mag de bot niet doen crashen).
+pub fn log_event(pool: &DbPool, now: f64, e: &LogEntry) {
+    let Ok(conn) = pool.get() else { return };
+    let _ = conn.execute(
+        "INSERT INTO server_log
+           (ts, category, event, actor_uid, actor_name, channel_id, ref_id, amount, detail)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            now, e.category, e.event, e.actor_uid, e.actor_name,
+            e.channel_id, e.ref_id, e.amount, e.detail
+        ],
+    );
+}
+
+/// Eén rij uit het logboek (voor de adminpagina). Bevat bewust meer velden dan de
+/// huidige UI toont (id/ref_id/… voor komende filters en per-chest-groepering).
+#[allow(dead_code)]
+pub struct LogRow {
+    pub id: i64,
+    pub ts: f64,
+    pub category: String,
+    pub event: String,
+    pub actor_uid: String,
+    pub actor_name: String,
+    pub channel_id: String,
+    pub ref_id: String,
+    pub amount: Option<i64>,
+    pub detail: String,
+}
+
+/// De recentste events, nieuwste eerst. `category = None` = alle categorieën.
+pub fn recent_log(pool: &DbPool, category: Option<&str>, limit: usize) -> Vec<LogRow> {
+    let conn = pool.get().expect("db");
+    let map = |r: &rusqlite::Row| {
+        Ok(LogRow {
+            id: r.get(0)?,
+            ts: r.get(1)?,
+            category: r.get(2)?,
+            event: r.get(3)?,
+            actor_uid: r.get(4)?,
+            actor_name: r.get(5)?,
+            channel_id: r.get(6)?,
+            ref_id: r.get(7)?,
+            amount: r.get(8)?,
+            detail: r.get(9)?,
+        })
+    };
+    let cols = "id, ts, category, event, actor_uid, actor_name, channel_id, ref_id, amount, detail";
+    match category {
+        Some(cat) => {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {cols} FROM server_log WHERE category = ?1 ORDER BY id DESC LIMIT ?2"
+                ))
+                .expect("prepare recent_log");
+            stmt.query_map(params![cat, limit as i64], map)
+                .expect("query recent_log")
+                .filter_map(Result::ok)
+                .collect()
+        }
+        None => {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {cols} FROM server_log ORDER BY id DESC LIMIT ?1"
+                ))
+                .expect("prepare recent_log");
+            stmt.query_map(params![limit as i64], map)
+                .expect("query recent_log")
+                .filter_map(Result::ok)
+                .collect()
+        }
+    }
+}
+
+/// Alle voorkomende categorieën (voor de filterknoppen), alfabetisch.
+pub fn log_categories(pool: &DbPool) -> Vec<String> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT category FROM server_log ORDER BY category")
+        .expect("prepare log_categories");
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .expect("query log_categories")
+        .filter_map(Result::ok)
+        .collect()
 }

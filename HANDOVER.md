@@ -1,4 +1,4 @@
-# Handover — Meadow Market (2026-07-12)
+# Handover — Meadow Market (2026-07-13)
 
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
@@ -14,11 +14,29 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ✅ Laatste sessie (2026-07-13 avond) — server-log + chest-fix, LIVE
+- **Pro server-log op de website (admin-only)** — GEBOUWD + **GEDEPLOYED** (draait op prod,
+  PID 1321146, `/admin/log` → 303 oningelogd, healthz 200). Generieke tabel `server_log`
+  (`category`/`event`/`actor`/`channel_id`/`ref_id`/`amount`/`detail`, idempotent aangemaakt in
+  `init_pool`) + `/admin/log`-pagina (nav-tab **📜 Log**) met categorie-filterknoppen (nu enkel
+  `chest`; raamwerk uitbreidbaar), gekleurde event-badges, lokale tijd (JS), laatste 500 nieuwste-eerst.
+  - **Chest-events gepersisteerd**, gegroepeerd per chest via `ref_id` = bericht-id: `spawn`
+    (detail = wie hem uitlokte), `join` (met volgnummer), `already_in`, **`too_late`** (klik nadat
+    de chest al gepopt was), `win` (winnaar + prijs + deelnemerslijst), `despawn` (met lijst).
+  - **Diagnose "3 deden mee, maar 2 bij opening":** klikken werden vroeger nergens gelogd → niet te
+    bewijzen achteraf (enkel winnaar+aantal stonden in `journalctl`). Meest waarschijnlijke oorzaak:
+    de knop bleef **live tot het chest-bericht gewist was** → een klik op/na het pop-moment viel in
+    het gaatje tussen "chest uit de map" en "bericht gewist" en werd stil als `too_late` gedropt.
+  - **Harde fix meegeleverd:** `pop_chest` verwijdert nu **éérst de knop** (message-edit met lege
+    components) terwijl de chest nog in de map zit → klikken-in-transit tellen nog mee; pas daarna
+    trekken/wissen we. Pop-race-gaatje dicht. (`too_late` kan nu enkel nog bij een echt zombie/oud
+    bericht — óók zichtbaar in de log.)
+  - **Code:** `db.rs` (tabel + `LogEntry`/`log_event`/`LogRow`/`recent_log`/`log_categories`),
+    `bot.rs` (`recent` draagt nu ook de naam; `do_spawn_chest` neemt `triggers` + geeft `msg_id`
+    terug; logging in `maybe_spawn_chest`/`handle_chest_click`/`pop_chest`), `web.rs` (`admin_log`
+    + route + nav-tab). **Nog NIET gecommit/gepusht in git.**
+
 ## 📝 Open TODO's
-- **Pro server-log op de website (admin-only)**: activiteiten-/serverlog tonen op de site,
-  enkel zichtbaar voor admins. O.a. treasure-chest-events (wie klikte, wie won) persisteren
-  i.p.v. enkel in RAM — nu zijn de klikkers van een gepopte chest onherstelbaar (staan nergens
-  in `coins.db` of het log-kanaal). Overweeg tabel `chest_clicks` + een `/admin/log`-pagina.
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
