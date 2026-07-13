@@ -14,7 +14,41 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
-## ✅ Laatste sessie (2026-07-13 avond) — server-log + chest-fix, LIVE
+## ✅ Laatste sessie (2026-07-13 nacht) — site-UI-overhaul, LIVE
+Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten via
+`include_str!` erin). Alles **gebouwd + gedeployed** (`./deploy/deploy.sh`, service `active`) en
+**gecommit + subtree-gepusht** naar `market-gh`.
+
+- **Twee-kader-layout** — de nav zit nu in een **eigen afgeronde kaart** bóven de content-kaart,
+  met ruimte ertussen (`shell()`: aparte `.navcard` + `.content{row-gap}`). Login/info/rules
+  (geen nav) blijven één kaart.
+- **Inventory = landingpagina, herschikt** — content-kaart begint met de **naam groot +
+  gecentreerd** (`.bigname`), daaronder de **Coins/Gems/Boosts**-subtabs als groep gecentreerd
+  (`.subtabs.center`), dan de panels.
+- **Naam weg uit de navbar** — `chrome()` rendert de `.uname` niet meer; de naam staat enkel nog
+  groot op de Inventory-pagina. (`.uname`-CSS blijft ongebruikt achter, onschadelijk.)
+- **Admin-nav geconsolideerd** — de vier losse admin-knoppen → één **⚙ Manage**-knop. De
+  Manage-pagina's krijgen een **sub-tabbalk** (helper `admin_subtabs`): 🛒 Shop · 🪙 Coins ·
+  📋 Channels · 📜 Log (link-tabs naar de bestaande routes; alle admin-pagina's dragen nav-key
+  `"admin"`).
+- **Uitleg-teksten opgeschoond** (site moet intuïtief zijn) — weg: shop "Hytale server passes…",
+  boosts-blurbs (→ korte lege-staat "No Hytale pass yet."), leaderboard "Ranked by…"-hint (+ JS),
+  login-uitleg, rules-2e-zin, en de blurbs boven Manage Shop/Log/Channels. **Behouden**:
+  veldlabels, foutmeldingen, lege-staten en de /info-gids.
+- **Bugfix Manage Shop-thumb** — de 24u-pas (`/img/ticket.png`) had geen begrenzende CSS in
+  `.aitem .thumb` (bestond enkel voor `.slot .thumb img`) → stond te groot. Toegevoegd:
+  `.aitem .thumb img{max-width/height:100%;object-fit:contain}` + `overflow:hidden`.
+- **Scroll behouden bij CRUD** — nieuwe const `KEEP_SCROLL_JS` op de Manage Shop: bewaart
+  `scrollY` in `sessionStorage` (per pad) vóór elke form-submit en herstelt na de POST→redirect,
+  zodat delete/update/upload/add niet naar de top springen.
+- **Shop rendert nu dynamisch alle schappen** (i.p.v. hardcoded "🎟 Hytale passes" + enkel
+  `boost`-items): `market()` loopt over `db::list_shelves()` → schap-titel + `shop_slot` per item,
+  lege schappen overgeslagen. Toont nu **Hytale Access / Primary / Secondary / Prism Gems /
+  Boosters** precies zoals Manage. ⚠️ Gems zonder afbeelding renderen als gekleurde bolletjes —
+  graphics zijn de reden dat ze eerder verborgen waren; shop is nog **niet zichtbaar voor members**
+  (site-gate), dus veilig om verder te polijsten.
+
+## ✅ Sessie (2026-07-13 avond) — server-log + chest-fix, LIVE
 - **Pro server-log op de website (admin-only)** — GEBOUWD + **GEDEPLOYED** (draait op prod,
   PID 1321146, `/admin/log` → 303 oningelogd, healthz 200). Generieke tabel `server_log`
   (`category`/`event`/`actor`/`channel_id`/`ref_id`/`amount`/`detail`, idempotent aangemaakt in
@@ -37,6 +71,8 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
     + route + nav-tab). **Nog NIET gecommit/gepusht in git.**
 
 ## 📝 Open TODO's
+- **Shop-graphics**: de shop toont nu álle schappen; gems/boosters zonder afbeelding renderen als
+  gekleurde bol. Echte item-graphics maken vóór de shop **members-zichtbaar** wordt (site-gate weg).
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.

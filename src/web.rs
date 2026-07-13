@@ -37,6 +37,13 @@ const CHEST_PNG: &[u8] = include_bytes!("../artwork/treasure chest.png"); // che
 const COINS_GUILD_ID: &str = "1296469405651435592";
 // Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
 const AUTO_REFRESH_JS: &str = "<script>setInterval(function(){var a=document.activeElement;if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'))return;location.reload();},20000);</script>";
+// Bewaart de scrollpositie vóór een form-submit en herstelt ze na de POST→redirect
+// reload, zodat CRUD-acties (delete/update/upload/add) de pagina niet naar boven
+// laten springen. Per-pad gesleuteld in sessionStorage.
+const KEEP_SCROLL_JS: &str = "<script>(function(){var K='mmScroll:'+location.pathname;\
+var y=sessionStorage.getItem(K);if(y!==null){sessionStorage.removeItem(K);\
+window.scrollTo(0,+y);}document.addEventListener('submit',function(){\
+sessionStorage.setItem(K,window.scrollY);},true);})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 
 #[derive(Clone)]
@@ -242,10 +249,14 @@ body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
   background:#141d14;white-space:nowrap}}
 .nav a.active{{background:{MEADOW};color:#0e1510}}
 .nav a:hover:not(.active){{background:#20301e}}
+.bigname{{font-size:2rem;font-weight:800;text-align:center;letter-spacing:.01em;
+  margin:.2rem 0 1.1rem}}
 .subtabs{{display:flex;gap:.3rem;margin:0 0 1.2rem;flex-wrap:wrap}}
+.subtabs.center{{justify-content:center}}
 .subtab{{padding:.4rem .85rem;border-radius:9px;cursor:pointer;font-weight:600;
   font-size:.92rem;color:#9db095;background:transparent;border:1px solid #2c3d2a}}
 .subtab.on{{background:#141d14;color:#e8f0e4;border-color:#3a4d38}}
+a.subtab{{text-decoration:none;display:inline-block}}
 .panel{{display:none}}
 .panel.on{{display:block}}
 .mc{{height:1em;width:auto;vertical-align:-0.15em}}
@@ -263,11 +274,15 @@ details.acc .mc{{height:1.1em;vertical-align:-.2em}}
 .bar{{flex:1;height:14px;background:#0e1510;border:1px solid #2c3d2a;border-radius:999px;overflow:hidden}}
 .fill{{height:100%;background:linear-gradient(90deg,#3f6a2c,{MEADOW});border-radius:999px;transition:width .4s}}
 .lvlnm{{font-variant-numeric:tabular-nums;font-weight:700;color:#cfe0c8;font-size:.85rem;white-space:nowrap}}
-.content{{flex:1;display:grid;justify-items:center;align-items:start;padding:1.2rem 1rem}}
+.content{{flex:1;display:grid;justify-items:center;align-items:start;
+  row-gap:1.1rem;padding:1.2rem 1rem}}
 .card{{background:#182319;border:1px solid #2c3d2a;border-radius:18px;
   padding:2rem 2.25rem;max-width:28rem;width:calc(100% - 2rem);
   box-shadow:0 10px 30px rgba(0,0,0,.35)}}
 .card.wide{{max-width:64rem}}
+.navcard{{padding:1rem 1.25rem}}
+.navcard .uname{{margin:0 0 .7rem}}
+.navcard .nav{{margin:0}}
 h1{{margin:.2rem 0 1rem;font-size:1.35rem}}
 .coins{{font-size:2.4rem;font-weight:700;color:{MEADOW};margin:.4rem 0}}
 .muted{{color:#9db095;font-size:.9rem}}
@@ -354,7 +369,8 @@ a.link{{color:{MEADOW}}}
 .aitem{{width:152px;background:#141d14;border:1px solid #2c3d2a;border-radius:12px;
   padding:.6rem;display:flex;flex-direction:column;gap:.4rem}}
 .aitem .thumb{{aspect-ratio:1;border:1px solid #26331f;border-radius:9px;
-  background:#0e1510;display:grid;place-items:center}}
+  background:#0e1510;display:grid;place-items:center;overflow:hidden}}
+.aitem .thumb img{{max-width:100%;max-height:100%;object-fit:contain;border-radius:9px}}
 .aitem input,.ashelf-head input[name=title]{{width:100%;padding:.35rem;
   border:1px solid #2c3d2a;border-radius:7px;background:#0e1510;color:#e8f0e4;
   font:inherit;font-size:.82rem}}
@@ -406,7 +422,14 @@ a.link{{color:{MEADOW}}}
   text-align:right;min-width:5.5rem}}
 .lb li.me{{background:#16211590;border-radius:10px}}
 </style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span>{logout}</header>
-<div class="content"><div class="{card_cls}">{nav}{body}</div></div>{poller}</body></html>"#
+{content}{poller}</body></html>"#,
+        content = if nav.is_empty() {
+            format!(r#"<div class="content"><div class="{card_cls}">{body}</div></div>"#)
+        } else {
+            format!(
+                r#"<div class="content"><div class="{card_cls} navcard">{nav}</div><div class="{card_cls}">{body}</div></div>"#
+            )
+        }
     )
 }
 
@@ -439,13 +462,7 @@ fn nav_html(active: &str, admin: bool) -> String {
         format!("<a{cls} href=\"{href}\">{label}</a>")
     };
     let admin_link = if admin {
-        format!(
-            "{}{}{}{}",
-            item("/admin/market", "admin", "⚙ Manage"),
-            item("/admin/coins", "admincoins", "🪙 Coins"),
-            item("/admin/channels", "adminchannels", "📋 Channels"),
-            item("/admin/log", "adminlog", "📜 Log")
-        )
+        item("/admin/market", "admin", "⚙ Manage")
     } else {
         String::new()
     };
@@ -458,15 +475,28 @@ fn nav_html(active: &str, admin: bool) -> String {
     )
 }
 
-/// Naam-kop (boven de nav) + de nav-tabs, voor ingelogde pagina's. `extra` komt
-/// naast de naam (bv. de Purse op de Shop).
-fn chrome(name: &str, active: &str, admin: bool, extra: &str) -> String {
+/// Sub-tabbalk binnen de Manage-sectie: Shop / Coins / Channels / Log.
+/// `active` = "market" | "coins" | "channels" | "log".
+fn admin_subtabs(active: &str) -> String {
+    let item = |href: &str, key: &str, label: &str| {
+        let on = if key == active { " on" } else { "" };
+        format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
+    };
     format!(
-        "<div class=\"uname\">{}{}</div>{}",
-        esc(name),
-        extra,
-        nav_html(active, admin)
+        "<div class=\"subtabs\">{}{}{}{}</div>",
+        item("/admin/market", "market", "🛒 Shop"),
+        item("/admin/coins", "coins", "🪙 Coins"),
+        item("/admin/channels", "channels", "📋 Channels"),
+        item("/admin/log", "log", "📜 Log"),
     )
+}
+
+/// De nav-tabs voor ingelogde pagina's. De naam staat NIET meer in de navbar
+/// (enkel groot+gecentreerd op de Inventory-pagina zelf). `extra` komt eventueel
+/// vóór de nav (bv. een losse knop); `_name` blijft in de signatuur voor de
+/// bestaande call-sites.
+fn chrome(_name: &str, active: &str, admin: bool, extra: &str) -> String {
+    format!("{}{}", extra, nav_html(active, admin))
 }
 
 // --- levelsysteem (op basis van coins ooit verdiend) --------------------
@@ -544,7 +574,7 @@ async fn index(
                     _ => String::new(),
                 };
                 (
-                    chrome(&name, "home", is_admin(&uid), ""),
+                    nav_html("home", is_admin(&uid)),
                     format!(
                         "{notice}{}",
                         inventory_home(&st.pool, &uid, &name, coins, total_earned, &grants, tab)
@@ -728,9 +758,7 @@ fn inventory_home(
         // De Hytale-naam wordt bij de eerste aankoop gezet en is nadien persistent.
         // Hier enkel tonen + een discrete correctie-optie (bv. bij een typfout).
         let name_block = if hname.is_empty() {
-            "<p class=\"muted\">Buy a pass in the 🛒 Shop — you'll set your Hytale \
-               name there the first time.</p>"
-                .to_string()
+            "<p class=\"muted\">No Hytale pass yet.</p>".to_string()
         } else {
             format!(
                 "<form method=\"post\" action=\"/hytale/name\" class=\"hname-form\" \
@@ -743,15 +771,13 @@ fn inventory_home(
             )
         };
 
-        format!(
-            "{status}{name_block}\
-             <p class=\"muted\">Buy or extend a Hytale pass in the 🛒 Shop — it activates instantly.</p>"
-        )
+        format!("{status}{name_block}")
     };
 
     let cls = |t: &str| if t == active { " on" } else { "" };
     format!(
-        "<div class=\"subtabs\">\
+        "<div class=\"bigname\">{uname}</div>\
+         <div class=\"subtabs center\">\
            <button class=\"subtab{ca}\" data-t=\"coins\">{MC} Coins</button>\
            <button class=\"subtab{cg}\" data-t=\"gems\">💎 Gems</button>\
            <button class=\"subtab{cb}\" data-t=\"boosts\">🚀 Boosts</button></div>\
@@ -763,6 +789,7 @@ fn inventory_home(
              ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
              document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
              document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>",
+        uname = esc(name),
         ca = cls("coins"),
         cg = cls("gems"),
         cb = cls("boosts"),
@@ -784,12 +811,25 @@ async fn market(
     let owned: std::collections::HashSet<i64> =
         db::owned_item_ids(&st.pool, &uid).into_iter().collect();
 
-    // Voorlopig toont de shop enkel de Hytale-passen (gems/boosters verborgen tot
-    // er deftige graphics zijn — de daily-offers/gem-code blijft bestaan voor later).
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
-    let tickets: String = db::gems_by_category(&st.pool, "boost")
+
+    // Render alle schappen precies zoals in Manage: schap-titel + de items erop.
+    // Lege schappen worden overgeslagen.
+    let shelves: String = db::list_shelves(&st.pool)
         .iter()
-        .map(|it| shop_slot(it, owned.contains(&it.id), has_name))
+        .map(|(sid, title)| {
+            let slots: String = db::shelf_items(&st.pool, *sid)
+                .iter()
+                .map(|it| shop_slot(it, owned.contains(&it.id), has_name))
+                .collect();
+            if slots.is_empty() {
+                return String::new();
+            }
+            format!(
+                "<h2 class=\"shelf-title\">{title}</h2><div class=\"shelf\">{slots}</div>",
+                title = esc(title),
+            )
+        })
         .collect();
 
     let from = q.from.unwrap_or(coins);
@@ -797,9 +837,7 @@ async fn market(
     let body = format!(
         "<div class=\"shophead\"><h1>🛒 Shop</h1>\
            <div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
-             <span class=\"purse-n\" data-bal>{coins}</span></div></div>{notice}\
-         <p class=\"muted\">Hytale server passes — buying a pass whitelists you instantly.</p>\
-         <h2 class=\"shelf-title\">🎟 Hytale passes</h2><div class=\"shelf\">{tickets}</div>\
+             <span class=\"purse-n\" data-bal>{coins}</span></div></div>{notice}{shelves}\
          <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
            var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
            if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
@@ -923,19 +961,14 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
            <button class=\"subtab on\" data-t=\"alltime\">All-time</button>\
            <button class=\"subtab\" data-t=\"week\">This week</button>\
            <button class=\"subtab\" data-t=\"now\">Now</button></div>\
-         <p class=\"muted\" id=\"lb-hint\">Ranked by coins earned all-time.</p>\
          <div class=\"panel on\" id=\"p-alltime\">{all_list}</div>\
          <div class=\"panel\" id=\"p-week\">{week_list}</div>\
          <div class=\"panel\" id=\"p-now\">{now_list}</div>\
-         <script>(function(){{var ts=document.querySelectorAll('.subtab'),\
-           h=document.getElementById('lb-hint');\
+         <script>(function(){{var ts=document.querySelectorAll('.subtab');\
            ts.forEach(function(b){{b.addEventListener('click',function(){{\
              ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
              document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
-             document.getElementById('p-'+b.dataset.t).classList.add('on');\
-             h.textContent=b.dataset.t==='now'?'Ranked by current balance.':\
-               (b.dataset.t==='week'?'Ranked by coins earned this week (since Saturday 15:00).':\
-               'Ranked by coins earned all-time.');}});}});}})();</script>"
+             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>"
     );
     Html(shell("Leaderboard — Meadow Market", &chrome(&name, "leaderboard", is_admin(&me), ""), true, &body))
         .into_response()
@@ -966,8 +999,6 @@ fn login_body(cfg: &Config) -> String {
             .to_string();
     }
     "<h1>🌼 Welcome to Meadow Market</h1>\
-     <p class=\"muted\">Log in with Discord to see your coins and inventory. \
-     Only Flowerborns have an account.</p>\
      <a class=\"btn\" href=\"/login\">Log in with Discord</a>"
         .to_string()
 }
@@ -977,8 +1008,6 @@ fn rules_body(name: &str) -> String {
         "<h1>🌼 Hi, {name}</h1>\
          <p>You're logged in, but you don't have the <b>Flowerborn</b> role (yet). \
          A Meadow Market account is only for Flowerborns.</p>\
-         <p class=\"muted\">Follow the rules: earn the Flowerborn role in the \
-         Discord server, then your coin overview appears here.</p>\
          <a class=\"link\" href=\"/logout\">Log out</a>",
         name = esc(name)
     )
@@ -1436,13 +1465,12 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
     );
 
     let body = format!(
-        "<h1>⚙ Shop management</h1>\
-         <p class=\"muted\">Shelves, items, prices and images. Changes are live on the \
-         Shop right away.</p>{shelves}{lucky}\
+        "<h1>⚙ Shop management</h1>{shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
            <input name=\"title\" placeholder=\"New shelf name\" required>\
-           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>"
+           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}"
     );
+    let body = format!("{}{}", admin_subtabs("market"), body);
     Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true, ""), true, &body)).into_response()
 }
 
@@ -1591,9 +1619,10 @@ async fn admin_coins(
          <table class=\"ctable\"><thead><tr><th>Member</th><th>Balance</th><th>All-time</th><th>Adjust</th></tr></thead>\
          <tbody>{rows}</tbody></table>{AUTO_REFRESH_JS}"
     );
+    let body = format!("{}{}", admin_subtabs("coins"), body);
     Html(shell(
         "Coins — Meadow Market",
-        &chrome(&name, "admincoins", true, ""),
+        &chrome(&name, "admin", true, ""),
         true,
         &body,
     ))
@@ -1792,16 +1821,15 @@ async fn admin_log(
 
     let body = format!(
         "{style}<h1>📜 Server log</h1>\
-         <p class=\"muted\">Every logged event, newest first (last 500). \
-         Use this to see exactly who triggered a chest, who joined, who was too late, and who won.</p>\
          <div class=\"chips\">{filters}</div>\
          <table class=\"log\"><thead><tr>\
            <th>When</th><th>Event</th><th>Who</th><th>Amount</th><th>Detail</th>\
          </tr></thead><tbody>{body_rows}</tbody></table>{ts_js}{AUTO_REFRESH_JS}"
     );
+    let body = format!("{}{}", admin_subtabs("log"), body);
     Html(shell(
         "Server log — Meadow Market",
-        &chrome(&name, "adminlog", true, ""),
+        &chrome(&name, "admin", true, ""),
         true,
         &body,
     ))
@@ -1860,18 +1888,17 @@ async fn admin_channels(State(st): State<AppState>, headers: HeaderMap) -> Respo
     };
 
     let body = format!(
-        "<h1>📋 Coin channels</h1>\
-         <p class=\"muted\">Members earn coins <b>only</b> in the channels below. Empty list = \
-         nowhere.</p>{note}\
+        "<h1>📋 Coin channels</h1>{note}\
          <ul class=\"chlist\">{list}</ul>\
          <form method=\"post\" action=\"/admin/channels/add\" class=\"addbar\">\
            <select name=\"channel\" required>\
              <option value=\"\" disabled selected>Pick a channel…</option>{options}</select>\
            <button class=\"btn\" type=\"submit\">＋ Add</button></form>{AUTO_REFRESH_JS}"
     );
+    let body = format!("{}{}", admin_subtabs("channels"), body);
     Html(shell(
         "Coin channels — Meadow Market",
-        &chrome(&name, "adminchannels", true, ""),
+        &chrome(&name, "admin", true, ""),
         true,
         &body,
     ))
