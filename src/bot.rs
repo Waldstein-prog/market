@@ -47,7 +47,6 @@ const DAILY_MAX_STEP: i64 = 5;
 const DAILY_STREAK_CAP: i64 = 200;
 const DAILY_CUSTOM_ID: &str = "daily_claim"; // moet matchen met de embed-knop
 const SITE_ACCESS_CUSTOM_ID: &str = "site_access"; // "site"-knop → under-construction (website nog niet open)
-const MARKET_INFO_CUSTOM_ID: &str = "market_info"; // "Info"-knop → ephemeral uitleg
 // --- treasure chest -----------------------------------------------------
 // Chatten ≥ CHEST_DISTINCT_USERS verschillende mensen binnen CHEST_WINDOW in
 // hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
@@ -317,19 +316,6 @@ async fn event_handler(
                         "🚧 The Meadow Market website is still under construction — coming soon!",
                     )
                     .await?;
-                } else if mc.data.custom_id == MARKET_INFO_CUSTOM_ID {
-                    respond_ephemeral(
-                        ctx,
-                        mc,
-                        &format!(
-                            "ℹ️ **How Meadow Market works**\n\
-                             • Chat in the community to earn {COIN_EMOJI} Meadowcoins.\n\
-                             • Claim your **daily** below for a streak bonus — the longer your streak, the more you earn (every 20h; keep it alive by claiming within 30h).\n\
-                             • Spend coins on **Gems**, **Boosts** and **Meadowland Access Passes**.\n\
-                             • Climb the **leaderboard**!"
-                        ),
-                    )
-                    .await?;
                 }
             }
         }
@@ -362,7 +348,7 @@ async fn handle_daily(
         respond_ephemeral(
             ctx,
             mc,
-            &format!("🎁 You already claimed your daily. Come back in **{hrs}h {mins}m**."),
+            &format!("⏳ Too soon! Come back in **{hrs}h {mins}m**."),
         )
         .await?;
         return Ok(());
@@ -383,6 +369,11 @@ async fn handle_daily(
     let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
     let day_word = if streak == 1 { "day" } else { "days" };
     tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
+    // Interactie stil bevestigen — GEEN ephemeral bij een geslaagde claim (de feedback
+    // komt publiek in #coins). Vroeg acken zodat we ruim binnen de 3s-limiet blijven.
+    let _ = mc
+        .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+        .await;
     // DEBUG-regel voor admins in #fortuna-log: bedrag + streak + de rnd-grenzen,
     // zodat het rekenwerk (dag N → [lo,hi] → gekozen bedrag) te volgen is.
     if FORTUNA_LOG_CHANNEL_ID != 0 {
@@ -395,16 +386,6 @@ async fn handle_daily(
             )
             .await;
     }
-
-    respond_ephemeral(
-        ctx,
-        mc,
-        &format!(
-            "🔥 **{name}** checked in for **{streak}** {day_word}! \
-             You got **{amount}** Meadowcoins today! Balance: **{total}** {COIN_EMOJI}"
-        ),
-    )
-    .await?;
 
     // Publiek regeltje in prod #coins.
     if PROD_COINS_CHANNEL_ID != 0 {
@@ -704,7 +685,10 @@ async fn handle_chest_click(
         }
     }
     let text = match joined {
-        None => "📦 Too late — this chest already opened.".to_string(),
+        None => format!(
+            "📦 Too late — make sure you click within **{} minutes** next time!",
+            CHEST_POP_DELAY / 60
+        ),
         Some(0) => "🎁 You're already in! Sit tight for the opening.".to_string(),
         Some(_) => "🎁 You're successfully trying to open the chest!".to_string(),
     };

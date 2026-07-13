@@ -91,6 +91,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/uploads/{name}", get(serve_upload))
         .route("/img/ticket.png", get(serve_ticket))
         .route("/img/chest.png", get(serve_chest))
+        .route("/info", get(info_page))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", get(logout))
@@ -219,6 +220,13 @@ body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
 .panel{{display:none}}
 .panel.on{{display:block}}
 .mc{{height:1em;width:auto;vertical-align:-0.15em}}
+details.acc{{background:#141d14;border:1px solid #2c3d2a;border-radius:11px;margin:.55rem 0}}
+details.acc>summary{{cursor:pointer;padding:.75rem 1rem;font-weight:700;color:#e8f0e4;list-style:none;display:flex;align-items:center;gap:.55rem}}
+details.acc>summary::-webkit-details-marker{{display:none}}
+details.acc>summary::after{{content:'▸';margin-left:auto;color:#8fb37a;transition:transform .15s}}
+details.acc[open]>summary::after{{transform:rotate(90deg)}}
+details.acc>p{{margin:0;padding:0 1rem .85rem;color:#c8d6c0;line-height:1.45}}
+details.acc .mc{{height:1.1em;vertical-align:-.2em}}
 .earned{{font-size:2.6rem;font-weight:800;color:{MEADOW};text-align:center;margin:.2rem 0 0;line-height:1}}
 .levelrow{{display:flex;align-items:center;gap:.6rem;margin:1.1rem 0}}
 .lvlbadge{{background:{MEADOW};color:#0e1510;font-weight:800;border-radius:9px;
@@ -1905,6 +1913,47 @@ async fn serve_chest() -> Response {
         CHEST_PNG,
     )
         .into_response()
+}
+
+/// Publieke info-pagina: hoe je coins verdient (accordion, klik = uit/invouwen).
+async fn info_page() -> Response {
+    let items = [
+        (
+            "Chatting in the main channels",
+            "Every message gives you 1 to 3 coins, earnable every 30 seconds.",
+        ),
+        (
+            "Leveling up",
+            "You get a level-up reward for each level you gain!",
+        ),
+        (
+            "Gain Fortuna's Favor by being active in chat with multiple people at once!",
+            "A special treasure chest can appear during active chat hours. You need multiple people to open these.",
+        ),
+        (
+            "Checking in daily in the Meadow Market and building a streak.",
+            "Every day you can check in to gain coins. The higher your streak, the higher your min and max amounts become.",
+        ),
+        (
+            "(WIP) Registering your Birthday",
+            "By registering your Birthday, you can claim a Birthday present!",
+        ),
+    ];
+    let acc: String = items
+        .into_iter()
+        .map(|(t, b)| {
+            format!(
+                "<details class=\"acc\"><summary>{MC} {}</summary><p>{}</p></details>",
+                esc(t),
+                esc(b)
+            )
+        })
+        .collect();
+    let body = format!(
+        "<h1>Earning Coins in the Magic Meadow</h1>\
+         <p class=\"muted\">You can earn Meadowcoins in many different ways:</p>{acc}"
+    );
+    Html(shell("Info — Meadow Market", "", false, &body)).into_response()
 }
 
 /// Bewaarde afbeelding serveren vanuit de uploads-map (met naam-sanitatie).
