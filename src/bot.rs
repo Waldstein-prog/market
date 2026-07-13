@@ -383,7 +383,18 @@ async fn handle_daily(
     let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
     let day_word = if streak == 1 { "day" } else { "days" };
     tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
-    log_earn(&ctx.http, &name, amount, total).await;
+    // DEBUG-regel voor admins in #fortuna-log: bedrag + streak + de rnd-grenzen,
+    // zodat het rekenwerk (dag N → [lo,hi] → gekozen bedrag) te volgen is.
+    if FORTUNA_LOG_CHANNEL_ID != 0 {
+        let _ = serenity::ChannelId::new(FORTUNA_LOG_CHANNEL_ID)
+            .say(
+                &ctx.http,
+                format!(
+                    "🔧 daily — <@{uid}> got **{amount}** {COIN_EMOJI} · streak **{streak}** · rolled in [**{lo}**–**{hi}**] · balance **{total}**"
+                ),
+            )
+            .await;
+    }
 
     respond_ephemeral(
         ctx,
