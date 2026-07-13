@@ -56,7 +56,8 @@ const CHEST_ENABLED: bool = true;
 const CHEST_DISTINCT_USERS: usize = 3; // aantal verschillende chatters binnen CHEST_WINDOW om te spawnen
 const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatters"-telling
 const CHEST_POP_DELAY: u64 = 10 * 60; // seconden tussen verschijnen en poppen (natuurlijke/prod-spawn). Embedtekst leest dit dynamisch.
-const CHEST_TEST_POP_DELAY: u64 = 3 * 60; // kortere pop voor het dev-only !chest test-commando
+const CHEST_TEST_POP_DELAY: u64 = 70; // dev-only !chest: pop na 1m10 (testen)
+const CHEST_TICK_SECS: u64 = 5; // interval waarmee de M:SS-timer in de embed wordt bijgewerkt
 const CHEST_CHANNEL_COOLDOWN: f64 = 50.0 * 60.0; // rust per kanaal na een chest (anti-spam)
 const CHEST_MIN_JOINERS: usize = 2; // minstens zoveel deelnemers, anders despawnt de chest (niks weggegeven)
 const CHEST_SPAWN_ON_START: bool = false; // (was test) — nu vervangen door het !chest dev-commando
@@ -64,7 +65,6 @@ const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
 // Artwork ingebakken in de binary (geen losse bestanden bij deploy nodig). Gehangen
 // als attachments aan het chest-bericht en via attachment:// in de embed getoond:
 // chest = grote image (onderaan), coin = thumbnail (rechtsboven).
-const CHEST_IMG: &[u8] = include_bytes!("../artwork/treasure chest.png");
 const CRYING_IMG: &[u8] = include_bytes!("../artwork/crying.png"); // getoond als de chest despawnt
 // Prijsverdeling: (gewicht in ‰ (per duizend), min, max coins). Som = CHEST_TIER_TOTAL.
 // CHEST_TIERS = de ACTUELE (live) verdeling die de trekking gebruikt (coarse, zoals
@@ -508,23 +508,23 @@ pub async fn chestodds(ctx: Context<'_>) -> Result<(), Error> {
 fn chest_embed(pop_ts: i64, joiners: usize) -> serenity::CreateEmbed {
     let enough = joiners >= CHEST_MIN_JOINERS;
     let verb = if enough { "open" } else { "despawn" };
-    // ### = iets groter (Markdown-header) op één regel (geen grote tussenruimte tussen
-    // twee headers). Discord klapt meerdere spaties in tot één, dus een geforceerde
-    // wrap na "grand prize!" kan niet — de regel wrapt vanzelf op de vensterbreedte.
-    let mut desc = format!(
-        "### See if you win the **grand prize**! It will **{verb}** <t:{pop_ts}:R>."
-    );
+    // Resterende tijd als M:SS — een ticker-taak werkt de embed periodiek bij zodat
+    // dit zichtbaar aftelt (Discord's <t:R> telt boven 1 min niet per seconde af).
+    let remaining = (pop_ts as f64 - now_secs()).max(0.0) as i64;
+    let (mm, ss) = (remaining / 60, remaining % 60);
+    // ### = iets groter (Markdown-header), één regel (Discord klapt spaties in).
+    let mut desc =
+        format!("### See if you win the **grand prize**! It will **{verb}** in **{mm}:{ss:02}**.");
     if !enough {
         let need = CHEST_MIN_JOINERS - joiners;
         let p = if need == 1 { "participant" } else { "participants" };
         desc.push_str(&format!("\nNeeds **{need}** more {p}."));
     }
     serenity::CreateEmbed::new()
-        .title("🎁 Fortuna's Favour")
+        .title("🎁 Fortuna's Favor")
         .description(desc)
-        .image("attachment://chest.png") // grote chest onderaan
-        // Coin klein rechtsboven via een vaste URL (Meadowcoins-emoji-CDN) — betrouwbaarder
-        // dan een attachment-thumbnail bij een edit.
+        // Beide afbeeldingen via vaste URL (geen attachments) → goedkope, betrouwbare edits.
+        .image("https://magicmeadow.org/img/chest.png")
         .thumbnail("https://cdn.discordapp.com/emojis/1526188363110023308.png?size=96")
         .colour(0xF1_C4_0F)
 }
@@ -542,11 +542,9 @@ async fn do_spawn_chest(
         .emoji('🎁')
         .label("Try your luck")
         .style(serenity::ButtonStyle::Success);
-    // Pop-tijd als unix-timestamp: Discord's relatieve <t:…:R> telt er live naar af.
     let pop_ts = (now_secs() + pop_delay as f64) as i64;
     let builder = serenity::CreateMessage::new()
-        .embed(chest_embed(pop_ts, 0))
-        .add_file(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"))
+        .embed(chest_embed(pop_ts, 0)) // afbeeldingen via URL → geen attachments
         .components(vec![serenity::CreateActionRow::Buttons(vec![button])]);
     let sent = channel_id.send_message(&http, builder).await?;
     let msg_id = sent.id.get();
@@ -564,12 +562,36 @@ async fn do_spawn_chest(
         channel_id.get()
     );
 
+    // Pop-taak: na pop_delay de chest openen/despawnen.
     let http2 = http.clone();
     let pool2 = pool.clone();
     let tracker2 = tracker.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(pop_delay)).await;
         pop_chest(http2, pool2, tracker2, channel_id, msg_id).await;
+    });
+
+    // Ticker: werk de M:SS-timer elke CHEST_TICK_SECS bij tot de chest weg is.
+    let http3 = http.clone();
+    let tracker3 = tracker.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(CHEST_TICK_SECS)).await;
+            let info = {
+                let t = tracker3.lock().unwrap();
+                t.chests.get(&msg_id).map(|c| (c.pop_ts, c.joiners.len()))
+            };
+            match info {
+                Some((pop_ts, n)) if (pop_ts as f64) > now_secs() + 1.0 => {
+                    let builder =
+                        serenity::EditMessage::new().embeds(vec![chest_embed(pop_ts, n)]);
+                    let _ = channel_id
+                        .edit_message(http3.as_ref(), serenity::MessageId::new(msg_id), builder)
+                        .await;
+                }
+                _ => break, // chest gepopt/despawned of pop-moment bereikt
+            }
+        }
     });
     Ok(())
 }
@@ -664,13 +686,8 @@ async fn handle_chest_click(
     // Nieuwe deelnemer → werk de chest-embed bij (need-teller daalt; bij genoeg
     // deelnemers verdwijnt die regel en wordt "despawn" → "open").
     if let Some((pop_ts, n)) = edit {
-        // Afbeeldingen opnieuw meesturen (keep_all bleek ze soms te droppen bij een
-        // edit) zodat de chest-graphic altijd zichtbaar blijft na een klik.
-        let atts = serenity::EditAttachments::new()
-            .add(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"));
-        let builder = serenity::EditMessage::new()
-            .embeds(vec![chest_embed(pop_ts, n)])
-            .attachments(atts);
+        // Afbeeldingen zitten via URL in de embed → gewoon de embed bijwerken.
+        let builder = serenity::EditMessage::new().embeds(vec![chest_embed(pop_ts, n)]);
         if let Err(e) = mc.channel_id.edit_message(&ctx.http, mc.message.id, builder).await {
             tracing::warn!("kan chest-embed niet bijwerken: {e}");
         }

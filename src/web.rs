@@ -31,6 +31,7 @@ const MEADOW: &str = "#6b9b52";
 const MC: &str = "<img class=\"mc\" src=\"https://cdn.discordapp.com/emojis/1526188363110023308.png?size=48\" alt=\"coins\">";
 // Ticket-afbeelding voor de 24h-pas, ingebakken in de binary (geserveerd op /img/ticket.png).
 const TICKET_IMG: &[u8] = include_bytes!("../artwork/24hHytale.png");
+const CHEST_PNG: &[u8] = include_bytes!("../artwork/treasure chest.png"); // chest-embed image via URL (/img/chest.png)
 // Prod-guild (Magic Meadow): de coins-beheerpagina + kanalen-picklist lezen hiervan.
 const COINS_GUILD_ID: &str = "1296469405651435592";
 // Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
@@ -89,6 +90,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         )
         .route("/uploads/{name}", get(serve_upload))
         .route("/img/ticket.png", get(serve_ticket))
+        .route("/img/chest.png", get(serve_chest))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", get(logout))
@@ -1892,6 +1894,15 @@ async fn serve_ticket() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         TICKET_IMG,
+    )
+        .into_response()
+}
+
+/// De ingebakken treasure-chest-afbeelding serveren (voor de chest-embed).
+async fn serve_chest() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        CHEST_PNG,
     )
         .into_response()
 }
