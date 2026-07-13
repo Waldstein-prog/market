@@ -55,7 +55,8 @@ const MARKET_INFO_CUSTOM_ID: &str = "market_info"; // "Info"-knop → ephemeral 
 const CHEST_ENABLED: bool = true;
 const CHEST_DISTINCT_USERS: usize = 3; // aantal verschillende chatters binnen CHEST_WINDOW om te spawnen
 const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatters"-telling
-const CHEST_POP_DELAY: u64 = 10 * 60; // seconden tussen verschijnen en poppen. Embedtekst leest dit dynamisch.
+const CHEST_POP_DELAY: u64 = 10 * 60; // seconden tussen verschijnen en poppen (natuurlijke/prod-spawn). Embedtekst leest dit dynamisch.
+const CHEST_TEST_POP_DELAY: u64 = 3 * 60; // kortere pop voor het dev-only !chest test-commando
 const CHEST_CHANNEL_COOLDOWN: f64 = 50.0 * 60.0; // rust per kanaal na een chest (anti-spam)
 const CHEST_MIN_JOINERS: usize = 2; // minstens zoveel deelnemers, anders despawnt de chest (niks weggegeven)
 const CHEST_SPAWN_ON_START: bool = false; // (was test) — nu vervangen door het !chest dev-commando
@@ -279,6 +280,7 @@ async fn event_handler(
                     serenity::ChannelId::new(COIN_CHANNEL_ID),
                     data.chest.clone(),
                     data.pool.clone(),
+                    CHEST_POP_DELAY,
                 )
                 .await
                 {
@@ -485,6 +487,7 @@ pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
         ctx.channel_id(),
         data.chest.clone(),
         data.pool.clone(),
+        CHEST_TEST_POP_DELAY, // dev-test: pop na 3 min
     )
     .await?;
     Ok(())
@@ -533,13 +536,14 @@ async fn do_spawn_chest(
     channel_id: serenity::ChannelId,
     tracker: Arc<Mutex<ChestTracker>>,
     pool: DbPool,
+    pop_delay: u64,
 ) -> Result<(), Error> {
     let button = serenity::CreateButton::new(CHEST_CUSTOM_ID)
         .emoji('🎁')
         .label("Try your luck")
         .style(serenity::ButtonStyle::Success);
     // Pop-tijd als unix-timestamp: Discord's relatieve <t:…:R> telt er live naar af.
-    let pop_ts = (now_secs() + CHEST_POP_DELAY as f64) as i64;
+    let pop_ts = (now_secs() + pop_delay as f64) as i64;
     let builder = serenity::CreateMessage::new()
         .embed(chest_embed(pop_ts, 0))
         .add_file(serenity::CreateAttachment::bytes(CHEST_IMG, "chest.png"))
@@ -564,7 +568,7 @@ async fn do_spawn_chest(
     let pool2 = pool.clone();
     let tracker2 = tracker.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(CHEST_POP_DELAY)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(pop_delay)).await;
         pop_chest(http2, pool2, tracker2, channel_id, msg_id).await;
     });
     Ok(())
@@ -616,6 +620,7 @@ async fn maybe_spawn_chest(
         msg.channel_id,
         data.chest.clone(),
         data.pool.clone(),
+        CHEST_POP_DELAY,
     )
     .await
     {
