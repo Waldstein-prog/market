@@ -55,7 +55,7 @@ const CHEST_ENABLED: bool = true;
 const CHEST_DISTINCT_USERS: usize = 3; // aantal verschillende chatters binnen CHEST_WINDOW om te spawnen
 const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatters"-telling
 const CHEST_POP_DELAY: u64 = 10 * 60; // seconden tussen verschijnen en poppen (natuurlijke/prod-spawn). Embedtekst leest dit dynamisch.
-const CHEST_TEST_POP_DELAY: u64 = 70; // dev-only !chest: pop na 1m10 (testen)
+const CHEST_SPAWN_CHANNEL_ID: u64 = 1296469405651435594; // natuurlijke chests spawnen ENKEL hier (Magic Meadow #general)
 const CHEST_TICK_SECS: u64 = 2; // interval waarmee de M:SS-timer in de embed wordt bijgewerkt (vloeiender)
 const CHEST_CHANNEL_COOLDOWN: f64 = 50.0 * 60.0; // rust per kanaal na een chest (anti-spam)
 const CHEST_MIN_JOINERS: usize = 2; // minstens zoveel deelnemers, anders despawnt de chest (niks weggegeven)
@@ -479,7 +479,7 @@ pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
         ctx.channel_id(),
         data.chest.clone(),
         data.pool.clone(),
-        CHEST_TEST_POP_DELAY, // dev-test: pop na 3 min
+        CHEST_POP_DELAY, // prod-timing
     )
     .await?;
     Ok(())
@@ -597,6 +597,10 @@ async fn maybe_spawn_chest(
     data: &Data,
 ) -> Result<(), Error> {
     if !CHEST_ENABLED {
+        return Ok(());
+    }
+    // Natuurlijke chests spawnen ENKEL in het aangewezen kanaal (Magic Meadow #general).
+    if msg.channel_id.get() != CHEST_SPAWN_CHANNEL_ID {
         return Ok(());
     }
     let now = now_secs();
