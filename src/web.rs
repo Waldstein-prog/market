@@ -77,6 +77,7 @@ var input=form.querySelector('input[type=file]');if(!input)return;\
 box.addEventListener('drop',function(e){e.preventDefault();\
 var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(!f)return;\
 try{var dt=new DataTransfer();dt.items.add(f);input.files=dt.files;}catch(err){return;}\
+try{sessionStorage.setItem('mmScroll:'+location.pathname,window.scrollY);}catch(e2){}\
 form.submit();});});})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 /// Een Hytale-dagpas geeft vast 24 uur toegang; de permanente pas geldt eeuwig.
