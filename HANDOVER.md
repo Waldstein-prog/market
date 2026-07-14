@@ -14,6 +14,69 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-14 avond) — website: gems-collectie + passen + Discord-rollen + UX
+> **Parallelle "website-sessie"** (naast de Twitch-sessie hieronder). Alles GEBOUWD + lokaal e2e
+> getest (poort 8710, `MARKET_ENV=dev`) + **GEDEPLOYD + LIVE** + gecommit/subtree-gepusht
+> (`market-gh main`). Tip: test lokaal met `MARKET_PORT=8710` náást een andere instance (nieuw:
+> bind-poort configureerbaar via `MARKET_PORT`, default 8700).
+
+**Categorie-model omgegooid** — items zijn nu `inventory` / `noninv` / `booster` / `boost` (=Hytale-pas):
+- Idempotente migratie: oude gem-categorieën (primary/secondary/prism) + plain `''` → `inventory`;
+  Lucky Horseshoe → `booster`. Nieuwe items default `inventory`. `seed_gems` niet meer aangeroepen.
+- Manage Type-dropdown: Inventory / Non-inventory / Booster (lucky item) / Hytale pass. Role-name-veld
+  + kleurkiezer verwijderd (gem-naam = rolnaam; kleur komt uit Discord — zie onder).
+
+**Inventory = verzamelkaart die de shop volgt** (💎 Gems-tab):
+- Elk `inventory`-item krijgt een kaart: **grijs met "?"** tot aankoop, daarna onthuld (afbeelding +
+  naam + uitleg). Shop: reeds gekochte `inventory`-items → **grijs + groene ✓** (geen Buy). De
+  **permanente Hytale-pas** grijst óók zodra `perma_access`. `purchase`: `inventory`-items éénmalig.
+
+**Gem-kleur uit Discord-rollen** (gem-naam = rolnaam):
+- `db::sync_gem_colors` zet `items.color` op de kleur van de gelijknamige Discord-rol. Sync bij opstart
+  + admin-knop **🎨 Sync gem colors** op Manage. Guild = dev in dev-env, prod (`COINS_GUILD_ID`) in prod
+  (`color_guild()`). `discord_rest::list_roles`.
+- **12 gem-rollen op de dev-server aangemaakt** (met de prod-kleuren, via Fortuna's token). Gem "Lolite"
+  was een typo → hernoemd naar **Iolite** (+ Iolite-rol op dev). ⚠️ **Rol-HIËRARCHIE**: gem-rollen in dev
+  boven Hytaler getild (zodat de gem-kleur wint), maar bot-rol **Fortuna staat op pos 3** → de bot kan de
+  gems niet boven hoger-gekleurde test/admin-rollen (SuperUser/Red/…) tillen. Sleep Fortuna's rol hoger
+  (dev én prod) voor waterdichte gem-kleuren.
+
+**Fase 2 — gem-preview + Use → Discord-rol:**
+- Preview: klik een bezeten gem → je naam live in díe gem-kleur op **zwart/wit-swatches**, Discord-achtig
+  font (`GEM_PREVIEW_JS`). De swatches zijn **sticky**.
+- **Use** kent de gelijknamige Discord-rol toe in `cfg.guild_id` (= de **dev-guild**, óók op prod → rol
+  landt op dev). Vorige gem-rol wordt eerst ingetrokken (max. één kleur tegelijk). `coins.equipped_gem`
+  + `discord_rest::role_id_by_name`. **E2e getest** (Ruby toegekend+verwijderd in dev). De kleur toont pas
+  als de gem-rol boven de andere gekleurde rollen staat (zie hiërarchie).
+
+**Fonts/achtergrond uit Discord (onderzoek):** een user-**font** zit in `display_name_styles.font_id`
+(ophaalbaar; TechHeadFred=8) — haalbaar, maar Discord's fonts zijn proprietary → enkel benaderbaar met
+een webfont (**nog niet gebouwd**). Een **achtergrond/thema-kleur** is NIET haalbaar: persoonlijk
+client-thema = privé; profiel-thema-kleuren (`/users/{id}/profile`) = **403 voor bots** (getest).
+
+**Hytale-passen vereenvoudigd:** geen instelbare duur — dagpas = vast **24h** (`DAY_PASS_SECS`), permanent
+= eeuwig. Manage toont read-only "Access"; het minuten-veld is overal weg.
+
+**Boosters** (🍀 op de Boosts-tab): bezeten `booster`-items (Lucky Horseshoe) met aantal ×N + een
+**uitgeschakelde Use-knop** (Use-logica volgt later). Geen verzamel-/grey-out-logica; herkoopbaar.
+
+**🧪 Reset all test purchases** (Gems-tab, admin-only): refundt ALLE aankopen (gems + passen + boosters),
+maakt inventory leeg, verwijdert de **`hytale_whitelist`-grant + `perma_access`**, reset naamkleur/equipped-
+gem + trekt de gem-rol op Discord in. **All-time saldo blijft ongemoeid.** Zo test je gems én passen: koop
+→ op de whitelist in het panel (tale-bot reconcilet ~1 min) → reset → eraf. (Waldstein blijft op
+`whitelist.json` via `protected_names`; de pas-**timer** in het panel is wat je test.) Bevestigingsdialoog weg.
+
+**UX-polish:** zwevende (sticky) **Purse** (shop) + preview-swatches; **scrollpositie behouden** na élke
+actie (`KEEP_SCROLL_JS` op shop + inventory + Manage); **image-caching** (`/uploads` Cache-Control immutable
++ `?v=<mtime>`-cachebuster) → geen herlaad-flits van graphics bij een Buy; **drag-&-drop** upload op de
+Manage-afbeeldingskaders; **2e afbeelding** per item + **auto-save** van de Manage-velden (sendBeacon);
+item-omschrijving **cursief** in de shop; **bredere shop-kaders** (210px); Amber-prijs-fix.
+
+**Open / volgend:** (1) **font-in-preview** bouwen (`font_id`→webfont-mapping); (2) **Fortuna's rol hoger
+slepen** (dev+prod) voor waterdichte gem-kleuren; (3) **Booster-Use-logica** (Lucky Horseshoe-effect);
+(4) losse **Ruby-testrol** bij Waldstein in de **prod**-guild opruimen; (5) shop members-zichtbaar maken
+(site-gate weg) zodra de graphics af zijn.
+
 ## ⏭️ Laatste sessie (2026-07-14 avond) — Twitch-pas → Rust + tale fd-lek + panel-timer
 > Parallelle sessie naast de website-sessie (die aan `web.rs`/templates werkte) en een
 > tale-sessie. **Monorepo `lab`** — market + tale delen één git-repo. Alles hieronder
