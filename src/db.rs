@@ -1131,6 +1131,7 @@ pub fn add_item(pool: &DbPool, zone: &str, shelf_id: Option<i64>) -> i64 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn update_item(
     pool: &DbPool,
     id: i64,
@@ -1140,12 +1141,13 @@ pub fn update_item(
     duration: i64,
     category: &str,
     description: &str,
+    color: &str,
 ) {
     let conn = pool.get().expect("db");
     conn.execute(
         "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5,
-             category = ?6, description = ?7 WHERE id = ?1",
-        params![id, name, price, role_id, duration, category, description],
+             category = ?6, description = ?7, color = ?8 WHERE id = ?1",
+        params![id, name, price, role_id, duration, category, description, color],
     )
     .expect("update item");
 }

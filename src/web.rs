@@ -79,6 +79,18 @@ var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(!f)return
 try{var dt=new DataTransfer();dt.items.add(f);input.files=dt.files;}catch(err){return;}\
 try{sessionStorage.setItem('mmScroll:'+location.pathname,window.scrollY);}catch(e2){}\
 form.submit();});});})();</script>";
+/// Klik op een (bezeten) gem-kaart → toon je naam live in díe gem-kleur op de
+/// preview-swatches (dark/light/Discord-achtergrond). Louter een voorbeeld; Use zet de
+/// kleur echt vast. Markeert de gekozen kaart.
+const GEM_PREVIEW_JS: &str = "<script>(function(){\
+var sw=document.querySelectorAll('.nameshow .swatch');\
+document.querySelectorAll('.gemcard.previewable').forEach(function(card){\
+card.addEventListener('click',function(e){\
+if(e.target.closest('form'))return;\
+var col=card.dataset.color;if(!col)return;\
+sw.forEach(function(s){s.style.color=col;});\
+document.querySelectorAll('.gemcard.previewsel').forEach(function(x){x.classList.remove('previewsel');});\
+card.classList.add('previewsel');});});})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 /// Een Hytale-dagpas geeft vast 24 uur toegang; de permanente pas geldt eeuwig.
 /// Er is geen instelbare pas-duur meer (day pass = 24h, hardcoded).
@@ -404,10 +416,15 @@ a.link{{color:{MEADOW}}}
 .shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
 .nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap}}
+/* Discord-achtig lettertype voor een realistische naam-preview. */
 .swatch{{flex:1 1 140px;text-align:center;padding:.7rem;border-radius:11px;
-  font-weight:800;font-size:1.25rem;border:1px solid #2c3d2a}}
+  font-weight:700;font-size:1.25rem;border:1px solid #2c3d2a;
+  font-family:'gg sans','Noto Sans','Helvetica Neue',Arial,sans-serif;transition:color .15s}}
 .swatch.dark{{background:#141414}}
 .swatch.light{{background:#ffffff}}
+.preview-hint{{text-align:center;font-size:.72rem;margin:-.4rem 0 .8rem}}
+.gemcard.previewable{{cursor:pointer}}
+.gemcard.previewsel{{outline:2px solid {MEADOW};outline-offset:2px}}
 .gemcard .gdesc{{font-size:.7rem;color:#9db095;line-height:1.25;
   max-height:2.6em;overflow:hidden}}
 .slot.locked{{opacity:.5}}
@@ -745,11 +762,13 @@ fn gem_slot(it: &db::Item, owned: bool, equipped: bool) -> String {
         ("Use", "", "")
     };
     format!(
-        "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
+        "<div class=\"slot gemcard previewable\" data-color=\"{col}\">\
+         <div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div><div class=\"gdesc\">{desc}</div>\
          <form method=\"post\" action=\"/use/gem\" class=\"buyform\">\
            <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
            <button class=\"buy on{extra}\" type=\"submit\"{disabled}>{label}</button></form></div>",
+        col = esc(&it.color),
         thumb = thumb_html(&it.image, &it.color),
         name = esc(&it.name),
         desc = esc(&it.description),
@@ -848,7 +867,8 @@ fn inventory_home(
         "{admin_reset}<div class=\"nameshow\">{ds}\
            <div class=\"swatch dark\" style=\"color:{c}\">{nm2}</div>\
            <div class=\"swatch light\" style=\"color:{c}\">{nm2}</div></div>\
-         {collection}",
+         <p class=\"muted preview-hint\">Click a gem below to preview your name in its color.</p>\
+         {collection}{GEM_PREVIEW_JS}",
         ds = discord_swatch,
         c = shown_color,
         nm2 = esc(name),
@@ -1548,6 +1568,25 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         String::new()
     };
 
+    // Kleur: voor inventory-items een color-picker (naamkleur van de gem, ook voor de
+    // preview). Andere types: hidden input zodat de auto-save de kleur niet leegt.
+    let color_field = if it.category == "inventory" {
+        let cval = if it.color.is_empty() {
+            "#888888".to_string()
+        } else {
+            esc(&it.color)
+        };
+        format!(
+            "<label class=\"fld\">Color <span class=\"hint\">(name color for this gem)</span>\
+               <input name=\"color\" type=\"color\" value=\"{cval}\" class=\"colorpick\"></label>"
+        )
+    } else {
+        format!(
+            "<input type=\"hidden\" name=\"color\" value=\"{}\">",
+            esc(&it.color)
+        )
+    };
+
     // Bevestigings-flits na een bewaaractie (?saved=<id>).
     let flash = if saved == Some(it.id) {
         "<div class=\"savedflash\">✓ Saved</div>"
@@ -1640,7 +1679,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
              <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
            <label class=\"fld\">Role name\
              <input name=\"role_id\" value=\"{role}\" placeholder=\"e.g. Amber\"></label>\
-           {dur_field}\
+           {dur_field}{color_field}\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
@@ -2234,6 +2273,8 @@ struct ItemUpdate {
     category: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    color: String,
 }
 
 async fn admin_shelf_add(
@@ -2303,6 +2344,7 @@ async fn admin_item_update(
             f.duration_min.max(0) * 60,
             f.category.trim(),
             f.description.trim(),
+            f.color.trim(),
         );
         return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
