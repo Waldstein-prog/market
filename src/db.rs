@@ -145,7 +145,15 @@ pub fn init_pool(path: &str) -> DbPool {
     // (gem-categorieën primary/secondary/prism + het lege 'plain') worden verzameldbaar.
     // Idempotent: draait enkel op nog niet-gemigreerde rijen.
     conn.execute(
-        "UPDATE items SET category='inventory' WHERE category NOT IN ('boost','noninv','inventory')",
+        "UPDATE items SET category='inventory' WHERE category NOT IN ('boost','noninv','inventory','booster')",
+        [],
+    )
+    .ok();
+    // Lucky Horseshoe is een 'booster' (geen verzamel-item: gewoon herkoopbaar, geen grey-out,
+    // hoort op de Boosters-tab). Eenmalige fix van de foute inventory-migratie; nadien
+    // overschrijfbaar in Manage.
+    conn.execute(
+        "UPDATE items SET category='booster' WHERE name='Lucky Horseshoe' AND category='inventory'",
         [],
     )
     .ok();
@@ -1491,6 +1499,24 @@ pub fn owned_item_ids(pool: &DbPool, uid: &str) -> Vec<i64> {
         .query_map(params![uid], |r| r.get::<_, i64>(0))
         .expect("query owned");
     rows.filter_map(Result::ok).collect()
+}
+
+/// Bezeten booster-items (categorie 'booster', bv. Lucky Horseshoe) met het aantal.
+/// (naam, afbeelding, kleur, aantal). Enkel wat de user effectief bezit (aantal > 0).
+pub fn owned_booster_items(pool: &DbPool, uid: &str) -> Vec<(String, String, String, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.name, i.image, i.color, COUNT(inv.id) FROM items i
+               JOIN inventory inv ON inv.item_id = i.id AND inv.user_id = ?1
+              WHERE i.category = 'booster'
+              GROUP BY i.id HAVING COUNT(inv.id) > 0 ORDER BY i.name",
+        )
+        .expect("prep boosters");
+    stmt.query_map(params![uid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .expect("q boosters")
+        .filter_map(Result::ok)
+        .collect()
 }
 
 /// Admin-testhulp: draai de verzamel-aankopen terug. Stort de op 'inventory'-items

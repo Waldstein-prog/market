@@ -949,7 +949,32 @@ fn inventory_home(
             )
         };
 
-        format!("{status}{name_block}")
+        // Boosters (bv. Lucky Horseshoe): bezeten exemplaren met een (voorlopig)
+        // uitgeschakelde Use-knop — de Use-logica volgt later.
+        let boosters = db::owned_booster_items(pool, uid);
+        let boosters_section = if boosters.is_empty() {
+            String::new()
+        } else {
+            let cards: String = boosters
+                .iter()
+                .map(|(bname, image, color, count)| {
+                    let qty = if *count > 1 {
+                        format!(" <span style=\"color:#9db095\">×{count}</span>")
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
+                         <div class=\"name\">{nm}{qty}</div>\
+                         <button class=\"buy\" type=\"button\" disabled title=\"Use coming soon\">Use</button></div>",
+                        thumb = thumb_html(image, color),
+                        nm = esc(bname),
+                    )
+                })
+                .collect();
+            format!("<h2 class=\"shelf-title\">🍀 Boosters</h2><div class=\"shelf\">{cards}</div>")
+        };
+        format!("{status}{name_block}{boosters_section}")
     };
 
     let cls = |t: &str| if t == active { " on" } else { "" };
@@ -1691,6 +1716,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
            <label class=\"fld\">Type<select name=\"category\">\
              <option value=\"inventory\"{ci}>Inventory item</option>\
              <option value=\"noninv\"{cn}>Non-inventory item</option>\
+             <option value=\"booster\"{cboo}>Booster (lucky item)</option>\
              <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
            {dur_field}\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
@@ -1713,6 +1739,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         desc = esc(&it.description),
         ci = sel("inventory"),
         cn = sel("noninv"),
+        cboo = sel("booster"),
         cb = sel("boost"),
         img2_ui = img2_ui,
     )
