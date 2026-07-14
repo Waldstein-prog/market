@@ -1563,7 +1563,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
              <option value=\"primary\"{cp}>gem · primary</option>\
              <option value=\"secondary\"{cs}>gem · secondary</option>\
              <option value=\"prism\"{cpr}>gem · prism</option></select></label>\
-           <label class=\"fld\">Role name <span class=\"hint\">(text for now — granted later via the inventory)</span>\
+           <label class=\"fld\">Role name\
              <input name=\"role_id\" value=\"{role}\" placeholder=\"e.g. Amber\"></label>\
            <label class=\"fld\">Duration <span class=\"hint\">(minutes — 0 = permanent)</span>\
              <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\"></label>\
