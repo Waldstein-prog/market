@@ -1391,6 +1391,20 @@ pub fn get_whitelist(pool: &DbPool, uid: &str, now: f64) -> Option<(String, Opti
     .filter(|(_, exp)| exp.map_or(true, |e| e > now))
 }
 
+/// De ooit-vastgezette Hytale-naam van een whitelist-rij, ongeacht of de pas nog geldig is.
+/// Gebruikt om de Twitch-naam vast te houden tussen redeems (de 1e redeem zet ze vast).
+pub fn get_whitelist_name(pool: &DbPool, uid: &str) -> Option<String> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT hytale_name FROM hytale_whitelist WHERE user_id = ?1",
+        params![uid],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .expect("query whitelist name")
+    .filter(|n| !n.is_empty())
+}
+
 /// Ken een tijdelijke pas toe: stapelt `add_secs` (de itemduur, normaal 24u) bovenop de
 /// resterende tijd (reset niet). Al permanent ⇒ ongemoeid. Retourneert de nieuwe
 /// vervaltijd (epoch). `add_secs` volgt de item-duur zodat een admin een testwaarde

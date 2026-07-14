@@ -4,6 +4,7 @@ mod bot;
 mod config;
 mod db;
 mod discord_rest;
+mod twitch;
 mod web;
 
 #[tokio::main]
@@ -22,6 +23,18 @@ async fn main() {
     }
 
     let pool = db::init_pool("coins.db");
+
+    // Twitch-luik (channel-points-redeem → whitelist-grant): start onafhankelijk van de
+    // Discord-gateway, want het is er orthogonaal aan. Alleen als expliciet geconfigureerd
+    // (`twitch_ready()`), dus een gewone lokale instance zonder [twitch]-config doet niets.
+    // NB: draai niet twee instances met dezelfde Twitch-creds tegelijk (dubbele EventSub).
+    if cfg.twitch_ready() {
+        let tw_cfg = cfg.clone();
+        let tw_pool = pool.clone();
+        tokio::spawn(async move {
+            twitch::run(tw_pool, tw_cfg).await;
+        });
+    }
 
     // Web-only modus (lokaal testen): sla de bot-gateway over zodat een tweede
     // instance de live bot niet dubbel op de gateway zet (→ dubbele coins).
