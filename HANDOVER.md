@@ -14,10 +14,26 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
-## ⏭️ Laatste sessie (2026-07-14) — deftige per-item CRUD op Manage Shop
+## ⏭️ Laatste sessie (2026-07-14 mid) — 2e afbeelding (plain items) + auto-save Manage
+> **Gebouwd + lokaal e2e getest + GEDEPLOYED + LIVE** (12:59) én **gecommit** (`ffc7f83`).
+> Nog te subtree-pushen naar `market-gh` (gebeurt onderaan deze sessie).
+
+- **Tweede afbeelding voor plain items** (categorie `''`): nieuwe kolom `items.image2`
+  (idempotente migratie, prod bevestigd), `set/clear_item_image2`, alle 4 item-SELECTs dragen
+  `image2`. De upload-handler leest nu een `slot`-veld (`2` → tweede afbeelding, bestand
+  `item_<id>_2.<ext>`); nieuwe route `/admin/item/image2/clear`. **Shop** toont de 2e afbeelding
+  **kleiner, gecentreerd, onder de titel** (`.thumb2`, max 62%/64px). **Manage** krijgt per plain
+  item een image2-blok (preview + "Upload 2nd" + "Remove 2nd"). Enkel plain items (gems/passen niet).
+- **Prijs-footgun opgelost** (`AUTOSAVE_JS`): elk item-update-form persisteert zich nu **automatisch
+  bij een veldwijziging** (op `change`, via `navigator.sendBeacon` zodat het een navigatie overleeft)
+  met een korte **"✓ Saved"**-flits (`.autoflash`, onderaan de kaart). Oorzaak van de Amber-bug: de
+  kaart heeft meerdere losse `<form>`'s; het prijsveld zat enkel in het 💾 Save-form, dus wie 1000
+  typte en dan **Upload** klikte, verloor de prijs. Nu blijft elke edit bewaard.
+- **Amber-fix**: prod-`coins.db` item 38 `price 0 → 1000` (directe DB-write met user-akkoord).
+
+## ⏭️ Sessie (2026-07-14 vroeg) — deftige per-item CRUD op Manage Shop
 > **Gebouwd + gecommit + subtree-gepusht** (`market-gh main`, `a8767ac..5dbeda1`, lokaal commit
-> `d2f673b`) én **GEDEPLOYED + LIVE** (2026-07-14 12:02, `./deploy/deploy.sh`; service `active`,
-> healthz 200, `/admin/market` 303 oningelogd). Prod draait nu de nieuwe CRUD.
+> `d2f673b`) én **GEDEPLOYED + LIVE** (2026-07-14 12:02). Prod draait de nieuwe CRUD.
 
 De Manage Shop-pagina (`/admin/market`) had gebrekkige item-CRUD; elk item is nu een volwaardige
 beheerkaart (render + alle acties lokaal e2e geverifieerd tegen een web-only instance):
