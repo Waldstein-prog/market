@@ -280,6 +280,18 @@ fn set_cookie(pair: &str) -> HeaderMap {
     h
 }
 
+/// Meerdere `Set-Cookie`-headers in één response. Belangrijk: `append`, niet
+/// `insert` — anders overschrijft de tweede cookie de eerste (zelfde header-naam).
+fn set_cookies(pairs: &[&str]) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    for pair in pairs {
+        if let Ok(v) = HeaderValue::from_str(pair) {
+            h.append(SET_COOKIE, v);
+        }
+    }
+    h
+}
+
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -685,7 +697,7 @@ fn level_info(earned: i64) -> (i64, i64, i64) {
 /// Adminlijst (Discord-ID's) die de shop mogen beheren.
 const ADMINS: [&str; 2] = ["391337551543271433", "233179495094419456"];
 
-fn is_admin(uid: &str) -> bool {
+pub(crate) fn is_admin(uid: &str) -> bool {
     ADMINS.contains(&uid)
 }
 
@@ -1284,7 +1296,23 @@ fn err_page(msg: &str) -> Response {
 
 // --- OAuth2-flow --------------------------------------------------------
 
-async fn login(State(st): State<AppState>) -> Response {
+#[derive(Deserialize)]
+struct LoginQuery {
+    /// Lokaal pad waar we na een geslaagde login naartoe willen (bv. `/market`).
+    /// Enkel interne paden toegestaan — zie `safe_next`.
+    next: Option<String>,
+}
+
+/// Sta enkel eigen-site-paden toe als post-login-bestemming (open-redirect-guard):
+/// moet met één `/` beginnen en niet met `//` (dat is een protocol-relatieve URL).
+fn safe_next(next: Option<&str>) -> String {
+    match next {
+        Some(p) if p.starts_with('/') && !p.starts_with("//") => p.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
+async fn login(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> Response {
     if !st.cfg.oauth_ready() {
         return err_page("OAuth is not configured on the server yet.");
     }
@@ -1297,8 +1325,11 @@ async fn login(State(st): State<AppState>) -> Response {
         pct(&redirect),
         pct(&state),
     );
-    let c = format!("oauth_state={state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600");
-    (set_cookie(&c), Redirect::to(&url)).into_response()
+    // Bewaar zowel de CSRF-state als de gewenste eindbestemming over de OAuth-roundtrip.
+    let next = safe_next(q.next.as_deref());
+    let state_cookie = format!("oauth_state={state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600");
+    let next_cookie = format!("oauth_next={next}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600");
+    (set_cookies(&[&state_cookie, &next_cookie]), Redirect::to(&url)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1385,7 +1416,11 @@ async fn callback(
     let c = format!(
         "session={sess}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE}"
     );
-    (set_cookie(&c), Redirect::to("/")).into_response()
+    // Terug naar de gewenste bestemming (bv. /market voor admins), met open-redirect-guard.
+    // De gate laat non-admins alsnog naar /info lopen; enkel admins raken echt in /market.
+    let dest = safe_next(cookie(&headers, "oauth_next").as_deref());
+    let clear_next = "oauth_next=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+    (set_cookies(&[&c, clear_next]), Redirect::to(&dest)).into_response()
 }
 
 async fn logout(State(st): State<AppState>, headers: HeaderMap) -> Response {

@@ -320,13 +320,17 @@ async fn event_handler(
                 } else if mc.data.custom_id == CHEST_CUSTOM_ID {
                     handle_chest_click(ctx, mc, data).await?;
                 } else if mc.data.custom_id == SITE_ACCESS_CUSTOM_ID {
-                    // Website nog niet open voor de community → under-construction-feedback.
-                    respond_ephemeral(
-                        ctx,
-                        mc,
-                        "🚧 The Meadow Market website is still under construction — coming soon!",
-                    )
-                    .await?;
+                    // De site-gate stuurt niet-admins naar /info; admins mogen de market in.
+                    // Admins krijgen een login-link die na inloggen meteen op /market landt
+                    // (de gate laat een niet-ingelogde admin anders óók naar /info lopen).
+                    let base = data.cfg.base_url.trim_end_matches('/');
+                    let uid = mc.user.id.to_string();
+                    let msg = if crate::web::is_admin(&uid) {
+                        format!("🛒 Admin access — open the Meadow Market here:\n{base}/login?next=/market")
+                    } else {
+                        format!("🌼 Peek at the Meadow Market here:\n{base}/info")
+                    };
+                    respond_ephemeral(ctx, mc, &msg).await?;
                 }
             }
         }
