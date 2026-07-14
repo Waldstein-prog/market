@@ -426,8 +426,13 @@ a.link{{color:{MEADOW}}}
 .shophead{{display:flex;justify-content:space-between;align-items:center;
   gap:1rem;flex-wrap:wrap}}
 .shophead h1{{margin:.2rem 0}}
+/* Zwevende Purse: rechts uitgelijnd block-kind van de content-card, blijft tijdens het
+   scrollen bovenaan vastgeklikt zichtbaar. */
 .purse-box{{font-size:1.6rem;font-weight:800;color:#cfe0c8;background:#141d14;
-  border:1px solid #2c3d2a;padding:.45rem 1.1rem;border-radius:14px;white-space:nowrap}}
+  border:1px solid #2c3d2a;padding:.45rem 1.1rem;border-radius:14px;white-space:nowrap;
+  position:sticky;top:.6rem;z-index:30;box-shadow:0 4px 16px rgba(0,0,0,.45);
+  width:fit-content;margin-left:auto}}
+.shoptitle{{margin:.1rem 0 .6rem}}
 .purse-box .purse-n{{color:{MEADOW};font-variant-numeric:tabular-nums}}
 .notice{{padding:.6rem .9rem;border-radius:10px;margin:.2rem 0 1rem;font-size:.92rem}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
@@ -1007,9 +1012,9 @@ async fn market(
     let from = q.from.unwrap_or(coins);
 
     let body = format!(
-        "<div class=\"shophead\"><h1>🛒 Shop</h1>\
-           <div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
-             <span class=\"purse-n\" data-bal>{coins}</span></div></div>{notice}{shelves}\
+        "<div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
+           <span class=\"purse-n\" data-bal>{coins}</span></div>\
+         <h1 class=\"shoptitle\">🛒 Shop</h1>{notice}{shelves}\
          <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
            var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
            if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
