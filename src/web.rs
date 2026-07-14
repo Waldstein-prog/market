@@ -65,6 +65,19 @@ if(!fl){fl=document.createElement('div');fl.className='autoflash';c.appendChild(
 fl.textContent='\\u2713 Saved';fl.style.opacity='1';\
 clearTimeout(fl._t);fl._t=setTimeout(function(){fl.style.opacity='0';},1500);\
 });});})();</script>";
+/// Drag-&-drop op de afbeeldingskaders in Manage: sleep een afbeelding op een frame
+/// → het bestand gaat in de bijhorende upload-form en die submit meteen (dezelfde
+/// multipart-route als de knop). Puur client-side, geen serverlast.
+const DND_JS: &str = "<script>(function(){\
+document.querySelectorAll('.imgblock,.img2box').forEach(function(box){\
+var form=box.querySelector('form.iupload');if(!form)return;\
+var input=form.querySelector('input[type=file]');if(!input)return;\
+['dragenter','dragover'].forEach(function(ev){box.addEventListener(ev,function(e){e.preventDefault();box.classList.add('dragover');});});\
+['dragleave','dragend','drop'].forEach(function(ev){box.addEventListener(ev,function(e){box.classList.remove('dragover');});});\
+box.addEventListener('drop',function(e){e.preventDefault();\
+var f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(!f)return;\
+try{var dt=new DataTransfer();dt.items.add(f);input.files=dt.files;}catch(err){return;}\
+form.submit();});});})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 /// Een Hytale-dagpas geeft vast 24 uur toegang; de permanente pas geldt eeuwig.
 /// Er is geen instelbare pas-duur meer (day pass = 24h, hardcoded).
@@ -140,11 +153,17 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .layer(middleware::from_fn_with_state(state.clone(), gate))
         .with_state(state);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8700));
+    // Poort: default 8700, overschrijfbaar met MARKET_PORT (bv. voor lokale tests naast
+    // een andere instance).
+    let port: u16 = std::env::var("MARKET_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8700);
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .expect("kan poort 8700 niet binden");
-    tracing::info!("Web-server luistert op http://0.0.0.0:8700");
+        .unwrap_or_else(|e| panic!("kan poort {port} niet binden: {e}"));
+    tracing::info!("Web-server luistert op http://0.0.0.0:{port}");
     axum::serve(listener, app).await.expect("web-server crashte");
 }
 
@@ -426,6 +445,9 @@ a.link{{color:{MEADOW}}}
 .aitem .hint{{font-weight:400;color:#6b7d63}}
 .aitem .rdonly{{font-weight:600;color:#cfe0c8;font-size:.74rem;padding:.3rem .4rem;
   border:1px dashed #2c3d2a;border-radius:7px;background:#0e1510}}
+/* Drag-&-drop-feedback op een afbeeldingskader. */
+.imgblock.dragover .thumb,.img2box.dragover .thumb2{{outline:2px dashed #6bbf59;outline-offset:2px}}
+.imgblock.dragover,.img2box.dragover{{background:rgba(107,191,89,.06);border-radius:9px}}
 .aitem .save{{width:100%;margin-top:.1rem}}
 .arow{{display:flex;gap:.3rem;align-items:center}}
 .arow .iform{{margin:0}}
@@ -968,13 +990,13 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
     };
     // Plain items (geen gem/pass) mogen een tweede, kleinere afbeelding onder de
     // titel dragen.
-    let img2 = if it.category.is_empty() && !it.image2.is_empty() {
+    let img2 = if it.image2.is_empty() {
+        String::new()
+    } else {
         format!(
             "<div class=\"thumb2\"><img src=\"/uploads/{}\" alt=\"\"></div>",
             esc(&it.image2)
         )
-    } else {
-        String::new()
     };
     // Omschrijving (uit Manage) tonen onder de titel/2e afbeelding.
     let desc = if it.description.is_empty() {
@@ -1415,7 +1437,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
 }
 
 /// Geldige Hytale-naam? (`^[A-Za-z0-9_]{1,32}$`)
-fn valid_hytale_name(s: &str) -> bool {
+pub(crate) fn valid_hytale_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 32
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -1473,10 +1495,10 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
 
-    // Duur: voor Hytale-passen niet meer instelbaar (day pass = vast 24h, permanent =
-    // eeuwig). We tonen een vaste, leesbare notitie + een hidden input die de bestaande
-    // waarde bewaart (anders zou de auto-save de duur op 0 zetten). Andere items houden
-    // het gewone minuten-veld.
+    // Duur: het minuten-veld is verdwenen. Hytale-passen tonen een vaste, leesbare
+    // Access-notitie (day pass = 24h, permanent = eeuwig) + een hidden input die de
+    // bestaande waarde als >0/0-vlag bewaart. Alle andere items hebben geen duur (die had
+    // geen functie) — géén veld, en de update zet hun duration gewoon op 0.
     let dur_field = if it.category == "boost" {
         let access = if it.duration > 0 { "24 hours (day pass)" } else { "permanent" };
         format!(
@@ -1484,10 +1506,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
              <input type=\"hidden\" name=\"duration_min\" value=\"{dur_min}\">"
         )
     } else {
-        format!(
-            "<label class=\"fld\">Duration <span class=\"hint\">(minutes — 0 = permanent)</span>\
-               <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\"></label>"
-        )
+        String::new()
     };
 
     // Bevestigings-flits na een bewaaractie (?saved=<id>).
@@ -1529,8 +1548,8 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         String::new()
     };
 
-    // Tweede afbeelding (klein, onder de titel in de shop) — enkel voor plain items.
-    let img2_ui = if it.category.is_empty() {
+    // Tweede afbeelding (klein, onder de titel in de shop) — voor elk item beschikbaar.
+    let img2_ui = {
         let thumb2 = if it.image2.is_empty() {
             "<div class=\"thumb2 empty\">— no 2nd image —</div>".to_string()
         } else {
@@ -1550,7 +1569,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
             )
         };
         format!(
-            "<div class=\"img2box\"><div class=\"lbl\">2nd image <span class=\"hint\">(small, under the title in shop)</span></div>{thumb2}\
+            "<div class=\"img2box\"><div class=\"lbl\">2nd image <span class=\"hint\">(under title in shop — drag &amp; drop or browse)</span></div>{thumb2}\
                <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
                  <input type=\"hidden\" name=\"id\" value=\"{id}\">\
                  <input type=\"hidden\" name=\"slot\" value=\"2\">\
@@ -1558,14 +1577,12 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
                  <button class=\"btn small ghost\" type=\"submit\">Browse / Upload</button></form>{remove2}</div>",
             id = it.id,
         )
-    } else {
-        String::new()
     };
 
     format!(
         "<div class=\"aitem\" id=\"item-{id}\">{flash}\
          <div class=\"imgblock\">\
-           <div class=\"lbl\">Main image (thumbnail)</div>\
+           <div class=\"lbl\">Main image <span class=\"hint\">(drag &amp; drop or browse)</span></div>\
            <div class=\"thumb\">{thumb}</div>\
            <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
              <input type=\"hidden\" name=\"id\" value=\"{id}\">\
@@ -1667,7 +1684,7 @@ async fn admin_market(
         "<h1>⚙ Shop management</h1>{shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
            <input name=\"title\" placeholder=\"New shelf name\" required>\
-           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}{AUTOSAVE_JS}"
+           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}{AUTOSAVE_JS}{DND_JS}"
     );
     let body = format!("{}{}", admin_subtabs("market"), body);
     Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true, ""), true, &body)).into_response()
