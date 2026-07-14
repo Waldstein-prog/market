@@ -1,4 +1,4 @@
-# Handover — Meadow Market (2026-07-13)
+# Handover — Meadow Market (2026-07-14)
 
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
@@ -13,6 +13,38 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 (2026-07-13, met nadruk). Alle feedback = **publiek kanaalbericht** of een **ephemeral** (enkel
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
+
+## ⏭️ Laatste sessie (2026-07-14) — deftige per-item CRUD op Manage Shop
+> **Gebouwd + gecommit + subtree-gepusht** (`market-gh main`, `a8767ac..5dbeda1`, lokaal commit
+> `d2f673b`). ⚠️ **NOG NIET GEDEPLOYED** — wacht op akkoord voor de prod-restart (user gevraagd,
+> nog geen antwoord). Draai `./deploy/deploy.sh` zodra ok.
+
+De Manage Shop-pagina (`/admin/market`) had gebrekkige item-CRUD; elk item is nu een volwaardige
+beheerkaart (render + alle acties lokaal e2e geverifieerd tegen een web-only instance):
+
+- **Duidelijke 💾 Save-knop onderaan** het update-formulier (i.p.v. de verwarrende ✓ midden naast
+  de prijs die alle velden bewaarde maar prijs-only leek).
+- **Bevestiging na een actie** — Save/shelf-move/image-clear redirecten met `?saved=<id>` → een
+  groene **"✓ Saved"**-flits op díe kaart (`.savedflash`, fade na 2,5s via `SAVED_FLASH_JS`, dat
+  ook `?saved` uit de URL strippt zodat een refresh niet herflitst). Werkt samen met `KEEP_SCROLL_JS`
+  (keyt op `location.pathname`, dus scroll blijft behouden).
+- **Categorie-select bevat nu ook "Hytale pass (boost)"** → passen aanmaakbaar via de UI (voorheen
+  enkel gem-categorieën primary/secondary/prism + "geen gem"). Labels verduidelijkt ("gem · primary"
+  enz., "— plain item —").
+- **Volgorde**: **◀ ▶** verschuiven binnen zone/schap. `db::move_item(id, dir)` herschrijft de
+  posities lineair (robuust ook bij oude/gelijke posities).
+- **Item naar ander schap**: dropdown + **Move** (enkel getoond bij >1 schap; `db::set_item_shelf`
+  hangt het achteraan het doelschap). Lucky-zone-items krijgen geen schap-dropdown.
+- **Afbeelding wissen**: **"Remove image"** (enkel zichtbaar bij een geüpload beeld;
+  `db::clear_item_image` zet `image=''` → terug naar kleur-thumb/bol).
+- **Security**: alle nieuwe handlers checken `require_admin`; niet-admin POST → redirect `/info`,
+  geen mutatie (getest).
+- **Code**: `db.rs` — `Item` draagt nu `zone`+`shelf_id` (alle `row_to_item`-SELECTs bijgewerkt,
+  incl. `gems_by_category`); nieuwe `move_item`/`set_item_shelf`/`clear_item_image`. `web.rs` — 3
+  nieuwe routes (`/admin/item/move`, `/admin/item/shelf`, `/admin/item/image/clear`) + handlers +
+  structs (`ItemMove`/`ItemShelf`/`SavedQuery`), `admin_item` herschreven (neemt nu `shelves`+`saved`),
+  `admin_item_update` redirect met `?saved`, CSS voor `.savedflash`/`.save`/`.arow`/`.mvshelf` (kaart
+  152px→168px). `.prow`-CSS blijft ongebruikt achter (onschadelijk).
 
 ## ✅ Laatste sessie (2026-07-13 nacht) — site-UI-overhaul, LIVE
 Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten via
