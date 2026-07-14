@@ -349,7 +349,7 @@ a.link{{color:{MEADOW}}}
   box-shadow:inset 0 -4px 8px rgba(0,0,0,.35),0 2px 6px rgba(0,0,0,.3)}}
 .slot .name{{font-size:.82rem;font-weight:600;color:#e8f0e4;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.slot .sdesc{{font-size:.7rem;color:#9db095;line-height:1.3;
+.slot .sdesc{{font-size:.7rem;color:#9db095;line-height:1.3;font-style:italic;
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
 .slot .price{{font-weight:700;color:{MEADOW};font-size:.95rem}}
 .slot .buy{{width:100%;padding:.45rem;border:0;border-radius:9px;
@@ -410,11 +410,18 @@ a.link{{color:{MEADOW}}}
 /* Beheerblok voor de tweede afbeelding (plain items). */
 .img2box{{margin-top:.35rem;border-top:1px dashed #2c3d2a;padding-top:.4rem;
   display:flex;flex-direction:column;gap:.35rem}}
-.img2box .lbl2{{font-size:.62rem;color:#9db095;font-weight:700}}
 .img2box .thumb2{{aspect-ratio:1;border:1px solid #26331f;border-radius:9px;background:#0e1510;
   display:grid;place-items:center;overflow:hidden;max-height:88px}}
 .img2box .thumb2 img{{max-width:100%;max-height:100%;object-fit:contain;border-radius:7px}}
 .img2box .thumb2.empty{{font-size:.62rem;color:#6b7d63}}
+/* Hoofdafbeelding: frame + browse/upload gegroepeerd bovenaan de kaart. */
+.aitem .imgblock{{display:flex;flex-direction:column;gap:.35rem;
+  border-bottom:1px dashed #2c3d2a;padding-bottom:.5rem;margin-bottom:.1rem}}
+/* Veldlabels: kleine kop boven elk invoerveld, hint in lichter/dun font. */
+.aitem .lbl{{font-size:.62rem;color:#9db095;font-weight:700}}
+.aitem .fld{{display:flex;flex-direction:column;gap:.12rem;text-align:left;
+  font-size:.62rem;color:#9db095;font-weight:700}}
+.aitem .hint{{font-weight:400;color:#6b7d63}}
 .aitem .save{{width:100%;margin-top:.1rem}}
 .arow{{display:flex;gap:.3rem;align-items:center}}
 .arow .iform{{margin:0}}
@@ -1522,12 +1529,12 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
             )
         };
         format!(
-            "<div class=\"img2box\"><div class=\"lbl2\">2nd image (under title)</div>{thumb2}\
+            "<div class=\"img2box\"><div class=\"lbl\">2nd image <span class=\"hint\">(small, under the title in shop)</span></div>{thumb2}\
                <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
                  <input type=\"hidden\" name=\"id\" value=\"{id}\">\
                  <input type=\"hidden\" name=\"slot\" value=\"2\">\
                  <input type=\"file\" name=\"file\" accept=\"image/*\">\
-                 <button class=\"btn small ghost\" type=\"submit\">Upload 2nd</button></form>{remove2}</div>",
+                 <button class=\"btn small ghost\" type=\"submit\">Browse / Upload</button></form>{remove2}</div>",
             id = it.id,
         )
     } else {
@@ -1535,26 +1542,32 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
     };
 
     format!(
-        "<div class=\"aitem\" id=\"item-{id}\">{flash}<div class=\"thumb\">{thumb}</div>\
+        "<div class=\"aitem\" id=\"item-{id}\">{flash}\
+         <div class=\"imgblock\">\
+           <div class=\"lbl\">Main image (thumbnail)</div>\
+           <div class=\"thumb\">{thumb}</div>\
+           <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
+             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+             <input type=\"file\" name=\"file\" accept=\"image/*\">\
+             <button class=\"btn small ghost\" type=\"submit\">Browse / Upload</button></form>{remove_img}</div>\
          <form method=\"post\" action=\"/admin/item/update\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-           <input name=\"name\" value=\"{name}\" placeholder=\"name\">\
-           <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"price\">\
-           <input name=\"description\" value=\"{desc}\" placeholder=\"description\">\
-           <select name=\"category\">\
+           <label class=\"fld\">Name<input name=\"name\" value=\"{name}\" placeholder=\"e.g. Amber\"></label>\
+           <label class=\"fld\">Price <span class=\"hint\">(coins)</span>\
+             <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\"></label>\
+           <label class=\"fld\">Description <span class=\"hint\">(shown in italic in the shop)</span>\
+             <input name=\"description\" value=\"{desc}\" placeholder=\"e.g. Gives the Amber role\"></label>\
+           <label class=\"fld\">Type<select name=\"category\">\
              <option value=\"\"{c0}>— plain item —</option>\
              <option value=\"boost\"{cb}>Hytale pass (boost)</option>\
              <option value=\"primary\"{cp}>gem · primary</option>\
              <option value=\"secondary\"{cs}>gem · secondary</option>\
-             <option value=\"prism\"{cpr}>gem · prism</option></select>\
-           <input name=\"role_id\" value=\"{role}\" placeholder=\"role ID (granted on buy)\">\
-           <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\" \
-             placeholder=\"duration in min (0 = permanent)\">\
-           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>\
-         <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
-           <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-           <input type=\"file\" name=\"file\" accept=\"image/*\">\
-           <button class=\"btn small ghost\" type=\"submit\">Upload</button></form>{remove_img}{img2_ui}\
+             <option value=\"prism\"{cpr}>gem · prism</option></select></label>\
+           <label class=\"fld\">Discord role ID <span class=\"hint\">(a number — optional, granted on buy)</span>\
+             <input name=\"role_id\" value=\"{role}\" placeholder=\"e.g. 1525249217897955590\"></label>\
+           <label class=\"fld\">Duration <span class=\"hint\">(minutes — 0 = permanent)</span>\
+             <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\"></label>\
+           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
              <input type=\"hidden\" name=\"id\" value=\"{id}\">\
