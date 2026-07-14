@@ -140,6 +140,15 @@ pub fn init_pool(path: &str) -> DbPool {
         [],
     )
     .ok();
+    // Categorie-model vereenvoudigd naar: 'inventory' (verzamelbaar → kaart in de Inventory),
+    // 'noninv' (gewoon shop-item, geen kaart) en 'boost' (Hytale-pas). Alle oude categorieën
+    // (gem-categorieën primary/secondary/prism + het lege 'plain') worden verzameldbaar.
+    // Idempotent: draait enkel op nog niet-gemigreerde rijen.
+    conn.execute(
+        "UPDATE items SET category='inventory' WHERE category NOT IN ('boost','noninv','inventory')",
+        [],
+    )
+    .ok();
     // Oude auto-seed gem-schappen opruimen (vervangen door de gem-catalogus).
     conn.execute(
         "DELETE FROM items WHERE shelf_id IN
@@ -162,7 +171,9 @@ pub fn init_pool(path: &str) -> DbPool {
     .expect("backfill total_earned");
     drop(conn);
     seed_hytale(&pool);
-    seed_gems(&pool);
+    // seed_gems is bewust NIET meer aangeroepen: items worden nu manueel beheerd in Manage
+    // Shop, en de categorie-migratie hierboven zou een re-seed telkens naar 'inventory'
+    // omzetten. Bestaande (geseede + eigen) items blijven gewoon staan.
     seed_horseshoe(&pool);
     pool
 }
@@ -235,6 +246,8 @@ pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
 
 /// Seed de gem-catalogus één keer (idempotent): 3 primary, 5 secondary, 5 prism.
 /// Elke gem is een shop-item met een categorie, kleur en omschrijving.
+/// NIET meer aangeroepen (items worden manueel beheerd); bewaard als referentie.
+#[allow(dead_code)]
 fn seed_gems(pool: &DbPool) {
     let conn = pool.get().expect("db");
     let exists: i64 = conn
@@ -1107,8 +1120,10 @@ pub fn add_item(pool: &DbPool, zone: &str, shelf_id: Option<i64>) -> i64 {
             |r| r.get(0),
         )
         .unwrap_or(0);
+    // Nieuwe items zijn standaard 'inventory' (verzamelbaar → kaart in de Inventory).
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, position) VALUES (?1, ?2, '', 0, ?3)",
+        "INSERT INTO items (zone, shelf_id, name, price, category, position)
+         VALUES (?1, ?2, '', 0, 'inventory', ?3)",
         params![zone, shelf_id, pos],
     )
     .expect("add item");
@@ -1249,11 +1264,10 @@ pub fn delete_item(pool: &DbPool, id: i64) {
 /// het item. Atomisch. Ok(nieuw_saldo, item) of Err(reden).
 pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64, Item), String> {
     let item = get_item(pool, item_id).ok_or("This item no longer exists.")?;
-    let is_gem = matches!(item.category.as_str(), "primary" | "secondary" | "prism");
     let mut conn = pool.get().expect("db");
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    // Gems zijn bingokaart-slots: maar één keer te bezitten.
-    if is_gem {
+    // Inventory-items zijn verzamelkaart-slots: maar één keer te bezitten.
+    if item.category == "inventory" {
         let owned: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM inventory WHERE user_id = ?1 AND item_id = ?2",
@@ -1463,6 +1477,7 @@ pub fn owned_item_ids(pool: &DbPool, uid: &str) -> Vec<i64> {
 }
 
 /// Alle gems van een categorie ('primary'|'secondary'|'prism'), op positie.
+#[allow(dead_code)]
 pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn

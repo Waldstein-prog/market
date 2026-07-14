@@ -409,9 +409,18 @@ a.link{{color:{MEADOW}}}
 .swatch.light{{background:#ffffff}}
 .gemcard .gdesc{{font-size:.7rem;color:#9db095;line-height:1.25;
   max-height:2.6em;overflow:hidden}}
-.slot.locked{{opacity:.45}}
+.slot.locked{{opacity:.5}}
 .slot.locked .thumb{{display:grid;place-items:center}}
 .slot .lock{{font-size:1.5rem;filter:grayscale(1)}}
+/* Vergrendelde verzamelkaart: grijs vak met een groot vraagteken. */
+.slot .qmark{{font-size:2.4rem;font-weight:800;color:#4c5c46}}
+.slot.locked .name.muted{{color:#5a6b52}}
+/* Reeds gekocht in de shop: kaart grijs + groene checkmark, geen Buy-knop. */
+.slot.bought{{opacity:.55;position:relative}}
+.slot.bought .boughtmark{{position:absolute;top:.5rem;right:.5rem;z-index:2;
+  width:1.5rem;height:1.5rem;border-radius:50%;background:{MEADOW};color:#08240f;
+  display:grid;place-items:center;font-weight:900;font-size:1rem;
+  box-shadow:0 1px 4px rgba(0,0,0,.5)}}
 .buy.on.eq{{background:#2c3d2a;color:#cfe0c8;cursor:default}}
 .slot .thumb img{{width:100%;height:100%;object-fit:contain;border-radius:9px}}
 /* Tweede afbeelding onder de titel in de shop: kleiner, gecentreerd. */
@@ -716,7 +725,8 @@ fn grants_html(grants: &[(String, f64)]) -> String {
 fn gem_slot(it: &db::Item, owned: bool, equipped: bool) -> String {
     if !owned {
         return "<div class=\"slot locked\"><div class=\"thumb\">\
-                <span class=\"lock\">🔒</span></div></div>"
+                <span class=\"qmark\">?</span></div>\
+                <div class=\"name muted\">???</div></div>"
             .to_string();
     }
     let (label, extra, disabled) = if equipped {
@@ -790,32 +800,39 @@ fn inventory_home(
             nm = esc(name),
         )
     };
-    let shelf = |cat: &str, title: &str| -> String {
-        let gems = db::gems_by_category(pool, cat);
-        if gems.is_empty() {
-            return String::new();
-        }
-        let slots: String = gems
-            .iter()
-            .map(|g| {
-                let own = owned.contains(&g.id);
-                let eq = own && !g.color.is_empty() && g.color.eq_ignore_ascii_case(&name_color);
-                gem_slot(g, own, eq)
-            })
-            .collect();
-        format!("<h2 class=\"shelf-title\">{title}</h2><div class=\"shelf\">{slots}</div>")
-    };
+    // Verzamelkaart: elk (niet-pas) shop-item krijgt een kaart — grijs met "?" tot je het
+    // koopt, daarna onthuld (afbeelding + naam + uitleg). Zelfde schap-indeling als de shop.
+    let collection: String = db::list_shelves(pool)
+        .iter()
+        .map(|(sid, title)| {
+            let slots: String = db::shelf_items(pool, *sid)
+                .iter()
+                .filter(|it| it.category == "inventory")
+                .map(|it| {
+                    let own = owned.contains(&it.id);
+                    let eq =
+                        own && !it.color.is_empty() && it.color.eq_ignore_ascii_case(&name_color);
+                    gem_slot(it, own, eq)
+                })
+                .collect();
+            if slots.is_empty() {
+                return String::new();
+            }
+            format!(
+                "<h2 class=\"shelf-title\">{}</h2><div class=\"shelf\">{}</div>",
+                esc(title),
+                slots
+            )
+        })
+        .collect();
     let gems_panel = format!(
         "<div class=\"nameshow\">{ds}\
            <div class=\"swatch dark\" style=\"color:{c}\">{nm2}</div>\
            <div class=\"swatch light\" style=\"color:{c}\">{nm2}</div></div>\
-         {p}{s}{pr}",
+         {collection}",
         ds = discord_swatch,
         c = shown_color,
         nm2 = esc(name),
-        p = shelf("primary", "Primary"),
-        s = shelf("secondary", "Secondary"),
-        pr = shelf("prism", "Prism"),
     );
 
     // Boosts — Hytale-whitelist: enkel de status + je (persistente) Hytale-naam.
@@ -963,9 +980,10 @@ fn item_thumb(it: &db::Item) -> String {
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
 fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
-    let is_gem = matches!(it.category.as_str(), "primary" | "secondary" | "prism");
-    let action = if owned && is_gem {
-        "<button class=\"buy owned\" disabled>Owned</button>".to_string()
+    // Reeds gekocht verzamel-item: kaart grijs + groene ✓, geen Buy-knop meer.
+    let bought = owned && it.category == "inventory";
+    let action = if bought {
+        String::new()
     } else {
         // Eerste pas-aankoop: vraag de Hytale-naam mee in het koopformulier.
         // Zodra die bewaard is (has_name) verdwijnt het veld voorgoed.
@@ -984,6 +1002,12 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
             id = it.id,
         )
     };
+    let slotcls = if bought { " bought" } else { "" };
+    let mark = if bought {
+        "<div class=\"boughtmark\" title=\"Owned\">✓</div>"
+    } else {
+        ""
+    };
     // Plain items (geen gem/pass) mogen een tweede, kleinere afbeelding onder de
     // titel dragen.
     let img2 = if it.image2.is_empty() {
@@ -1001,7 +1025,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
         format!("<div class=\"sdesc\">{}</div>", esc(&it.description))
     };
     format!(
-        "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
+        "<div class=\"slot{slotcls}\">{mark}<div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div>{img2}{desc}\
          <div class=\"price\">{MC} {price}</div>{action}</div>",
         thumb = item_thumb(it),
@@ -1592,11 +1616,9 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
            <label class=\"fld\">Description <span class=\"hint\">(shown in italic in the shop)</span>\
              <input name=\"description\" value=\"{desc}\" placeholder=\"e.g. Gives the Amber role\"></label>\
            <label class=\"fld\">Type<select name=\"category\">\
-             <option value=\"\"{c0}>— plain item —</option>\
-             <option value=\"boost\"{cb}>Hytale pass (boost)</option>\
-             <option value=\"primary\"{cp}>gem · primary</option>\
-             <option value=\"secondary\"{cs}>gem · secondary</option>\
-             <option value=\"prism\"{cpr}>gem · prism</option></select></label>\
+             <option value=\"inventory\"{ci}>Inventory item (gets a card)</option>\
+             <option value=\"noninv\"{cn}>Non-inventory item</option>\
+             <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
            <label class=\"fld\">Role name\
              <input name=\"role_id\" value=\"{role}\" placeholder=\"e.g. Amber\"></label>\
            {dur_field}\
@@ -1619,11 +1641,9 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         price = it.price,
         role = esc(&it.role_id),
         desc = esc(&it.description),
-        c0 = sel(""),
+        ci = sel("inventory"),
+        cn = sel("noninv"),
         cb = sel("boost"),
-        cp = sel("primary"),
-        cs = sel("secondary"),
-        cpr = sel("prism"),
         img2_ui = img2_ui,
     )
 }
