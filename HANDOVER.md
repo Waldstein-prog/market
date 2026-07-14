@@ -14,7 +14,51 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
-## ⏭️ Laatste sessie (2026-07-14 mid) — 2e afbeelding (plain items) + auto-save Manage
+## ⏭️ Laatste sessie (2026-07-14 avond) — Twitch-pas → Rust + tale fd-lek + panel-timer
+> Parallelle sessie naast de website-sessie (die aan `web.rs`/templates werkte) en een
+> tale-sessie. **Monorepo `lab`** — market + tale delen één git-repo. Alles hieronder
+> **gecommit**; de tale-kant is **gedeployed + live op de VPS**, `src/twitch.rs` nog niet.
+
+**Twitch-pas-luik geport van tale (Python) → market (Rust)** — `src/twitch.rs` (`2835e5f`):
+- Port van het oude `tale/bot/twitch_bridge.py`. Een channel-points-redeem "Hytale-ticket (24u)"
+  → token-refresh + Helix (reward beheren, redemption fulfill/cancel, chat) + EventSub-WebSocket
+  (tokio-tungstenite) met reconnect/backoff.
+- **Model schoner dan de Python-versie:** raakt de Hytale-FIFO NIET meer aan. `on_redeem` leest de
+  ingetypte naam uit `event.user_input`, valideert via `web::valid_hytale_name`, zet 'm vast op de
+  1e redeem, en schrijft een grant in `coins.db.hytale_whitelist` onder pseudo-id `twitch:<id>`
+  (`db::grant_day_whitelist`, +24u stapelend). De tale-bot reconcilet die al → whitelist.
+- Config: `[twitch]`-velden in `Config` (secrets.json) + `twitch_ready()`; kost dev 0 / prod 1500.
+  Start in `main.rs` los van de Discord-gateway.
+- **E2e getest via de Twitch CLI EventSub-mock** (`~/.local/bin/twitch`, geen Affiliate nodig):
+  `TWITCH_EVENTSUB_URL=ws://127.0.0.1:8080/ws` → mock-modus (skip Helix/token). Bewezen: grant,
+  naam-vastzetten, stapelen 24→48u, refund bij ongeldige naam. Gids: `docs/twitch-setup.md`.
+- ⚠️ **Nog NIET op de VPS gedeployd** — enkel lokaal gecommit. Deploy nodig zodra echte
+  Twitch-redeems live gaan (met de Affiliate-**prod-streamer**; OAuth-flow ligt klaar).
+
+**tale opgeruimd** (`cab33de`): `twitch_bridge.py` + `[twitch]`-bedrading (import/start/stop/
+`/twitchsetname`) uit `bot.py`, `[twitch]` uit config.example.toml, sectie 9 uit SETUP.md,
+`twitchAPI` uit requirements. `reconcile_market`/`enforce_whitelist` BLIJVEN. **Gedeployed + live.**
+
+**FD-LEK in de tale-bot gevonden + gefixt** (`0537f41`) — dit was de échte reden dat market-grants
+niet whitelistten (niet het Twitch-luik, niet UUID's): `bot.py` `db()` deed `with sqlite3.connect()`
+zonder `close()` → lekte fd's naar `links.db` tot de 1024-limiet in ~2 dagen → dan vielen reconcile
+(sqlite-open faalt → lege grants), `ensure_protected` én de Discord-gateway stil uit ("Too many open
+files"). db() is nu een `@contextmanager`. **Gedeployed + herstart + geverifieerd** (fd's vlak op 0).
+
+**Panel-resttijd-timer voor ALLE passen** (`cf003d7`) — `tale/panel/panel.py` `pass_expiries()` las
+enkel de bot-DB; leest nu óók market's `coins.db.hytale_whitelist` → resttijd zichtbaar voor shop-
+én Twitch-passen (dagpas = live afteller, `expires NULL` = "permanent"). **Gedeployed + live.**
+Basis voor de gewenste latere **in-game resttijd-berichten** bij join.
+
+**Whitelist-keten LIVE bewezen:** test-grant in prod `/opt/market/coins.db` (`Waldstein`, 24u) →
+tale-bot → `whitelist add` → op `whitelist.json` + panel toont de timer. Test-grant
+`twitch:waldstein-vpstest` **blijft bewust staan** (houdt Waldstein 24u erop; opruimen wanneer hij
+zich permanent terugzet). NB whitelist = UUID's; `protected_names=["Faybelle","Waldstein"]`.
+
+**Open:** (1) echt Twitch-redeem-mondstuk met de Affiliate-prod-streamer; (2) `src/twitch.rs` naar
+de VPS deployen als dat live gaat; (3) in-game resttijd-bericht bij join; (4) evt. Client Secret roteren.
+
+## ⏭️ Sessie (2026-07-14 mid) — 2e afbeelding (plain items) + auto-save Manage
 > **Gebouwd + lokaal e2e getest + GEDEPLOYED + LIVE** (12:59) én **gecommit** (`ffc7f83`).
 > Nog te subtree-pushen naar `market-gh` (gebeurt onderaan deze sessie).
 
