@@ -16,8 +16,8 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
 
 ## ⏭️ Laatste sessie (2026-07-14) — deftige per-item CRUD op Manage Shop
 > **Gebouwd + gecommit + subtree-gepusht** (`market-gh main`, `a8767ac..5dbeda1`, lokaal commit
-> `d2f673b`). ⚠️ **NOG NIET GEDEPLOYED** — wacht op akkoord voor de prod-restart (user gevraagd,
-> nog geen antwoord). Draai `./deploy/deploy.sh` zodra ok.
+> `d2f673b`) én **GEDEPLOYED + LIVE** (2026-07-14 12:02, `./deploy/deploy.sh`; service `active`,
+> healthz 200, `/admin/market` 303 oningelogd). Prod draait nu de nieuwe CRUD.
 
 De Manage Shop-pagina (`/admin/market`) had gebrekkige item-CRUD; elk item is nu een volwaardige
 beheerkaart (render + alle acties lokaal e2e geverifieerd tegen een web-only instance):
