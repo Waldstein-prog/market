@@ -170,6 +170,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/coins/restore", post(admin_coins_restore))
         .route("/admin/coins/discard", post(admin_coins_discard))
         .route("/admin/log", get(admin_log))
+        .route("/admin/refund", post(admin_refund))
         .route("/admin/channels", get(admin_channels))
         .route("/admin/channels/add", post(admin_channels_add))
         .route("/admin/channels/remove", post(admin_channels_remove))
@@ -1582,13 +1583,35 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
             db::grant_perma_whitelist(&st.pool, &uid, &hname);
             format!("Permanent Hytale access — whitelisted as {hname}.")
         };
+        // Logboek: pas gekocht (dag/perma) + wie er onder welke Hytale-naam gewhitelist is.
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("shop", if item.duration > 0 { "pass_day" } else { "pass_perma" })
+                .actor(&uid, &name)
+                .reference(item.id as u64)
+                .amount(item.price)
+                .detail(format!("{} → whitelisted as {hname}", item.name)),
+        );
         return Redirect::to(&format!("/market?ok={}&from={}", pct(&msg), oldbal)).into_response();
     }
 
     // --- Gems e.d.: koop = ontgrendelen in de inventory ------------------
     let dest = match db::purchase(&st.pool, &uid, f.item_id, now_secs()) {
         // Geen succesbanner: de Purse telt zelf af naar het nieuwe saldo.
-        Ok((bal, item)) => format!("/market?from={}", bal + item.price),
+        Ok((bal, item)) => {
+            // Logboek: aankoop vastleggen (coins eraf + item ontgrendeld).
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("shop", "buy")
+                    .actor(&uid, &name)
+                    .reference(item.id as u64)
+                    .amount(item.price)
+                    .detail(item.name.clone()),
+            );
+            format!("/market?from={}", bal + item.price)
+        }
         Err(e) => format!("/market?err={}", pct(&e)),
     };
     Redirect::to(&dest).into_response()
@@ -1649,6 +1672,15 @@ async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<B
     db::set_name_color(&st.pool, &uid, &name, &item.color);
     db::set_equipped_gem(&st.pool, &uid, &item.name);
 
+    // Logboek: gem geëquipt (naamkleur gezet + Discord-rol wisselt hieronder).
+    db::log_event(
+        &st.pool,
+        now_secs(),
+        &db::LogEntry::new("gem", "equip")
+            .actor(&uid, &name)
+            .detail(item.name.clone()),
+    );
+
     // Discord-rol toekennen (gem-naam = rolnaam).
     let msg = match st.dc.role_id_by_name(&item.name).await {
         Ok(Some(rid)) => match st.dc.set_role(&uid, &rid, true).await {
@@ -1664,7 +1696,7 @@ async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<B
 /// Gebruik een booster (Lucky Horseshoe): verbruik één exemplaar en zet de
 /// chest-luck-boost aan (dubbele lot-kans bij de eerstvolgende treasure chest).
 async fn use_booster(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
-    let Some((uid, _name)) = require_flowerborn(&st, &headers).await else {
+    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
     };
     let Some(item) = db::get_item(&st.pool, f.item_id) else {
@@ -1674,10 +1706,20 @@ async fn use_booster(State(st): State<AppState>, headers: HeaderMap, Form(f): Fo
         return Redirect::to("/?tab=boosts").into_response();
     }
     let msg = match db::activate_horseshoe(&st.pool, &uid, f.item_id) {
-        Ok(true) => format!(
-            "🍀 {} used — your odds in the next treasure chest are doubled!",
-            item.name
-        ),
+        Ok(true) => {
+            // Logboek: booster verbruikt (chest-luck aan voor de volgende chest).
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("booster", "use")
+                    .actor(&uid, &name)
+                    .detail(item.name.clone()),
+            );
+            format!(
+                "🍀 {} used — your odds in the next treasure chest are doubled!",
+                item.name
+            )
+        }
         Ok(false) => "🍀 You already have a Lucky Horseshoe active for your next chest.".to_string(),
         Err(e) => format!("⚠️ {e}"),
     };
@@ -2054,7 +2096,7 @@ async fn admin_coins(
 }
 
 /// Voer een Add/Set uit op de aangevinkte rekening(en) en bewaar de undo.
-fn apply_coin_op(st: &AppState, f: &CoinOp, set: bool) {
+fn apply_coin_op(st: &AppState, f: &CoinOp, set: bool, admin: &str) {
     let uid = f.user_id.trim();
     if uid.is_empty() {
         return;
@@ -2066,6 +2108,21 @@ fn apply_coin_op(st: &AppState, f: &CoinOp, set: bool) {
     }
     let (pc, pe) = db::admin_adjust(&st.pool, uid, &f.username, f.amount, set, current, alltime);
     db::admin_record_undo(&st.pool, uid, &f.username, pc, pe);
+    // Logboek: welke rekening(en) een admin met hoeveel aanpaste (add/set).
+    let acct = match (current, alltime) {
+        (true, true) => "balance+all-time",
+        (true, false) => "balance",
+        (false, true) => "all-time",
+        (false, false) => "—",
+    };
+    db::log_event(
+        &st.pool,
+        now_secs(),
+        &db::LogEntry::new("admin", if set { "coins_set" } else { "coins_add" })
+            .actor(uid, &f.username)
+            .amount(f.amount)
+            .detail(format!("{acct} · by {admin}")),
+    );
 }
 
 async fn admin_coins_add(
@@ -2073,8 +2130,8 @@ async fn admin_coins_add(
     headers: HeaderMap,
     Form(f): Form<CoinOp>,
 ) -> Response {
-    if require_admin(&st, &headers).is_some() {
-        apply_coin_op(&st, &f, false);
+    if let Some((_uid, admin)) = require_admin(&st, &headers) {
+        apply_coin_op(&st, &f, false, &admin);
     }
     Redirect::to("/admin/coins").into_response()
 }
@@ -2084,15 +2141,20 @@ async fn admin_coins_set(
     headers: HeaderMap,
     Form(f): Form<CoinOp>,
 ) -> Response {
-    if require_admin(&st, &headers).is_some() {
-        apply_coin_op(&st, &f, true);
+    if let Some((_uid, admin)) = require_admin(&st, &headers) {
+        apply_coin_op(&st, &f, true, &admin);
     }
     Redirect::to("/admin/coins").into_response()
 }
 
 async fn admin_coins_undo(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&st, &headers).is_some() {
+    if let Some((_uid, admin)) = require_admin(&st, &headers) {
         db::admin_apply_undo(&st.pool);
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "coins_undo").detail(format!("by {admin}")),
+        );
     }
     Redirect::to("/admin/coins").into_response()
 }
@@ -2107,10 +2169,17 @@ async fn admin_coins_restore(
     headers: HeaderMap,
     Form(f): Form<UidForm>,
 ) -> Response {
-    if require_admin(&st, &headers).is_some() {
+    if let Some((_uid, admin)) = require_admin(&st, &headers) {
         let uid = f.user_id.trim();
         if !uid.is_empty() {
             db::restore_archive(&st.pool, uid);
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "coins_restore")
+                    .actor(uid, "")
+                    .detail(format!("by {admin}")),
+            );
         }
     }
     Redirect::to("/admin/coins").into_response()
@@ -2121,10 +2190,17 @@ async fn admin_coins_discard(
     headers: HeaderMap,
     Form(f): Form<UidForm>,
 ) -> Response {
-    if require_admin(&st, &headers).is_some() {
+    if let Some((_uid, admin)) = require_admin(&st, &headers) {
         let uid = f.user_id.trim();
         if !uid.is_empty() {
             db::discard_archive(&st.pool, uid);
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "coins_discard")
+                    .actor(uid, "")
+                    .detail(format!("by {admin}")),
+            );
         }
     }
     Redirect::to("/admin/coins").into_response()
@@ -2145,6 +2221,8 @@ struct ChannelRemove {
 struct LogQuery {
     #[serde(default)]
     cat: Option<String>, // filter op categorie ('' / afwezig = alles)
+    #[serde(default)]
+    err: Option<String>, // foutmelding na een mislukte refund
 }
 
 /// Server-logboek (admin): alle gelogde events, nieuwste eerst, filterbaar op
@@ -2186,6 +2264,27 @@ async fn admin_log(
             ("chest", "too_late") => ("#e8590c", "⏰ too late"),
             ("chest", "win") => ("#f08c00", "🏆 win"),
             ("chest", "despawn") => ("#adb5bd", "💧 despawn"),
+            // Shop-aankopen
+            ("shop", "buy") => ("#7048e8", "🛒 buy"),
+            ("shop", "pass_day") => ("#1098ad", "🎫 day pass"),
+            ("shop", "pass_perma") => ("#0c8599", "🎟 perma pass"),
+            // Inventory-gebruik
+            ("gem", "equip") => ("#e64980", "💎 equip gem"),
+            ("booster", "use") => ("#66a80f", "🍀 booster"),
+            // Dagelijkse check-in + level-up
+            ("daily", "checkin") => ("#f59f00", "📅 daily"),
+            ("level", "levelup") => ("#f76707", "⬆ level-up"),
+            // Twitch-whitelist
+            ("twitch", "whitelist") => ("#9146FF", "🟣 twitch pass"),
+            ("twitch", "rejected") => ("#e03131", "🚫 twitch reject"),
+            // Admin-ingrepen
+            ("admin", "coins_add") => ("#495057", "➕ coins add"),
+            ("admin", "coins_set") => ("#343a40", "🖊 coins set"),
+            ("admin", "coins_undo") => ("#868e96", "↶ undo"),
+            ("admin", "coins_restore") => ("#2b8a3e", "♻ restore"),
+            ("admin", "coins_discard") => ("#c92a2a", "🗑 discard"),
+            ("admin", "reset_collection") => ("#a61e4d", "🧪 test reset"),
+            ("admin", "refund") => ("#1971c2", "↩ refund"),
             _ => ("#868e96", event),
         };
         format!(
@@ -2194,8 +2293,29 @@ async fn admin_log(
         )
     };
 
+    // Refund-actie: enkel op shop-aankopen. Nog niet gerefund → knop; anders een tag.
+    let cat_hidden = match active {
+        Some(c) => format!("<input type=\"hidden\" name=\"cat\" value=\"{}\">", esc(c)),
+        None => String::new(),
+    };
+    let action = |r: &db::LogRow| -> String {
+        if r.category != "shop" {
+            return String::new();
+        }
+        if r.refunded {
+            return "<span class=\"muted refd\">↩ refunded</span>".to_string();
+        }
+        format!(
+            "<form method=\"post\" action=\"/admin/refund\" class=\"iform\" \
+               onsubmit=\"return confirm('Refund this purchase? Coins go back and the item/pass is removed.')\">\
+               <input type=\"hidden\" name=\"log_id\" value=\"{id}\">{cat_hidden}\
+               <button class=\"refbtn\" type=\"submit\">↩ Refund</button></form>",
+            id = r.id,
+        )
+    };
+
     let body_rows: String = if rows.is_empty() {
-        "<tr><td colspan=\"5\" class=\"muted\">No events logged yet.</td></tr>".to_string()
+        "<tr><td colspan=\"6\" class=\"muted\">No events logged yet.</td></tr>".to_string()
     } else {
         rows.iter()
             .map(|r| {
@@ -2215,10 +2335,12 @@ async fn admin_log(
                        <td>{actor}</td>\
                        <td class=\"amt\">{amt}</td>\
                        <td class=\"det\">{detail}</td>\
+                       <td class=\"act\">{action}</td>\
                      </tr>",
                     ts = r.ts as i64,
                     badge = badge(&r.category, &r.event),
                     detail = esc(&r.detail),
+                    action = action(r),
                 )
             })
             .collect()
@@ -2241,13 +2363,24 @@ async fn admin_log(
         .badge{display:inline-block;padding:.12rem .5rem;border-radius:.4rem;color:#fff;font-size:.8rem;white-space:nowrap}\
         .amt{text-align:right;white-space:nowrap}\
         .det{color:#495057}\
+        .act{white-space:nowrap;text-align:right}\
+        .iform{display:inline;margin:0}\
+        .refbtn{cursor:pointer;border:1px solid #1971c2;background:#e7f5ff;color:#1971c2;\
+          border-radius:.4rem;padding:.15rem .55rem;font-size:.8rem}\
+        .refbtn:hover{background:#1971c2;color:#fff}\
+        .refd{font-size:.8rem}\
         </style>";
 
+    let err_banner = match q.err.as_deref().filter(|e| !e.is_empty()) {
+        Some(e) => format!("<p class=\"notice err\">⚠️ {}</p>", esc(e)),
+        None => String::new(),
+    };
+
     let body = format!(
-        "{style}<h1>📜 Server log</h1>\
+        "{style}<h1>📜 Server log</h1>{err_banner}\
          <div class=\"chips\">{filters}</div>\
          <table class=\"log\"><thead><tr>\
-           <th>When</th><th>Event</th><th>Who</th><th>Amount</th><th>Detail</th>\
+           <th>When</th><th>Event</th><th>Who</th><th>Amount</th><th>Detail</th><th></th>\
          </tr></thead><tbody>{body_rows}</tbody></table>{ts_js}{AUTO_REFRESH_JS}"
     );
     let body = format!("{}{}", admin_subtabs("log"), body);
@@ -2258,6 +2391,61 @@ async fn admin_log(
         &body,
     ))
     .into_response()
+}
+
+#[derive(Deserialize)]
+struct RefundForm {
+    log_id: i64,
+    #[serde(default)]
+    cat: Option<String>, // om na de refund terug naar dezelfde filter te keren
+}
+
+/// Draai één shop-aankoop terug vanaf de logpagina: coins terug, item weg,
+/// neveneffecten (whitelist/perma/gem-rol) ingetrokken, en de logrij gemarkeerd.
+async fn admin_refund(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<RefundForm>,
+) -> Response {
+    let back = match f.cat.as_deref().filter(|c| !c.is_empty()) {
+        Some(c) => format!("/admin/log?cat={c}"),
+        None => "/admin/log".to_string(),
+    };
+    let Some((admin_uid, admin)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    match db::refund_purchase(&st.pool, f.log_id) {
+        Ok(out) => {
+            // Gem-rol op Discord intrekken bij de kóper (db-laag kon dat niet async doen).
+            if !out.gem_role_removed.is_empty() && !out.buyer_uid.is_empty() {
+                if let Ok(Some(rid)) = st.dc.role_id_by_name(&out.gem_role_removed).await {
+                    let _ = st.dc.set_role(&out.buyer_uid, &rid, false).await;
+                }
+            }
+            // De refund zelf loggen (audittrail), met wie 'm uitvoerde.
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "refund")
+                    .actor(&admin_uid, &admin)
+                    .amount(out.amount)
+                    .detail(format!("refunded {} · by {admin}", out.item_name)),
+            );
+        }
+        Err(e) => {
+            return Redirect::to(&format!("{back}{}err={}", sep(&back), pct(&e))).into_response();
+        }
+    }
+    Redirect::to(&back).into_response()
+}
+
+/// '?' of '&' kiezen om een querystring aan een URL te hangen.
+fn sep(url: &str) -> &'static str {
+    if url.contains('?') {
+        "&"
+    } else {
+        "?"
+    }
 }
 
 /// Beheer de lijst van kanalen waar coins verdiend kunnen worden.
@@ -2622,6 +2810,15 @@ async fn admin_reset_collection(State(st): State<AppState>, headers: HeaderMap) 
             }
         }
         let refunded = db::reset_test_collection(&st.pool, &uid);
+        // Logboek: test-reset (coins terug + collectie/passen/whitelist gewist).
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "reset_collection")
+                .actor(&uid, &_name)
+                .amount(refunded)
+                .detail("test reset — collection + passes/whitelist cleared"),
+        );
         let msg = format!(
             "🧪 Test reset — refunded {refunded} coins, cleared your collection and removed passes/whitelist."
         );

@@ -138,6 +138,8 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "items", "image2", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "inventory", "item_id", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
+    // Refund-vlag op shop-aankopen in het logboek: 0 = nog terug te draaien, 1 = al gerefund.
+    ensure_column(&conn, "server_log", "refunded", "INTEGER NOT NULL DEFAULT 0");
     // Hytale-tickets zijn boosts (voor de Boosts-tab).
     conn.execute(
         "UPDATE items SET category='boost' WHERE name IN ('Hytale Day Pass','Hytale Permanent Pass')",
@@ -1662,6 +1664,150 @@ pub fn reset_test_collection(pool: &DbPool, uid: &str) -> i64 {
     refund
 }
 
+/// Uitkomst van een refund. `gem_role_removed` is niet-leeg als de web-laag nadien
+/// nog een Discord-gem-rol moet intrekken (de db-laag kan niet async met Discord praten).
+pub struct RefundOutcome {
+    pub buyer_uid: String,
+    pub item_name: String,
+    pub amount: i64, // teruggestorte coins
+    pub gem_role_removed: String,
+}
+
+/// Draai één shop-aankoop terug op basis van de logrij-id. Idempotent: een al
+/// gerefunde/onbekende rij of een niet-shop-event levert `Err`. Coins gaan terug,
+/// het item verlaat de inventory en de neveneffecten (whitelist/perma/gem-kleur) worden
+/// mee teruggedraaid. De eventueel in te trekken Discord-gem-rol komt terug in de uitkomst.
+pub fn refund_purchase(pool: &DbPool, log_id: i64) -> Result<RefundOutcome, String> {
+    let mut conn = pool.get().expect("db");
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // Logrij ophalen + valideren: enkel een niet-gerefunde shop-aankoop is terugdraaibaar.
+    let (category, event, uid, ref_id, amount, refunded): (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+    ) = tx
+        .query_row(
+            "SELECT category, event, actor_uid, ref_id, amount, refunded
+               FROM server_log WHERE id = ?1",
+            params![log_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("Log entry not found.")?;
+    if category != "shop" {
+        return Err("Only shop purchases can be refunded.".into());
+    }
+    if refunded != 0 {
+        return Err("This purchase was already refunded.".into());
+    }
+    let item_id: i64 = ref_id.parse().unwrap_or(0);
+    if uid.is_empty() || item_id == 0 {
+        return Err("This purchase predates refund support (no item reference).".into());
+    }
+
+    // De concrete inventory-rij van deze aankoop draagt naam + prijs, ook als het shop-item
+    // nadien verwijderd is. Ontbreekt ze (item al verbruikt/gewist), dan refunden we alsnog
+    // de gelogde prijs en draaien we de neveneffecten terug.
+    let inv: Option<(i64, String, i64)> = tx
+        .query_row(
+            "SELECT id, name, price FROM inventory
+               WHERE user_id = ?1 AND item_id = ?2 ORDER BY id LIMIT 1",
+            params![uid, item_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let (inv_id, item_name, price) = match inv {
+        Some((id, name, p)) => (Some(id), name, p),
+        None => (None, String::new(), amount.unwrap_or(0)),
+    };
+
+    // Coins terug + inventory-rij (indien nog aanwezig) weg.
+    if price > 0 {
+        tx.execute("UPDATE coins SET coins = coins + ?2 WHERE user_id = ?1", params![uid, price])
+            .ok();
+    }
+    if let Some(id) = inv_id {
+        tx.execute("DELETE FROM inventory WHERE id = ?1", params![id]).ok();
+    }
+
+    // Neveneffecten terugdraaien op basis van het event-type.
+    let mut gem_role_removed = String::new();
+    match event.as_str() {
+        // Pas-refund: whitelist-grant weg (tale-bot reconcilet). NB: dit trekt de héle
+        // whitelist van dit lid in — bij gestapelde passen sneuvelt alles ineens.
+        "pass_day" | "pass_perma" => {
+            tx.execute("DELETE FROM hytale_whitelist WHERE user_id = ?1", params![uid]).ok();
+            if event == "pass_perma" {
+                tx.execute("UPDATE coins SET perma_access = 0 WHERE user_id = ?1", params![uid])
+                    .ok();
+            }
+        }
+        // Gewone aankoop: gem of booster.
+        _ => {
+            // Naam (voor de gem-vergelijking): liefst uit de inventory, anders uit items.
+            let gem_name = if !item_name.is_empty() {
+                item_name.clone()
+            } else {
+                tx.query_row(
+                    "SELECT name FROM items WHERE id = ?1",
+                    params![item_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+            };
+            // Was dit de geëquipte gem? Dan naamkleur + equipped wissen en de rol laten intrekken.
+            let equipped: String = tx
+                .query_row(
+                    "SELECT equipped_gem FROM coins WHERE user_id = ?1",
+                    params![uid],
+                    |r| r.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if !gem_name.is_empty() && equipped.eq_ignore_ascii_case(&gem_name) {
+                tx.execute(
+                    "UPDATE coins SET equipped_gem = '', name_color = '' WHERE user_id = ?1",
+                    params![uid],
+                )
+                .ok();
+                gem_role_removed = gem_name;
+            }
+            // Booster-refund: een eventueel nog actieve chest-luck-boost ongedaan maken.
+            let cat: Option<String> = tx
+                .query_row("SELECT category FROM items WHERE id = ?1", params![item_id], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if cat.as_deref() == Some("booster") {
+                tx.execute("UPDATE coins SET chest_luck = 0 WHERE user_id = ?1", params![uid]).ok();
+            }
+        }
+    }
+
+    // Logrij als gerefund markeren (knop verdwijnt, geen dubbele refund).
+    tx.execute("UPDATE server_log SET refunded = 1 WHERE id = ?1", params![log_id]).ok();
+    tx.commit().map_err(|e| e.to_string())?;
+
+    let name = if item_name.is_empty() {
+        format!("item #{item_id}")
+    } else {
+        item_name
+    };
+    Ok(RefundOutcome { buyer_uid: uid, item_name: name, amount: price, gem_role_removed })
+}
+
 /// Alle gems van een categorie ('primary'|'secondary'|'prism'), op positie.
 #[allow(dead_code)]
 pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
@@ -1853,6 +1999,7 @@ pub struct LogRow {
     pub ref_id: String,
     pub amount: Option<i64>,
     pub detail: String,
+    pub refunded: bool,
 }
 
 /// De recentste events, nieuwste eerst. `category = None` = alle categorieën.
@@ -1870,9 +2017,10 @@ pub fn recent_log(pool: &DbPool, category: Option<&str>, limit: usize) -> Vec<Lo
             ref_id: r.get(7)?,
             amount: r.get(8)?,
             detail: r.get(9)?,
+            refunded: r.get::<_, i64>(10)? != 0,
         })
     };
-    let cols = "id, ts, category, event, actor_uid, actor_name, channel_id, ref_id, amount, detail";
+    let cols = "id, ts, category, event, actor_uid, actor_name, channel_id, ref_id, amount, detail, refunded";
     match category {
         Some(cat) => {
             let mut stmt = conn

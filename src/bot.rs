@@ -202,6 +202,15 @@ async fn handle_message(
             if gift > 0 {
                 db::admin_add_coins(&data.pool, &uid, &name, gift);
             }
+            // Logboek: level-up + de 1%-bonus (discreet coin-cadeau, geen per-bericht-ruis).
+            db::log_event(
+                &data.pool,
+                now,
+                &db::LogEntry::new("level", "levelup")
+                    .actor(&uid, &name)
+                    .amount(gift)
+                    .detail(format!("reached level {new_level}")),
+            );
             let new_bal = total + gift;
             let txt = if gift > 0 {
                 format!("🎉 <@{uid}> reached **Level {new_level}**! A **1% bonus** landed in their purse: **+{gift}** {COIN_EMOJI} — balance now **{new_bal}**.")
@@ -371,6 +380,15 @@ async fn handle_daily(
     let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
     let day_word = if streak == 1 { "day" } else { "days" };
     tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
+    // Logboek: dagelijkse check-in (bedrag + streak) — zodat coin-instroom te volgen is.
+    db::log_event(
+        &data.pool,
+        now,
+        &db::LogEntry::new("daily", "checkin")
+            .actor(&uid, &name)
+            .amount(amount)
+            .detail(format!("streak {streak} · balance {total}")),
+    );
     // Interactie stil bevestigen — GEEN ephemeral bij een geslaagde claim (de feedback
     // komt publiek in #coins). Vroeg acken zodat we ruim binnen de 3s-limiet blijven.
     let _ = mc

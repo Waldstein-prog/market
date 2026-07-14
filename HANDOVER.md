@@ -1,4 +1,4 @@
-# Handover — Meadow Market (2026-07-14)
+# Handover — Meadow Market (2026-07-14 nacht)
 
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
@@ -13,6 +13,55 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 (2026-07-13, met nadruk). Alle feedback = **publiek kanaalbericht** of een **ephemeral** (enkel
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
+
+## ⏭️ Sessie (2026-07-14 nacht) — volledige market-event-logging + refunds op de logpagina, LIVE
+> **GEBOUWD + GEDEPLOYD + LIVE + geverifieerd + GECOMMIT/GEPUSHT** (`deploy.sh` → systemd `market`
+> `active (running)`, geen errors/panics in de opstartlogs, migratie schoon; `refunded`-kolom bevestigd
+> aanwezig op de prod-`coins.db`; nadien gecommit op `master` + subtree-gepusht `market-gh main`).
+
+**Aanleiding:** chest-debugging leerde dat er bij een drukke market dingen kunnen mislopen; we
+wilden op een **audittrail** kunnen terugvallen om alles recht te zetten. Het bestaande server-log
+(enkel chest-events) is nu uitgebreid naar **alle relevante market-events** + admins kunnen
+aankopen **terugdraaien** vanaf diezelfde logpagina.
+
+**1) Uitgebreide event-logging** (hergebruikt de bestaande generieke `db::log_event`/`LogEntry`;
+elke call faalt zacht → kan bot/site nooit crashen). Nieuwe categorieën + badges op `/admin/log`
+(filterknoppen verschijnen automatisch):
+- **`shop`** — `buy` (gewone aankoop/gem/collectible), `pass_day`, `pass_perma` (met Hytale-naam in detail).
+  Dragen nu **`ref_id = item_id`** zodat een refund weet wát terug te draaien. *(`web.rs` `buy`)*
+- **`gem` / `equip`** — gem geëquipt *(web.rs `use_gem`)*; **`booster` / `use`** — hoefijzer verbruikt *(`use_booster`)*.
+- **`daily` / `checkin`** (bedrag + streak + saldo, `bot.rs handle_daily`) en **`level` / `levelup`**
+  (1%-bonus + bereikt level, `bot.rs`). **Per-bericht-coins bewust NIET gelogd** (te veel ruis;
+  daar dient `earn_log` al voor).
+- **`twitch` / `whitelist`** (channel-points-pas toegekend) + **`twitch` / `rejected`** (ongeldige naam,
+  refund van de punten) *(`twitch.rs on_redeem`)*.
+- **`admin`** — `coins_add`/`coins_set` (mét welke admin: `by <naam>`), `coins_undo`, `coins_restore`,
+  `coins_discard`, `reset_collection` *(`web.rs`, `apply_coin_op` kreeg een `admin`-param)*.
+
+**2) Refunds op de logpagina** (user koos: op het log, niet als aparte tab; **volledige** terugdraai):
+- Elke **shop-aankoop-rij** krijgt een **`↩ Refund`**-knop (met confirm); al gerefund → grijze
+  `↩ refunded`-tag; niet-shop-rijen geen knop. Extra tabel-kolom + CSS in `admin_log`.
+- **`db::refund_purchase(pool, log_id)`** (één transactie, spiegelt `reset_test_collection` maar per-item):
+  coins terug (prijs uit de **inventory-rij** — klopt ook als het shop-item nadien gewijzigd/verwijderd is),
+  inventory-rij weg, en neveneffecten per **event-type**: pas → whitelist-grant weg (+perma → `perma_access=0`);
+  geëquipte gem → `equipped_gem`/`name_color` leeg + **Discord-rol intrekken bij de koper** (async in de
+  handler, via `RefundOutcome.gem_role_removed` + `buyer_uid`); booster → `chest_luck=0`. Rij markeert
+  `refunded=1`, en de refund zelf wordt gelogd als **`admin/refund`** (mét welke admin).
+- **`/admin/refund`**-route + `admin_refund`-handler (admin-only); mislukte refund → **foutbanner** op het
+  log (`LogQuery.err`). Nieuwe kolom **`server_log.refunded`** via `ensure_column` (additief/idempotent).
+
+**Getest:** `cargo build` groen (enkel bestaande `role_id`-warning); alle refund-SQL gevalideerd tegen
+een **kopie van de echte `coins.db`** + een **volledige refund-simulatie** (380→500 coins, inventory
+leeg, gem unequipped, `refunded=1`). Prod na deploy: geen errors, `refunded`-kolom bevestigd, `/admin/log`
+→ 303 oningelogd.
+
+**⚠️ Belangrijk / grenzen:**
+- Logt + refundt **vanaf deze deploy vooruit** — oudere aankopen staan niet in het log en zijn niet via
+  de knop terug te draaien (daarvoor blijft de handmatige **Coins-management**-tab).
+- Een **pas-refund trekt de héle whitelist** van dat lid in — bij gestapelde dagpassen sneuvelt alles
+  ineens (staat als comment in de code).
+- **Git:** gecommit + subtree-gepusht (`market-gh main`). De 2026-07-13-server-log-sessie zat al in
+  HEAD (commit `515cb9c`) — die "nog niet gecommit"-noot verderop was stale, geen echte schuld meer.
 
 ## ⏭️ Sessie (2026-07-14 late) — Lucky Horseshoe-effect LIVE (chest-luck) + pas-check
 > Gebouwd, **op dev getest** (web-only, `MARKET_WEB_ONLY=1` op een DB-kopie met gesmede sessie),
@@ -257,7 +306,7 @@ Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten 
   - **Code:** `db.rs` (tabel + `LogEntry`/`log_event`/`LogRow`/`recent_log`/`log_categories`),
     `bot.rs` (`recent` draagt nu ook de naam; `do_spawn_chest` neemt `triggers` + geeft `msg_id`
     terug; logging in `maybe_spawn_chest`/`handle_chest_click`/`pop_chest`), `web.rs` (`admin_log`
-    + route + nav-tab). **Nog NIET gecommit/gepusht in git.**
+    + route + nav-tab). *(Intussen wél gecommit — commit `515cb9c`.)*
 
 ## 📝 Open TODO's
 - **Shop-graphics**: de shop toont nu álle schappen; gems/boosters zonder afbeelding renderen als

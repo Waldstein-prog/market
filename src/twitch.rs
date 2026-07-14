@@ -267,6 +267,14 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
                 ))
                 .await;
                 tracing::info!("Twitch-redeem geweigerd (lege/ongeldige naam): {login}");
+                // Logboek: geweigerde redeem (punten teruggegeven) — voor de audittrail.
+                db::log_event(
+                    &ctx.pool,
+                    now_epoch(),
+                    &db::LogEntry::new("twitch", "rejected")
+                        .actor(&uid, login)
+                        .detail(format!("invalid Hytale name: '{user_input}' — refunded")),
+                );
                 return;
             }
         },
@@ -276,6 +284,15 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
     let add_secs = ctx.pass_hours as f64 * 3600.0;
     let expires = db::grant_day_whitelist(&ctx.pool, &uid, &name, add_secs, now);
     ctx.set_redemption_status(redemption_id, true).await;
+
+    // Logboek: Twitch-pas toegekend (whitelist-grant) — bindt kijker aan Hytale-naam.
+    db::log_event(
+        &ctx.pool,
+        now,
+        &db::LogEntry::new("twitch", "whitelist")
+            .actor(&uid, &name)
+            .detail(format!("{login} → {name} · {}h", ctx.pass_hours)),
+    );
 
     let reg = if first_time { " (naam nu vastgezet)" } else { "" };
     ctx.chat(&format!(
