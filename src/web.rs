@@ -44,6 +44,12 @@ const KEEP_SCROLL_JS: &str = "<script>(function(){var K='mmScroll:'+location.pat
 var y=sessionStorage.getItem(K);if(y!==null){sessionStorage.removeItem(K);\
 window.scrollTo(0,+y);}document.addEventListener('submit',function(){\
 sessionStorage.setItem(K,window.scrollY);},true);})();</script>";
+/// Na een bewaaractie: strip de ?saved-parameter uit de URL (zodat een refresh
+/// niet opnieuw flitst) en laat de "✓ Saved"-badge na 2,5s wegfaden.
+const SAVED_FLASH_JS: &str = "<script>(function(){\
+if(location.search.indexOf('saved=')>-1){history.replaceState({},'',location.pathname);}\
+setTimeout(function(){document.querySelectorAll('.savedflash').forEach(function(e){e.style.opacity='0';});},2500);\
+})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 
 #[derive(Clone)]
@@ -83,6 +89,9 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/add", post(admin_item_add))
         .route("/admin/item/update", post(admin_item_update))
         .route("/admin/item/delete", post(admin_item_delete))
+        .route("/admin/item/move", post(admin_item_move))
+        .route("/admin/item/shelf", post(admin_item_shelf))
+        .route("/admin/item/image/clear", post(admin_item_image_clear))
         .route("/admin/coins", get(admin_coins))
         .route("/admin/coins/add", post(admin_coins_add))
         .route("/admin/coins/set", post(admin_coins_set))
@@ -368,8 +377,17 @@ a.link{{color:{MEADOW}}}
 .btn.ghost{{background:#2c3d2a;color:#cfe0c8}}
 .btn.danger{{background:#7a2f28;color:#f3d9d4}}
 .aitems{{display:flex;flex-wrap:wrap;gap:.7rem;align-items:flex-start;margin-top:.5rem}}
-.aitem{{width:152px;background:#141d14;border:1px solid #2c3d2a;border-radius:12px;
+.aitem{{position:relative;width:168px;background:#141d14;border:1px solid #2c3d2a;border-radius:12px;
   padding:.6rem;display:flex;flex-direction:column;gap:.4rem}}
+.savedflash{{position:absolute;top:.45rem;right:.45rem;z-index:2;background:#2f7a3a;
+  color:#eafff0;font-size:.66rem;font-weight:800;padding:.15rem .45rem;border-radius:6px;
+  box-shadow:0 1px 4px rgba(0,0,0,.4);transition:opacity .6s}}
+.aitem .save{{width:100%;margin-top:.1rem}}
+.arow{{display:flex;gap:.3rem;align-items:center}}
+.arow .iform{{margin:0}}
+.arow form:last-child{{margin-left:auto}}
+.mvshelf{{display:flex;gap:.3rem;align-items:center;margin-top:.1rem}}
+.mvshelf select{{flex:1;min-width:0}}
 .aitem .thumb{{aspect-ratio:1;border:1px solid #26331f;border-radius:9px;
   background:#0e1510;display:grid;place-items:center;overflow:hidden}}
 .aitem .thumb img{{max-width:100%;max-height:100%;object-fit:contain;border-radius:9px}}
@@ -1391,32 +1409,82 @@ fn human_duration(secs: i64) -> String {
 // --- admin: market-beheer ----------------------------------------------
 
 /// Eén item-editor op de beheerpagina: thumb, naam, prijs, upload, verwijder.
-fn admin_item(it: &db::Item) -> String {
+fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> String {
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
+
+    // Bevestigings-flits na een bewaaractie (?saved=<id>).
+    let flash = if saved == Some(it.id) {
+        "<div class=\"savedflash\">✓ Saved</div>"
+    } else {
+        ""
+    };
+
+    // "Remove image" enkel tonen als er een geüploade afbeelding is.
+    let remove_img = if it.image.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<form method=\"post\" action=\"/admin/item/image/clear\" class=\"iform\">\
+               <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+               <button class=\"btn small ghost\" type=\"submit\">Remove image</button></form>",
+            id = it.id,
+        )
+    };
+
+    // Schap-verplaatsing: enkel voor schap-items en enkel als er >1 schap is.
+    let move_shelf = if it.zone == "shelf" && shelves.len() > 1 {
+        let opts: String = shelves
+            .iter()
+            .map(|(sid, title)| {
+                let s = if it.shelf_id == Some(*sid) { " selected" } else { "" };
+                format!("<option value=\"{sid}\"{s}>{}</option>", esc(title))
+            })
+            .collect();
+        format!(
+            "<form method=\"post\" action=\"/admin/item/shelf\" class=\"mvshelf\">\
+               <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+               <select name=\"shelf_id\" title=\"Move to shelf\">{opts}</select>\
+               <button class=\"btn small ghost\" type=\"submit\">Move</button></form>",
+            id = it.id,
+        )
+    } else {
+        String::new()
+    };
+
     format!(
-        "<div class=\"aitem\"><div class=\"thumb\">{thumb}</div>\
+        "<div class=\"aitem\" id=\"item-{id}\">{flash}<div class=\"thumb\">{thumb}</div>\
          <form method=\"post\" action=\"/admin/item/update\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <input name=\"name\" value=\"{name}\" placeholder=\"name\">\
-           <div class=\"prow\">\
-             <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"price\">\
-             <button class=\"btn small\" type=\"submit\">✓</button></div>\
+           <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\" placeholder=\"price\">\
            <input name=\"description\" value=\"{desc}\" placeholder=\"description\">\
-           <select name=\"category\"><option value=\"\"{c0}>— no gem —</option>\
-             <option value=\"primary\"{cp}>primary</option>\
-             <option value=\"secondary\"{cs}>secondary</option>\
-             <option value=\"prism\"{cpr}>prism</option></select>\
+           <select name=\"category\">\
+             <option value=\"\"{c0}>— plain item —</option>\
+             <option value=\"boost\"{cb}>Hytale pass (boost)</option>\
+             <option value=\"primary\"{cp}>gem · primary</option>\
+             <option value=\"secondary\"{cs}>gem · secondary</option>\
+             <option value=\"prism\"{cpr}>gem · prism</option></select>\
            <input name=\"role_id\" value=\"{role}\" placeholder=\"role ID (granted on buy)\">\
            <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\" \
-             placeholder=\"duration in min (0 = permanent)\"></form>\
+             placeholder=\"duration in min (0 = permanent)\">\
+           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>\
          <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <input type=\"file\" name=\"file\" accept=\"image/*\">\
-           <button class=\"btn small ghost\" type=\"submit\">Upload</button></form>\
-         <form method=\"post\" action=\"/admin/item/delete\" onsubmit=\"return confirm('Delete item?')\">\
-           <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-           <button class=\"btn small danger\" type=\"submit\">Delete</button></form></div>",
+           <button class=\"btn small ghost\" type=\"submit\">Upload</button></form>{remove_img}\
+         <div class=\"arow\">\
+           <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
+             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+             <input type=\"hidden\" name=\"dir\" value=\"-1\">\
+             <button class=\"btn small ghost\" type=\"submit\" title=\"Move left\">◀</button></form>\
+           <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
+             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+             <input type=\"hidden\" name=\"dir\" value=\"1\">\
+             <button class=\"btn small ghost\" type=\"submit\" title=\"Move right\">▶</button></form>\
+           <form method=\"post\" action=\"/admin/item/delete\" class=\"iform\" onsubmit=\"return confirm('Delete item?')\">\
+             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+             <button class=\"btn small danger\" type=\"submit\">Delete</button></form></div>{move_shelf}</div>",
         thumb = item_thumb(it),
         id = it.id,
         name = esc(&it.name),
@@ -1424,20 +1492,30 @@ fn admin_item(it: &db::Item) -> String {
         role = esc(&it.role_id),
         desc = esc(&it.description),
         c0 = sel(""),
+        cb = sel("boost"),
         cp = sel("primary"),
         cs = sel("secondary"),
         cpr = sel("prism"),
     )
 }
 
-async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Response {
+async fn admin_market(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SavedQuery>,
+) -> Response {
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
-    let shelves: String = db::list_shelves(&st.pool)
+    let saved = q.saved;
+    let all_shelves = db::list_shelves(&st.pool);
+    let shelves: String = all_shelves
         .iter()
         .map(|(sid, title)| {
-            let items: String = db::shelf_items(&st.pool, *sid).iter().map(admin_item).collect();
+            let items: String = db::shelf_items(&st.pool, *sid)
+                .iter()
+                .map(|it| admin_item(it, &all_shelves, saved))
+                .collect();
             format!(
                 "<section class=\"ashelf\"><div class=\"ashelf-head\">\
                    <form class=\"rn\" method=\"post\" action=\"/admin/shelf/rename\">\
@@ -1457,7 +1535,10 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
         })
         .collect();
 
-    let lucky_items: String = db::lucky_items(&st.pool).iter().map(admin_item).collect();
+    let lucky_items: String = db::lucky_items(&st.pool)
+        .iter()
+        .map(|it| admin_item(it, &all_shelves, saved))
+        .collect();
     let lucky = format!(
         "<section class=\"ashelf\"><div class=\"ashelf-head\"><b>🍀 Lucky items</b></div>\
          <div class=\"aitems\">{lucky_items}\
@@ -1470,7 +1551,7 @@ async fn admin_market(State(st): State<AppState>, headers: HeaderMap) -> Respons
         "<h1>⚙ Shop management</h1>{shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
            <input name=\"title\" placeholder=\"New shelf name\" required>\
-           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}"
+           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}"
     );
     let body = format!("{}{}", admin_subtabs("market"), body);
     Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true, ""), true, &body)).into_response()
@@ -1956,6 +2037,21 @@ struct ItemAdd {
     shelf_id: Option<i64>,
 }
 #[derive(Deserialize)]
+struct ItemMove {
+    id: i64,
+    dir: i64,
+}
+#[derive(Deserialize)]
+struct ItemShelf {
+    id: i64,
+    shelf_id: i64,
+}
+#[derive(Deserialize)]
+struct SavedQuery {
+    #[serde(default)]
+    saved: Option<i64>,
+}
+#[derive(Deserialize)]
 struct ItemUpdate {
     id: i64,
     #[serde(default)]
@@ -2040,6 +2136,7 @@ async fn admin_item_update(
             f.category.trim(),
             f.description.trim(),
         );
+        return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
     Redirect::to("/admin/market").into_response()
 }
@@ -2051,6 +2148,43 @@ async fn admin_item_delete(
 ) -> Response {
     if require_admin(&st, &headers).is_some() {
         db::delete_item(&st.pool, f.id);
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+/// Item één plaats naar links/rechts binnen z'n zone/schap verschuiven.
+async fn admin_item_move(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ItemMove>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::move_item(&st.pool, f.id, f.dir);
+    }
+    Redirect::to("/admin/market").into_response()
+}
+
+/// Schap-item naar een ander schap verplaatsen.
+async fn admin_item_shelf(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ItemShelf>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::set_item_shelf(&st.pool, f.id, f.shelf_id);
+    }
+    Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
+}
+
+/// Geüploade afbeelding van een item wissen (terug naar kleur-thumb).
+async fn admin_item_image_clear(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<IdForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::clear_item_image(&st.pool, f.id);
+        return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
     Redirect::to("/admin/market").into_response()
 }

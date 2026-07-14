@@ -995,6 +995,8 @@ pub struct Item {
     pub duration: i64, // 0 = permanent, >0 = seconden
     pub category: String,
     pub description: String,
+    pub zone: String,           // 'shelf' | 'lucky'
+    pub shelf_id: Option<i64>,  // NULL voor lucky
 }
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
@@ -1008,6 +1010,8 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         duration: r.get("duration")?,
         category: r.get("category")?,
         description: r.get("description")?,
+        zone: r.get("zone")?,
+        shelf_id: r.get("shelf_id")?,
     })
 }
 
@@ -1028,7 +1032,7 @@ pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
+            "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items
              WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
         )
         .expect("prepare shelf_items");
@@ -1041,7 +1045,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
+            "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items
              WHERE zone = 'lucky' ORDER BY position, id",
         )
         .expect("prepare lucky_items");
@@ -1053,7 +1057,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
 pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT id, name, price, image, color, role_id, duration, category, description FROM items WHERE id = ?1",
+        "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items WHERE id = ?1",
         params![id],
         row_to_item,
     )
@@ -1132,6 +1136,87 @@ pub fn set_item_image(pool: &DbPool, id: i64, image: &str) {
     let conn = pool.get().expect("db");
     conn.execute("UPDATE items SET image = ?2 WHERE id = ?1", params![id, image])
         .expect("set image");
+}
+
+/// Afbeelding van een item wissen (terug naar kleur-thumb / bol).
+pub fn clear_item_image(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE items SET image = '' WHERE id = ?1", params![id])
+        .expect("clear image");
+}
+
+/// Verplaats een item één plaats naar links (dir<0) of rechts (dir>0) binnen
+/// z'n eigen zone/schap. Herschrijft de posities lineair, dus ook robuust bij
+/// gelijke/oude posities.
+pub fn move_item(pool: &DbPool, id: i64, dir: i64) {
+    if dir == 0 {
+        return;
+    }
+    let conn = pool.get().expect("db");
+    let Some((zone, shelf)) = conn
+        .query_row(
+            "SELECT zone, shelf_id FROM items WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .expect("q item zone")
+    else {
+        return;
+    };
+    // Geordende siblings in dezelfde zone/schap.
+    let mut ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM items WHERE zone = ?1 AND IFNULL(shelf_id,-1) = IFNULL(?2,-1)
+                 ORDER BY position, id",
+            )
+            .expect("prepare siblings");
+        stmt.query_map(params![zone, shelf], |r| r.get::<_, i64>(0))
+            .expect("query siblings")
+            .filter_map(Result::ok)
+            .collect()
+    };
+    let Some(i) = ids.iter().position(|x| *x == id) else {
+        return;
+    };
+    let j = if dir < 0 {
+        if i == 0 {
+            return;
+        }
+        i - 1
+    } else {
+        if i + 1 >= ids.len() {
+            return;
+        }
+        i + 1
+    };
+    ids.swap(i, j);
+    for (pos, iid) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE items SET position = ?2 WHERE id = ?1",
+            params![iid, pos as i64],
+        )
+        .expect("renumber");
+    }
+}
+
+/// Verplaats een schap-item naar een ander schap (achteraan toegevoegd).
+/// Alleen zone='shelf'-items; lucky-items blijven ongemoeid.
+pub fn set_item_shelf(pool: &DbPool, id: i64, shelf_id: i64) {
+    let conn = pool.get().expect("db");
+    let pos: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM items WHERE zone='shelf' AND shelf_id = ?1",
+            params![shelf_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    conn.execute(
+        "UPDATE items SET shelf_id = ?2, position = ?3 WHERE id = ?1 AND zone = 'shelf'",
+        params![id, shelf_id, pos],
+    )
+    .expect("move item shelf");
 }
 
 pub fn delete_item(pool: &DbPool, id: i64) {
@@ -1351,7 +1436,7 @@ pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration, category, description FROM items
+            "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items
              WHERE category = ?1 ORDER BY position, id",
         )
         .expect("prepare gems_by_category");
