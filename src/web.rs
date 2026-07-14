@@ -990,7 +990,7 @@ fn inventory_home(
            ts.forEach(function(b){{b.addEventListener('click',function(){{\
              ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
              document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
-             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>",
+             document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>{KEEP_SCROLL_JS}",
         uname = esc(name),
         ca = cls("coins"),
         cg = cls("gems"),
