@@ -887,14 +887,12 @@ fn inventory_home(
             )
         })
         .collect();
-    // Admin-tools: gem-kleuren hersyncen + verzamel-aankopen terugdraaien (test-reset).
+    // Admin-testhulp: verzamel-aankopen terugdraaien (coins terug). (Sync gem colors staat
+    // op de Manage-pagina.)
     let admin_reset = if admin {
-        "<div style=\"display:flex;gap:.5rem;flex-wrap:wrap;margin:.2rem 0 .8rem\">\
-           <form method=\"post\" action=\"/admin/sync-gem-colors\">\
-             <button class=\"btn small ghost\" type=\"submit\">🎨 Sync gem colors</button></form>\
-           <form method=\"post\" action=\"/admin/reset-collection\" \
-             onsubmit=\"return confirm('Reset your test collection? This refunds the coins you spent on inventory items and un-owns them.')\">\
-             <button class=\"btn small ghost\" type=\"submit\">🧪 Reset my test collection</button></form></div>"
+        "<form method=\"post\" action=\"/admin/reset-collection\" style=\"margin:.2rem 0 .8rem\" \
+           onsubmit=\"return confirm('Reset your test collection? This refunds the coins you spent on inventory items and un-owns them.')\">\
+           <button class=\"btn small ghost\" type=\"submit\">🧪 Reset my test collection</button></form>"
     } else {
         ""
     };
@@ -1769,7 +1767,10 @@ async fn admin_market(
     );
 
     let body = format!(
-        "<h1>⚙ Shop management</h1>{shelves}{lucky}\
+        "<h1>⚙ Shop management</h1>\
+         <form method=\"post\" action=\"/admin/sync-gem-colors\" style=\"margin:0 0 1rem\">\
+           <button class=\"btn small ghost\" type=\"submit\" title=\"Fetch each gem's color from the matching Discord role\">🎨 Sync gem colors from Discord</button></form>\
+         {shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
            <input name=\"title\" placeholder=\"New shelf name\" required>\
            <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}{AUTOSAVE_JS}{DND_JS}"
@@ -2480,14 +2481,11 @@ async fn admin_item_image2_clear(
 async fn admin_sync_gem_colors(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if require_admin(&st, &headers).is_some() {
         let cg = color_guild(&st.cfg);
-        let msg = match st.dc.list_roles(&cg).await {
-            Ok(roles) => {
-                let n = db::sync_gem_colors(&st.pool, &roles);
-                format!("🎨 Synced {n} gem colors from Discord roles.")
-            }
-            Err(e) => format!("⚠️ Color sync failed: {e}"),
+        let _ = match st.dc.list_roles(&cg).await {
+            Ok(roles) => db::sync_gem_colors(&st.pool, &roles),
+            Err(_) => 0,
         };
-        return Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response();
+        return Redirect::to("/admin/market").into_response();
     }
     Redirect::to("/").into_response()
 }
