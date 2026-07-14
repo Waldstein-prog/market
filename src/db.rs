@@ -1544,18 +1544,17 @@ pub fn owned_booster_items(pool: &DbPool, uid: &str) -> Vec<(String, String, Str
         .collect()
 }
 
-/// Admin-testhulp: draai de verzamel-aankopen terug. Stort de op 'inventory'-items
-/// uitgegeven coins terug (op basis van de bewaarde aankoopprijs per inventory-rij),
-/// verwijder die items weer uit de inventory en reset de naamkleur. Passen/boosts blijven
-/// ongemoeid. Retourneert het teruggestorte bedrag. Atomisch.
+/// Admin-testhulp: draai ALLE testaankopen terug. Stort de op elk gekocht item (gems +
+/// passen/boosters) uitgegeven coins terug (o.b.v. de bewaarde aankoopprijs), maak de
+/// inventory leeg, verwijder de Hytale-whitelist-grant + permanente toegang, en reset de
+/// naamkleur/geëquipte gem. Zo kan je gems én passen testen zonder blijvend gevolg.
+/// Retourneert het teruggestorte bedrag. Atomisch. (De persistente Hytale-naam blijft.)
 pub fn reset_test_collection(pool: &DbPool, uid: &str) -> i64 {
     let mut conn = pool.get().expect("db");
     let tx = conn.transaction().expect("tx");
     let refund: i64 = tx
         .query_row(
-            "SELECT COALESCE(SUM(inv.price), 0) FROM inventory inv
-               JOIN items it ON it.id = inv.item_id
-              WHERE inv.user_id = ?1 AND it.category = 'inventory'",
+            "SELECT COALESCE(SUM(price), 0) FROM inventory WHERE user_id = ?1",
             params![uid],
             |r| r.get(0),
         )
@@ -1567,14 +1566,11 @@ pub fn reset_test_collection(pool: &DbPool, uid: &str) -> i64 {
         )
         .ok();
     }
+    tx.execute("DELETE FROM inventory WHERE user_id = ?1", params![uid]).ok();
+    // Pas-test terugdraaien: whitelist-grant weg (tale-bot reconcilet → van whitelist.json/panel).
+    tx.execute("DELETE FROM hytale_whitelist WHERE user_id = ?1", params![uid]).ok();
     tx.execute(
-        "DELETE FROM inventory WHERE user_id = ?1 AND item_id IN
-           (SELECT id FROM items WHERE category = 'inventory')",
-        params![uid],
-    )
-    .ok();
-    tx.execute(
-        "UPDATE coins SET name_color = '', equipped_gem = '' WHERE user_id = ?1",
+        "UPDATE coins SET name_color = '', equipped_gem = '', perma_access = 0 WHERE user_id = ?1",
         params![uid],
     )
     .ok();

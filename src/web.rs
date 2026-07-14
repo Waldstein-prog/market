@@ -441,7 +441,7 @@ a.link{{color:{MEADOW}}}
 .shelf .slot{{flex:0 0 auto;width:136px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
-.shelf.shop .slot{{width:180px}}
+.shelf.shop .slot{{width:210px}}
 .shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
 /* Zwevende naam-preview: blijft bovenaan zichtbaar terwijl je door de gems scrolt. */
@@ -891,7 +891,7 @@ fn inventory_home(
     // op de Manage-pagina.)
     let admin_reset = if admin {
         "<form method=\"post\" action=\"/admin/reset-collection\" style=\"margin:.2rem 0 .8rem\">\
-           <button class=\"btn small ghost\" type=\"submit\">🧪 Reset my test collection</button></form>"
+           <button class=\"btn small ghost\" type=\"submit\">🧪 Reset all test purchases</button></form>"
     } else {
         ""
     };
@@ -2569,7 +2569,9 @@ async fn admin_reset_collection(State(st): State<AppState>, headers: HeaderMap) 
             }
         }
         let refunded = db::reset_test_collection(&st.pool, &uid);
-        let msg = format!("🧪 Test reset — refunded {refunded} coins and cleared your collection.");
+        let msg = format!(
+            "🧪 Test reset — refunded {refunded} coins, cleared your collection and removed passes/whitelist."
+        );
         return Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response();
     }
     Redirect::to("/").into_response()
