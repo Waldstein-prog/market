@@ -349,6 +349,8 @@ a.link{{color:{MEADOW}}}
   box-shadow:inset 0 -4px 8px rgba(0,0,0,.35),0 2px 6px rgba(0,0,0,.3)}}
 .slot .name{{font-size:.82rem;font-weight:600;color:#e8f0e4;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.slot .sdesc{{font-size:.7rem;color:#9db095;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
 .slot .price{{font-weight:700;color:{MEADOW};font-size:.95rem}}
 .slot .buy{{width:100%;padding:.45rem;border:0;border-radius:9px;
   background:#2c3d2a;color:#6f8268;font-weight:600;font-size:.9rem;
@@ -963,9 +965,15 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
     } else {
         String::new()
     };
+    // Omschrijving (uit Manage) tonen onder de titel/2e afbeelding.
+    let desc = if it.description.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"sdesc\">{}</div>", esc(&it.description))
+    };
     format!(
         "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
-         <div class=\"name\">{name}</div>{img2}\
+         <div class=\"name\">{name}</div>{img2}{desc}\
          <div class=\"price\">{MC} {price}</div>{badge}{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
