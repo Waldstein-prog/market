@@ -57,7 +57,7 @@ const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatter
 const CHEST_POP_DELAY: u64 = 10 * 60; // seconden tussen verschijnen en poppen (natuurlijke/prod-spawn). Embedtekst leest dit dynamisch.
 const CHEST_SPAWN_CHANNEL_ID: u64 = 1296469405651435594; // natuurlijke chests spawnen ENKEL hier (Magic Meadow #general)
 const CHEST_TICK_SECS: u64 = 2; // interval waarmee de M:SS-timer in de embed wordt bijgewerkt (vloeiender)
-const CHEST_CHANNEL_COOLDOWN: f64 = 50.0 * 60.0; // rust per kanaal na een chest (anti-spam)
+const CHEST_CHANNEL_COOLDOWN: f64 = 60.0 * 60.0; // rust per kanaal na een chest (anti-spam)
 const CHEST_MIN_JOINERS: usize = 2; // minstens zoveel deelnemers, anders despawnt de chest (niks weggegeven)
 const CHEST_SPAWN_ON_START: bool = false; // (was test) — nu vervangen door het !chest dev-commando
 const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
@@ -66,18 +66,10 @@ const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
 // chest = grote image (onderaan), coin = thumbnail (rechtsboven).
 const CRYING_IMG: &[u8] = include_bytes!("../artwork/crying.png"); // getoond als de chest despawnt
 // Prijsverdeling: (gewicht in ‰ (per duizend), min, max coins). Som = CHEST_TIER_TOTAL.
-// CHEST_TIERS = de ACTUELE (live) verdeling die de trekking gebruikt (coarse, zoals
-// gevraagd). CHEST_TIERS_PROPOSAL = een fijnkorreliger VOORSTEL, enkel getoond in de
-// !chest-embed (nog niet actief). Beide tonen in de embed, coarse boven, voorstel onder.
+// CHEST_TIERS = de ACTUELE (live) verdeling die de trekking gebruikt: de
+// fijnkorrelige 10-tier-verdeling (sinds 2026-07-14 live; verving de grovere 5-tier).
 const CHEST_TIER_TOTAL: u32 = 1000; // som van de gewichten (‰)
-const CHEST_TIERS: [(u32, i64, i64); 5] = [
-    (700, 50, 100),   // 70%
-    (200, 100, 300),  // 20%
-    (50, 300, 500),   // 5%
-    (40, 500, 800),   // 4%
-    (10, 800, 1000),  // 1%
-];
-const CHEST_TIERS_PROPOSAL: [(u32, i64, i64); 10] = [
+const CHEST_TIERS: [(u32, i64, i64); 10] = [
     (400, 50, 80),    // 40%
     (220, 80, 120),   // 22%
     (140, 120, 180),  // 14%
@@ -477,12 +469,7 @@ fn chest_odds_embed() -> serenity::CreateEmbed {
     serenity::CreateEmbed::new()
         .title("🎁 Treasure chest — coin odds")
         .description("What an opened chest can pay out. Odds are per opening; the winner is a random opener.")
-        .field("📊 Current (live)", tier_lines(&CHEST_TIERS), false)
-        .field(
-            "🔬 Proposal — finer-grained",
-            tier_lines(&CHEST_TIERS_PROPOSAL),
-            false,
-        )
+        .field("📊 Odds", tier_lines(&CHEST_TIERS), false)
         .colour(0xF1_C4_0F)
 }
 
@@ -515,6 +502,116 @@ pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
 pub async fn chestodds(ctx: Context<'_>) -> Result<(), Error> {
     ctx.send(poise::CreateReply::default().embed(chest_odds_embed()))
         .await?;
+    Ok(())
+}
+
+/// Poise-check: enkel de site-admins (web::is_admin). Werkt overal, ook op de
+/// prod-guild — nodig voor beheer-ingrepen zoals een verweesde chest heropenen.
+async fn admin_only(ctx: Context<'_>) -> Result<bool, Error> {
+    Ok(crate::web::is_admin(&ctx.author().id.to_string()))
+}
+
+/// `!chestrescue <message_id>` — heropen alsnog een verweesde treasure chest
+/// (bv. verloren toen de bot herstartte terwijl de chest nog open stond). Haalt
+/// de deelnemers uit het logboek, trekt een winnaar (gewogen op Lucky Horseshoe),
+/// betaalt uit en post het resultaat in #general. Admin-only.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Error> {
+    let pool = &ctx.data().pool;
+    let http = ctx.serenity_context().http.clone();
+    let channel = serenity::ChannelId::new(CHEST_SPAWN_CHANNEL_ID);
+
+    // Zonder message-id: de laatste verweesde chest automatisch opzoeken.
+    let msg_id = match msg_id.or_else(|| db::last_unresolved_chest(pool)) {
+        Some(id) => id,
+        None => {
+            ctx.say("⚠️ Geen openstaande (verweesde) chest gevonden in het log.").await?;
+            return Ok(());
+        }
+    };
+
+    let joiners = db::chest_joiners_from_log(pool, msg_id);
+    let joiner_names = joiners.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
+    if joiners.len() < CHEST_MIN_JOINERS {
+        ctx.say(format!(
+            "⚠️ Chest `{msg_id}` heeft maar {} deelnemer(s) in het log — niks uit te betalen.",
+            joiners.len()
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    // Gewogen winnaar (zelfde logica als pop_chest): Lucky Horseshoe = 2 loten.
+    let weights: Vec<u32> = joiners.iter().map(|(uid, _)| db::chest_weight(pool, uid)).collect();
+    let total_weight: u32 = weights.iter().sum();
+    let mut roll = rand::thread_rng().gen_range(0..total_weight);
+    let mut idx = 0;
+    for (i, w) in weights.iter().enumerate() {
+        if roll < *w {
+            idx = i;
+            break;
+        }
+        roll -= *w;
+    }
+    let winner_had_luck = weights[idx] > 1;
+    for ((uid, _), w) in joiners.iter().zip(&weights) {
+        if *w > 1 {
+            db::clear_chest_luck(pool, uid);
+        }
+    }
+    let (winner_uid, winner_name) = &joiners[idx];
+    let prize = chest_prize();
+    let total = db::award(pool, winner_uid, winner_name, prize, now_secs());
+    log_earn(http.as_ref(), winner_name, prize, total).await;
+    tracing::info!(
+        "chest RESCUE geopend ({msg_id}): {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
+        joiners.len()
+    );
+    db::log_event(
+        pool,
+        now_secs(),
+        &db::LogEntry::new("chest", "win")
+            .actor(winner_uid, winner_name)
+            .channel(channel.get())
+            .reference(msg_id)
+            .amount(prize)
+            .detail(format!("RESCUE — won uit {} deelnemer(s): {joiner_names}", joiners.len())),
+    );
+    // Cooldown alsnog zetten (geheugen + schijf), net als een echte opening.
+    let until = now_secs() + CHEST_CHANNEL_COOLDOWN;
+    ctx.data().chest.lock().unwrap().cooldown_until.insert(channel.get(), until);
+    db::set_chest_cooldown(pool, channel.get(), until);
+    // Uit de tracker + persistente lijst (mocht hij er nog in zitten).
+    ctx.data().chest.lock().unwrap().chests.remove(&msg_id);
+    db::delete_live_chest(pool, msg_id);
+
+    let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };
+    let luck_line = if winner_had_luck {
+        "\n🍀 Their Lucky Horseshoe doubled the odds!"
+    } else {
+        ""
+    };
+    // Ruim het verweesde originele chest-bericht op (dode knop + bevroren timer),
+    // net zoals een normale opening dat doet — anders is te zien dat er iets misliep.
+    if let Err(e) = channel
+        .delete_message(http.as_ref(), serenity::MessageId::new(msg_id))
+        .await
+    {
+        tracing::warn!("kan verweesd chest-bericht {msg_id} niet verwijderen: {e}");
+    }
+
+    let embed = serenity::CreateEmbed::new()
+        .title("The Magic Chest opened!")
+        .description(format!(
+            "Out of **{}** {opener_word}, <@{winner_uid}> got lucky!\n\
+             They won **{prize}** {COIN_EMOJI} !!!{luck_line}",
+            joiners.len()
+        ))
+        .colour(0x6B_9B_52);
+    channel
+        .send_message(http.as_ref(), serenity::CreateMessage::new().embed(embed))
+        .await?;
+    ctx.say(format!("✅ Chest `{msg_id}` heropend — {winner_name} won {prize} coins.")).await?;
     Ok(())
 }
 
@@ -598,12 +695,31 @@ async fn do_spawn_chest(
             }),
     );
 
-    // Pop-taak: na pop_delay de chest openen/despawnen.
+    // Persistente opslag: overleeft een herstart (wordt bij opstart hervat).
+    db::save_live_chest(&pool, msg_id, channel_id.get(), pop_ts);
+    // Plan de pop-taak + de live M:SS-ticker.
+    schedule_chest_tasks(http, pool, tracker, channel_id, msg_id, pop_ts);
+    Ok(msg_id)
+}
+
+/// Plan de pop-taak + de M:SS-ticker voor een lopende chest. Herbruikt door een
+/// verse spawn én door het hervatten van een chest na een herstart: de pop wacht
+/// tot `pop_ts` (meteen als dat tijdstip al verstreken is).
+fn schedule_chest_tasks(
+    http: Arc<serenity::Http>,
+    pool: DbPool,
+    tracker: Arc<Mutex<ChestTracker>>,
+    channel_id: serenity::ChannelId,
+    msg_id: u64,
+    pop_ts: i64,
+) {
+    let delay = (pop_ts as f64 - now_secs()).max(0.0) as u64;
+    // Pop-taak: na de resterende tijd de chest openen/despawnen.
     let http2 = http.clone();
     let pool2 = pool.clone();
     let tracker2 = tracker.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(pop_delay)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
         pop_chest(http2, pool2, tracker2, channel_id, msg_id).await;
     });
 
@@ -629,7 +745,6 @@ async fn do_spawn_chest(
             }
         }
     });
-    Ok(msg_id)
 }
 
 /// Registreer de chatter en spawn — bij ≥ CHEST_DISTINCT_USERS verschillende
@@ -802,19 +917,27 @@ async fn pop_chest(
     }
 
     // Haal de chest eruit, geef het kanaal vrij, zet de cooldown.
-    let joiners = {
+    let cooldown_until = now_secs() + CHEST_CHANNEL_COOLDOWN;
+    let (joiners, cd_channel) = {
         let mut t = tracker.lock().unwrap();
         let chest = t.chests.remove(&msg_id);
         if let Some(c) = &chest {
             t.active.remove(&c.channel_id);
-            t.cooldown_until
-                .insert(c.channel_id, now_secs() + CHEST_CHANNEL_COOLDOWN);
+            t.cooldown_until.insert(c.channel_id, cooldown_until);
         }
         match chest {
-            Some(c) => c.joiners,
+            Some(c) => {
+                let chan = c.channel_id;
+                (c.joiners, chan)
+            }
             None => return, // al opgeruimd (zou niet mogen)
         }
     };
+    // Cooldown ook op schijf zetten → overleeft een herstart (anders spawnt er
+    // meteen na een redeploy weer een chest terwijl de rust nog zou moeten lopen).
+    db::set_chest_cooldown(&pool, cd_channel, cooldown_until);
+    // De chest is afgehandeld → uit de persistente lijst (geen hervatting bij opstart).
+    db::delete_live_chest(&pool, msg_id);
 
     // Origineel (met chest-afbeelding) altijd verwijderen — anders raken de
     // attachments los van de embed en toont Discord de coin op volledige grootte.
@@ -1040,7 +1163,7 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     // Enkel !chest (dev-only info-commando). Het !coins-leaderboard is verwijderd.
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![chest(), chestodds()],
+            commands: vec![chest(), chestodds(), chestrescue()],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(PREFIX.to_string()),
                 ..Default::default()
@@ -1067,16 +1190,45 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
             let hourly_http = ctx.http.clone();
             let weekly_pool = pool.clone();
             let weekly_http = ctx.http.clone();
+            let resume_http = ctx.http.clone();
             Box::pin(async move {
                 // Uurlijkse shout-out voor wie ≥100 coins verdiende in het afgelopen uur.
                 tokio::spawn(hourly_shoutouts(hourly_http, hourly_pool));
                 // Weekly leaderboard elke zaterdag 15:00 (Brussel) in prod #general.
                 tokio::spawn(weekly_leaderboard(weekly_http, weekly_pool));
-                Ok(Data {
-                    pool,
-                    cfg,
-                    chest: Arc::new(Mutex::new(ChestTracker::default())),
-                })
+
+                // Chest-staat uit de DB herstellen → een herstart verliest niets meer:
+                // (1) de per-kanaal cooldowns, (2) de lopende chests met hun pop-timer.
+                let mut tracker = ChestTracker {
+                    cooldown_until: db::load_chest_cooldowns(&pool, now_secs()),
+                    ..Default::default()
+                };
+                let resume = db::load_live_chests(&pool);
+                for &(msg_id, channel_id, pop_ts) in &resume {
+                    // Deelnemers uit het logboek terughalen zodat de trekking klopt.
+                    let joiners = db::chest_joiners_from_log(&pool, msg_id);
+                    tracker.active.insert(channel_id);
+                    tracker.chests.insert(msg_id, Chest { channel_id, joiners, pop_ts });
+                }
+                let chest = Arc::new(Mutex::new(tracker));
+
+                // Voor elke hervatte chest de pop-taak + ticker opnieuw plannen (wacht
+                // de resterende tijd; popt meteen als het pop-moment al voorbij is).
+                if !resume.is_empty() {
+                    tracing::info!("chest-herstel: {} lopende chest(s) hervat", resume.len());
+                }
+                for (msg_id, channel_id, pop_ts) in resume {
+                    schedule_chest_tasks(
+                        resume_http.clone(),
+                        pool.clone(),
+                        chest.clone(),
+                        serenity::ChannelId::new(channel_id),
+                        msg_id,
+                        pop_ts,
+                    );
+                }
+
+                Ok(Data { pool, cfg, chest })
             })
         })
         .build();

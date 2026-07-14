@@ -14,6 +14,47 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-14 nacht) — chest-state volledig herstart-persistent + rescue-commando + odds
+> **GEBOUWD + GEDEPLOYD + LIVE** (systemd `market` active). **Nog te COMMITTEN/PUSHEN** bij het
+> schrijven van deze handover (gebeurt in dezelfde commit als deze regel).
+
+**Aanleiding:** er spawnde telkens te snel een nieuwe treasure chest. Oorzaak: de hele
+`ChestTracker` (cooldowns, `active`, lopende chests, pop-timers) leefde **enkel in geheugen** →
+elke botherstart/redeploy wiste die staat. Twee zichtbare gevolgen: (1) dubbele chest vlak na
+een deploy omdat de per-kanaal-cooldown verdween; (2) een chest die openstond tijdens een
+herstart werd **wees** (dode knop, spelers wachtten op winst die nooit kwam).
+
+**User-regel (nieuw, hard):** *alle timers en cooldowns moeten persistent zijn — geen enkel
+state-verlies meer bij een botherstart.*
+
+**Opgelost (`src/bot.rs` + `src/db.rs`):**
+- **Chest-cooldown persistent** — nieuwe tabel `chest_cooldowns(channel_id, until)`.
+  `pop_chest` + de rescue schrijven de 50→**60 min** rust weg; bij opstart in
+  `cooldown_until` geladen (`db::set_chest_cooldown` / `db::load_chest_cooldowns`).
+- **Lopende chest + pop-timer persistent** — nieuwe tabel `live_chests(message_id,
+  channel_id, pop_ts)`. `do_spawn_chest` schrijft de chest weg; `pop_chest`/rescue wissen
+  hem. Bij opstart (`setup`-closure) laadt de bot elke lopende chest terug, herstelt de
+  **deelnemers uit het logboek** (`db::chest_joiners_from_log`), en herplant pop-taak + ticker
+  voor de **resterende** tijd via de nieuwe helper `schedule_chest_tasks` (popt meteen als het
+  pop-moment al voorbij is). `do_spawn_chest` gebruikt nu diezelfde helper.
+- **Rescue-commando** `!chestrescue [message_id]` — **admin-only** (`admin_only`-check via
+  `web::is_admin`, werkt óók op de prod-guild). Zonder id zoekt het de laatste **verweesde**
+  chest op (`db::last_unresolved_chest`: join-events zonder `win`/`despawn`). Het trekt een
+  winnaar (gewogen op Lucky Horseshoe), betaalt uit, **wist het dode chest-bericht** en post de
+  **identieke** "The Magic Chest opened!"-embed in #general → niet te onderscheiden van een
+  echte opening. Tip: draai het vanuit de **dev-guild** zodat de `✅`-bevestiging niet in prod
+  verschijnt. Werd deze sessie succesvol gebruikt om de 23:27-wees-chest alsnog uit te betalen.
+- **Chest-odds** — de fijnkorrelige 10-tier-verdeling (50–1000 coins) is nu de **live** trekking
+  (verving de grovere 5-tier); `CHEST_TIERS_PROPOSAL` verwijderd, `!chestodds` toont één tabel.
+
+**Al herstart-veilig (geverifieerd, niet aangeraakt):** coins-cooldown (`last_award`),
+daily/streak (`last_daily`), 24u-ticketrollen (`role_grants` via sweeper). Achtergrondtaken
+(hourly shout-out, weekly leaderboard) putten uit `earn_log` en herberekenen hun timing uit de
+klok → geen dataverlies bij herstart.
+
+**Open/afgesproken:** user wilde **geen** live test. Randgeval blijft: een chest die tijdens
+langdurige downtime z'n pop-moment passeert, popt bij de eerstvolgende opstart (bedoeld gedrag).
+
 ## ⏭️ Sessie (2026-07-14 avond) — embed-"site"-knop: admins → /market, rest → /info, LIVE
 > **GEBOUWD + GEDEPLOYD + LIVE + door user bevestigd + GECOMMIT/GEPUSHT** (`28285d1` op `master`,
 > subtree-gepusht `market-gh main` `e20b0b5..2259c50`).

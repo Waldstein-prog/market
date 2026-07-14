@@ -111,7 +111,16 @@ pub fn init_pool(path: &str) -> DbPool {
             detail     TEXT NOT NULL DEFAULT ''       -- vrije tekst / lijst deelnemers
         );
         CREATE INDEX IF NOT EXISTS idx_server_log_ts  ON server_log(ts);
-        CREATE INDEX IF NOT EXISTS idx_server_log_cat ON server_log(category, ts);",
+        CREATE INDEX IF NOT EXISTS idx_server_log_cat ON server_log(category, ts);
+        CREATE TABLE IF NOT EXISTS chest_cooldowns (
+            channel_id TEXT PRIMARY KEY,   -- kanaal met chest-rust
+            until      REAL NOT NULL        -- epoch-seconden: geen nieuwe chest vóór dit tijdstip
+        );
+        CREATE TABLE IF NOT EXISTS live_chests (
+            message_id TEXT PRIMARY KEY,   -- Discord-bericht-id van de open chest
+            channel_id TEXT NOT NULL,
+            pop_ts     INTEGER NOT NULL     -- epoch-seconden waarop de chest hoort te poppen
+        );",
     )
     .expect("kan tabel niet aanmaken");
 
@@ -768,6 +777,38 @@ pub fn remove_coin_channel(pool: &DbPool, channel_id: &str) {
     .expect("remove coin_channel");
 }
 
+// --- treasure-chest cooldowns (overleven een herstart) ------------------
+
+/// Bewaar de chest-cooldown van een kanaal: geen nieuwe chest vóór `until`
+/// (epoch-seconden). Idempotent per kanaal.
+pub fn set_chest_cooldown(pool: &DbPool, channel_id: u64, until: f64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO chest_cooldowns (channel_id, until) VALUES (?1, ?2)
+         ON CONFLICT(channel_id) DO UPDATE SET until = excluded.until",
+        params![channel_id.to_string(), until],
+    )
+    .expect("set chest cooldown");
+}
+
+/// Laad de nog-lopende chest-cooldowns (channel_id → until) en ruim de verlopen
+/// rijen meteen op. Wordt bij opstart in de in-memory tracker geladen zodat een
+/// herstart de rust per kanaal niet reset.
+pub fn load_chest_cooldowns(pool: &DbPool, now: f64) -> std::collections::HashMap<u64, f64> {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM chest_cooldowns WHERE until <= ?1", params![now])
+        .ok();
+    let mut stmt = conn
+        .prepare("SELECT channel_id, until FROM chest_cooldowns")
+        .expect("prepare load chest cooldowns");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
+        .expect("query chest cooldowns");
+    rows.filter_map(Result::ok)
+        .filter_map(|(id, until)| id.parse::<u64>().ok().map(|id| (id, until)))
+        .collect()
+}
+
 // --- weekly leaderboard + Brusselse tijd (EU-DST) -----------------------
 
 /// Weekly leaderboard: (user_id, username, verdiend sinds `since`), aflopend, ≥1.
@@ -1378,6 +1419,94 @@ pub fn has_chest_luck(pool: &DbPool, uid: &str) -> bool {
     .flatten()
     .unwrap_or(0)
         > 0
+}
+
+/// Bewaar een lopende (nog niet gepopte) chest zodat de pop-timer een herstart
+/// overleeft. Bij opstart wordt hij via `load_live_chests` hervat.
+pub fn save_live_chest(pool: &DbPool, msg_id: u64, channel_id: u64, pop_ts: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO live_chests (message_id, channel_id, pop_ts) VALUES (?1, ?2, ?3)
+         ON CONFLICT(message_id) DO UPDATE SET channel_id = excluded.channel_id, pop_ts = excluded.pop_ts",
+        params![msg_id.to_string(), channel_id.to_string(), pop_ts],
+    )
+    .expect("save live chest");
+}
+
+/// Verwijder een lopende chest uit de persistentie (bij pop/despawn/rescue).
+pub fn delete_live_chest(pool: &DbPool, msg_id: u64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "DELETE FROM live_chests WHERE message_id = ?1",
+        params![msg_id.to_string()],
+    )
+    .ok();
+}
+
+/// Alle lopende chests (message_id, channel_id, pop_ts) om bij opstart te hervatten.
+pub fn load_live_chests(pool: &DbPool) -> Vec<(u64, u64, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT message_id, channel_id, pop_ts FROM live_chests")
+        .expect("prepare load_live_chests");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })
+        .expect("query live_chests");
+    rows.filter_map(Result::ok)
+        .filter_map(|(m, c, ts)| Some((m.parse().ok()?, c.parse().ok()?, ts)))
+        .collect()
+}
+
+/// Reconstrueer de deelnemers (uid, naam) van een chest uit het logboek, in
+/// klik-volgorde en ontdubbeld op uid (nieuwste naam wint). Gebruikt om een
+/// verweesde chest (bv. verloren bij een herstart) alsnog handmatig te openen.
+pub fn chest_joiners_from_log(pool: &DbPool, msg_id: u64) -> Vec<(String, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT actor_uid, actor_name FROM server_log
+             WHERE category = 'chest' AND event = 'join' AND ref_id = ?1
+             ORDER BY id",
+        )
+        .expect("prepare chest_joiners");
+    let rows = stmt
+        .query_map(params![msg_id.to_string()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .expect("query chest_joiners");
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (uid, name) in rows.filter_map(Result::ok) {
+        if seen.insert(uid.clone()) {
+            out.push((uid, name));
+        }
+    }
+    out
+}
+
+/// De meest recente chest die deelnemers kreeg maar nooit werd afgehandeld (geen
+/// `win`/`despawn` in het log) — d.w.z. verweesd bij een herstart. None als er
+/// geen openstaat. Gebruikt zodat `!chestrescue` zonder message-id werkt.
+pub fn last_unresolved_chest(pool: &DbPool) -> Option<u64> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT ref_id FROM server_log
+         WHERE category = 'chest' AND event = 'join'
+           AND ref_id NOT IN (
+               SELECT ref_id FROM server_log
+               WHERE category = 'chest' AND event IN ('win', 'despawn')
+           )
+         GROUP BY ref_id
+         ORDER BY MAX(id) DESC
+         LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .expect("query last_unresolved_chest")
+    .and_then(|s| s.parse::<u64>().ok())
 }
 
 /// Het lot-gewicht van dit lid bij een treasure-chest-trekking: 2 met een actieve
