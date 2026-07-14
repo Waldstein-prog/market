@@ -66,6 +66,9 @@ fl.textContent='\\u2713 Saved';fl.style.opacity='1';\
 clearTimeout(fl._t);fl._t=setTimeout(function(){fl.style.opacity='0';},1500);\
 });});})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
+/// Een Hytale-dagpas geeft vast 24 uur toegang; de permanente pas geldt eeuwig.
+/// Er is geen instelbare pas-duur meer (day pass = 24h, hardcoded).
+const DAY_PASS_SECS: i64 = 24 * 3600;
 
 #[derive(Clone)]
 struct AppState {
@@ -349,8 +352,7 @@ a.link{{color:{MEADOW}}}
   box-shadow:inset 0 -4px 8px rgba(0,0,0,.35),0 2px 6px rgba(0,0,0,.3)}}
 .slot .name{{font-size:.82rem;font-weight:600;color:#e8f0e4;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.slot .sdesc{{font-size:.7rem;color:#9db095;line-height:1.3;font-style:italic;
-  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
+.slot .sdesc{{font-size:.72rem;color:#bccdb3;line-height:1.35;font-style:italic}}
 .slot .price{{font-weight:700;color:{MEADOW};font-size:.95rem}}
 .slot .buy{{width:100%;padding:.45rem;border:0;border-radius:9px;
   background:#2c3d2a;color:#6f8268;font-weight:600;font-size:.9rem;
@@ -422,6 +424,8 @@ a.link{{color:{MEADOW}}}
 .aitem .fld{{display:flex;flex-direction:column;gap:.12rem;text-align:left;
   font-size:.62rem;color:#9db095;font-weight:700}}
 .aitem .hint{{font-weight:400;color:#6b7d63}}
+.aitem .rdonly{{font-weight:600;color:#cfe0c8;font-size:.74rem;padding:.3rem .4rem;
+  border:1px dashed #2c3d2a;border-radius:7px;background:#0e1510}}
 .aitem .save{{width:100%;margin-top:.1rem}}
 .arow{{display:flex;gap:.3rem;align-items:center}}
 .arow .iform{{margin:0}}
@@ -937,7 +941,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
     let badge = if it.category != "boost" {
         String::new()
     } else if it.duration > 0 {
-        format!("<div class=\"ibadge\">🎟 {}</div>", human_duration(it.duration))
+        "<div class=\"ibadge\">🎟 24h</div>".to_string()
     } else {
         "<div class=\"ibadge\">🔑 permanent</div>".to_string()
     };
@@ -1385,7 +1389,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         // Activeer meteen: dagpas → whitelist-timer (stapelt), perma → permanente whitelist.
         let msg = if item.duration > 0 {
             let exp =
-                db::grant_day_whitelist(&st.pool, &uid, &hname, item.duration as f64, now_secs());
+                db::grant_day_whitelist(&st.pool, &uid, &hname, DAY_PASS_SECS as f64, now_secs());
             if exp.is_finite() {
                 // Rond op hele minuten af: `now` valt ~1s ná de grant, anders "1439 min".
                 let left = ((exp - now_secs()) / 60.0).round().max(0.0) as i64 * 60;
@@ -1468,6 +1472,23 @@ fn human_duration(secs: i64) -> String {
 fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> String {
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
+
+    // Duur: voor Hytale-passen niet meer instelbaar (day pass = vast 24h, permanent =
+    // eeuwig). We tonen een vaste, leesbare notitie + een hidden input die de bestaande
+    // waarde bewaart (anders zou de auto-save de duur op 0 zetten). Andere items houden
+    // het gewone minuten-veld.
+    let dur_field = if it.category == "boost" {
+        let access = if it.duration > 0 { "24 hours (day pass)" } else { "permanent" };
+        format!(
+            "<div class=\"fld\">Access<div class=\"rdonly\">{access}</div></div>\
+             <input type=\"hidden\" name=\"duration_min\" value=\"{dur_min}\">"
+        )
+    } else {
+        format!(
+            "<label class=\"fld\">Duration <span class=\"hint\">(minutes — 0 = permanent)</span>\
+               <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\"></label>"
+        )
+    };
 
     // Bevestigings-flits na een bewaaractie (?saved=<id>).
     let flash = if saved == Some(it.id) {
@@ -1565,8 +1586,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
              <option value=\"prism\"{cpr}>gem · prism</option></select></label>\
            <label class=\"fld\">Role name\
              <input name=\"role_id\" value=\"{role}\" placeholder=\"e.g. Amber\"></label>\
-           <label class=\"fld\">Duration <span class=\"hint\">(minutes — 0 = permanent)</span>\
-             <input name=\"duration_min\" type=\"number\" min=\"0\" value=\"{dur_min}\"></label>\
+           {dur_field}\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
