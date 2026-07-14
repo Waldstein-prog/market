@@ -1476,6 +1476,41 @@ pub fn owned_item_ids(pool: &DbPool, uid: &str) -> Vec<i64> {
     rows.filter_map(Result::ok).collect()
 }
 
+/// Admin-testhulp: draai de verzamel-aankopen terug. Stort de op 'inventory'-items
+/// uitgegeven coins terug (op basis van de bewaarde aankoopprijs per inventory-rij),
+/// verwijder die items weer uit de inventory en reset de naamkleur. Passen/boosts blijven
+/// ongemoeid. Retourneert het teruggestorte bedrag. Atomisch.
+pub fn reset_test_collection(pool: &DbPool, uid: &str) -> i64 {
+    let mut conn = pool.get().expect("db");
+    let tx = conn.transaction().expect("tx");
+    let refund: i64 = tx
+        .query_row(
+            "SELECT COALESCE(SUM(inv.price), 0) FROM inventory inv
+               JOIN items it ON it.id = inv.item_id
+              WHERE inv.user_id = ?1 AND it.category = 'inventory'",
+            params![uid],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if refund > 0 {
+        tx.execute(
+            "UPDATE coins SET coins = coins + ?2 WHERE user_id = ?1",
+            params![uid, refund],
+        )
+        .ok();
+    }
+    tx.execute(
+        "DELETE FROM inventory WHERE user_id = ?1 AND item_id IN
+           (SELECT id FROM items WHERE category = 'inventory')",
+        params![uid],
+    )
+    .ok();
+    tx.execute("UPDATE coins SET name_color = '' WHERE user_id = ?1", params![uid])
+        .ok();
+    tx.commit().ok();
+    refund
+}
+
 /// Alle gems van een categorie ('primary'|'secondary'|'prism'), op positie.
 #[allow(dead_code)]
 pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {

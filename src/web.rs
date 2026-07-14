@@ -125,6 +125,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/shelf", post(admin_item_shelf))
         .route("/admin/item/image/clear", post(admin_item_image_clear))
         .route("/admin/item/image2/clear", post(admin_item_image2_clear))
+        .route("/admin/reset-collection", post(admin_reset_collection))
         .route("/admin/coins", get(admin_coins))
         .route("/admin/coins/add", post(admin_coins_add))
         .route("/admin/coins/set", post(admin_coins_set))
@@ -675,7 +676,16 @@ async fn index(
                     nav_html("home", is_admin(&uid)),
                     format!(
                         "{notice}{}",
-                        inventory_home(&st.pool, &uid, &name, coins, total_earned, &grants, tab)
+                        inventory_home(
+                            &st.pool,
+                            &uid,
+                            &name,
+                            coins,
+                            total_earned,
+                            &grants,
+                            tab,
+                            is_admin(&uid)
+                        )
                     ),
                     true,
                 )
@@ -758,6 +768,7 @@ fn inventory_home(
     total_earned: i64,
     grants: &[(String, f64)],
     active: &str,
+    admin: bool,
 ) -> String {
     let (lvl, n, m) = level_info(total_earned);
     let pct = if m > 0 { (n * 100 / m).clamp(0, 100) } else { 100 };
@@ -825,8 +836,16 @@ fn inventory_home(
             )
         })
         .collect();
+    // Admin-testhulp: reset-knop om verzamel-aankopen terug te draaien (coins terug).
+    let admin_reset = if admin {
+        "<form method=\"post\" action=\"/admin/reset-collection\" style=\"margin:.2rem 0 .8rem\" \
+           onsubmit=\"return confirm('Reset your test collection? This refunds the coins you spent on inventory items and un-owns them.')\">\
+           <button class=\"btn small ghost\" type=\"submit\">🧪 Reset my test collection</button></form>"
+    } else {
+        ""
+    };
     let gems_panel = format!(
-        "<div class=\"nameshow\">{ds}\
+        "{admin_reset}<div class=\"nameshow\">{ds}\
            <div class=\"swatch dark\" style=\"color:{c}\">{nm2}</div>\
            <div class=\"swatch light\" style=\"color:{c}\">{nm2}</div></div>\
          {collection}",
@@ -1616,7 +1635,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
            <label class=\"fld\">Description <span class=\"hint\">(shown in italic in the shop)</span>\
              <input name=\"description\" value=\"{desc}\" placeholder=\"e.g. Gives the Amber role\"></label>\
            <label class=\"fld\">Type<select name=\"category\">\
-             <option value=\"inventory\"{ci}>Inventory item (gets a card)</option>\
+             <option value=\"inventory\"{ci}>Inventory item</option>\
              <option value=\"noninv\"{cn}>Non-inventory item</option>\
              <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
            <label class=\"fld\">Role name\
@@ -2401,6 +2420,18 @@ async fn admin_item_image2_clear(
         return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
     Redirect::to("/admin/market").into_response()
+}
+
+/// Admin-testhulp: draai je eigen verzamel-aankopen terug (coins terug + items weer
+/// ontgrendelbaar + naamkleur gereset). Zo kan je de shop/gems testen zonder blijvende
+/// coin-gevolgen. Raakt passen niet.
+async fn admin_reset_collection(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some((uid, _name)) = require_admin(&st, &headers) {
+        let refunded = db::reset_test_collection(&st.pool, &uid);
+        let msg = format!("🧪 Test reset — refunded {refunded} coins and cleared your collection.");
+        return Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response();
+    }
+    Redirect::to("/").into_response()
 }
 
 /// De ingebakken 24h-pas ticket-afbeelding serveren.
