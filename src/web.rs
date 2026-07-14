@@ -444,7 +444,10 @@ a.link{{color:{MEADOW}}}
 .shelf.shop .slot{{width:180px}}
 .shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
-.nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap}}
+/* Zwevende naam-preview: blijft bovenaan zichtbaar terwijl je door de gems scrolt. */
+.nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap;
+  position:sticky;top:.6rem;z-index:20;background:#182319;padding:.5rem;
+  border-radius:14px;box-shadow:0 4px 16px rgba(0,0,0,.45)}}
 /* Discord-achtig lettertype voor een realistische naam-preview. */
 .swatch{{flex:1 1 140px;text-align:center;padding:.7rem;border-radius:11px;
   font-weight:700;font-size:1.25rem;border:1px solid #2c3d2a;
