@@ -106,6 +106,16 @@ struct AppState {
 
 type JsonResp = (StatusCode, Json<Value>);
 
+/// De guild waaruit de gem-kleuren (Discord-rollen) gelezen worden: dev-guild in de
+/// dev-omgeving, prod-guild (Magic Meadow) in prod.
+fn color_guild(cfg: &Config) -> String {
+    if cfg.environment.eq_ignore_ascii_case("dev") {
+        cfg.guild_id.clone()
+    } else {
+        COINS_GUILD_ID.to_string()
+    }
+}
+
 pub async fn serve(cfg: Config, pool: DbPool) {
     let dc = Arc::new(Discord::new(cfg.bot_token.clone(), cfg.guild_id.clone()));
     let state = AppState {
@@ -116,6 +126,19 @@ pub async fn serve(cfg: Config, pool: DbPool) {
     };
 
     let _ = std::fs::create_dir_all(UPLOAD_DIR);
+
+    // Gem-kleuren synchroniseren uit de Discord-rollen (van de omgeving-guild) bij opstart:
+    // gem-naam = rolnaam → kleur van die rol wordt de kleur van de gem.
+    {
+        let cg = color_guild(&state.cfg);
+        match state.dc.list_roles(&cg).await {
+            Ok(roles) => {
+                let n = db::sync_gem_colors(&state.pool, &roles);
+                tracing::info!("gem-kleuren gesynct: {n} items ({} rollen, guild {cg})", roles.len());
+            }
+            Err(e) => tracing::warn!("gem-kleur-sync bij opstart overgeslagen: {e}"),
+        }
+    }
 
     let app = Router::new()
         .route("/", get(index))
@@ -138,6 +161,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/image/clear", post(admin_item_image_clear))
         .route("/admin/item/image2/clear", post(admin_item_image2_clear))
         .route("/admin/reset-collection", post(admin_reset_collection))
+        .route("/admin/sync-gem-colors", post(admin_sync_gem_colors))
         .route("/admin/coins", get(admin_coins))
         .route("/admin/coins/add", post(admin_coins_add))
         .route("/admin/coins/set", post(admin_coins_set))
@@ -855,11 +879,14 @@ fn inventory_home(
             )
         })
         .collect();
-    // Admin-testhulp: reset-knop om verzamel-aankopen terug te draaien (coins terug).
+    // Admin-tools: gem-kleuren hersyncen + verzamel-aankopen terugdraaien (test-reset).
     let admin_reset = if admin {
-        "<form method=\"post\" action=\"/admin/reset-collection\" style=\"margin:.2rem 0 .8rem\" \
-           onsubmit=\"return confirm('Reset your test collection? This refunds the coins you spent on inventory items and un-owns them.')\">\
-           <button class=\"btn small ghost\" type=\"submit\">🧪 Reset my test collection</button></form>"
+        "<div style=\"display:flex;gap:.5rem;flex-wrap:wrap;margin:.2rem 0 .8rem\">\
+           <form method=\"post\" action=\"/admin/sync-gem-colors\">\
+             <button class=\"btn small ghost\" type=\"submit\">🎨 Sync gem colors</button></form>\
+           <form method=\"post\" action=\"/admin/reset-collection\" \
+             onsubmit=\"return confirm('Reset your test collection? This refunds the coins you spent on inventory items and un-owns them.')\">\
+             <button class=\"btn small ghost\" type=\"submit\">🧪 Reset my test collection</button></form></div>"
     } else {
         ""
     };
@@ -1568,24 +1595,6 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         String::new()
     };
 
-    // Kleur: voor inventory-items een color-picker (naamkleur van de gem, ook voor de
-    // preview). Andere types: hidden input zodat de auto-save de kleur niet leegt.
-    let color_field = if it.category == "inventory" {
-        let cval = if it.color.is_empty() {
-            "#888888".to_string()
-        } else {
-            esc(&it.color)
-        };
-        format!(
-            "<label class=\"fld\">Color <span class=\"hint\">(name color for this gem)</span>\
-               <input name=\"color\" type=\"color\" value=\"{cval}\" class=\"colorpick\"></label>"
-        )
-    } else {
-        format!(
-            "<input type=\"hidden\" name=\"color\" value=\"{}\">",
-            esc(&it.color)
-        )
-    };
 
     // Bevestigings-flits na een bewaaractie (?saved=<id>).
     let flash = if saved == Some(it.id) {
@@ -1677,9 +1686,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
              <option value=\"inventory\"{ci}>Inventory item</option>\
              <option value=\"noninv\"{cn}>Non-inventory item</option>\
              <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
-           <label class=\"fld\">Role name\
-             <input name=\"role_id\" value=\"{role}\" placeholder=\"e.g. Amber\"></label>\
-           {dur_field}{color_field}\
+           {dur_field}\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
@@ -1697,7 +1704,6 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         id = it.id,
         name = esc(&it.name),
         price = it.price,
-        role = esc(&it.role_id),
         desc = esc(&it.description),
         ci = sel("inventory"),
         cn = sel("noninv"),
@@ -2273,8 +2279,6 @@ struct ItemUpdate {
     category: String,
     #[serde(default)]
     description: String,
-    #[serde(default)]
-    color: String,
 }
 
 async fn admin_shelf_add(
@@ -2344,7 +2348,6 @@ async fn admin_item_update(
             f.duration_min.max(0) * 60,
             f.category.trim(),
             f.description.trim(),
-            f.color.trim(),
         );
         return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
@@ -2462,6 +2465,23 @@ async fn admin_item_image2_clear(
         return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
     Redirect::to("/admin/market").into_response()
+}
+
+/// Admin: sync de gem-kleuren opnieuw uit de Discord-rollen (handig na een kleurwijziging
+/// in Discord). Leest uit de omgeving-guild (dev in test, prod in prod).
+async fn admin_sync_gem_colors(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let cg = color_guild(&st.cfg);
+        let msg = match st.dc.list_roles(&cg).await {
+            Ok(roles) => {
+                let n = db::sync_gem_colors(&st.pool, &roles);
+                format!("🎨 Synced {n} gem colors from Discord roles.")
+            }
+            Err(e) => format!("⚠️ Color sync failed: {e}"),
+        };
+        return Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response();
+    }
+    Redirect::to("/").into_response()
 }
 
 /// Admin-testhulp: draai je eigen verzamel-aankopen terug (coins terug + items weer

@@ -75,6 +75,36 @@ impl Discord {
         Ok(out)
     }
 
+    /// Rollen van een guild: (naam, kleur-hex "#rrggbb"). Rollen zonder kleur (color 0)
+    /// worden overgeslagen.
+    pub async fn list_roles(&self, guild: &str) -> Result<Vec<(String, String)>, String> {
+        let url = format!("{API}/guilds/{guild}/roles");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+        }
+        let arr: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        if let Some(roles) = arr.as_array() {
+            for r in roles {
+                let name = r["name"].as_str().unwrap_or("").to_string();
+                let color = r["color"].as_u64().unwrap_or(0);
+                if name.is_empty() || color == 0 {
+                    continue;
+                }
+                out.push((name, format!("#{color:06x}")));
+            }
+        }
+        Ok(out)
+    }
+
     /// Alle guild-leden (max 1000): (user_id, weergavenaam). Bots overgeslagen.
     /// Vereist de GUILD_MEMBERS-intent (staat aan voor de gateway-bot).
     pub async fn list_members(&self, guild: &str) -> Result<Vec<(String, String)>, String> {

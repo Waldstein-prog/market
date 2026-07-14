@@ -1131,7 +1131,6 @@ pub fn add_item(pool: &DbPool, zone: &str, shelf_id: Option<i64>) -> i64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn update_item(
     pool: &DbPool,
     id: i64,
@@ -1141,15 +1140,31 @@ pub fn update_item(
     duration: i64,
     category: &str,
     description: &str,
-    color: &str,
 ) {
     let conn = pool.get().expect("db");
     conn.execute(
         "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5,
-             category = ?6, description = ?7, color = ?8 WHERE id = ?1",
-        params![id, name, price, role_id, duration, category, description, color],
+             category = ?6, description = ?7 WHERE id = ?1",
+        params![id, name, price, role_id, duration, category, description],
     )
     .expect("update item");
+}
+
+/// Zet de kleur van elk 'inventory'-item (gem) op de kleur van de gelijknamige Discord-rol.
+/// `roles` = (rolnaam, hex-kleur "#rrggbb"). Matcht hoofdletter-ongevoelig op de itemnaam.
+/// Retourneert het aantal bijgewerkte items.
+pub fn sync_gem_colors(pool: &DbPool, roles: &[(String, String)]) -> usize {
+    let conn = pool.get().expect("db");
+    let mut n = 0;
+    for (name, hex) in roles {
+        n += conn
+            .execute(
+                "UPDATE items SET color = ?2 WHERE category = 'inventory' AND LOWER(name) = LOWER(?1)",
+                params![name, hex],
+            )
+            .unwrap_or(0);
+    }
+    n
 }
 
 pub fn set_item_image(pool: &DbPool, id: i64, image: &str) {
