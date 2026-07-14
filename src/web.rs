@@ -373,7 +373,9 @@ a.link{{color:{MEADOW}}}
 .slot .name{{font-size:.82rem;font-weight:600;color:#e8f0e4;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .slot .sdesc{{font-size:.72rem;color:#bccdb3;line-height:1.35;font-style:italic}}
-.slot .price{{font-weight:700;color:{MEADOW};font-size:.95rem}}
+/* Prijs + Buy (+ Hytale-naamveld) als groep onderaan de kaart: alle Buy-knoppen lijnen
+   uit, ongeacht hoeveel tekst/omschrijving er boven staat. */
+.slot .price{{font-weight:700;color:{MEADOW};font-size:.95rem;margin-top:auto}}
 .slot .buy{{width:100%;padding:.45rem;border:0;border-radius:9px;
   background:#2c3d2a;color:#6f8268;font-weight:600;font-size:.9rem;
   cursor:not-allowed}}
@@ -961,13 +963,6 @@ fn item_thumb(it: &db::Item) -> String {
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
 fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
-    let badge = if it.category != "boost" {
-        String::new()
-    } else if it.duration > 0 {
-        "<div class=\"ibadge\">🎟 24h</div>".to_string()
-    } else {
-        "<div class=\"ibadge\">🔑 permanent</div>".to_string()
-    };
     let is_gem = matches!(it.category.as_str(), "primary" | "secondary" | "prism");
     let action = if owned && is_gem {
         "<button class=\"buy owned\" disabled>Owned</button>".to_string()
@@ -1008,7 +1003,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
     format!(
         "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div>{img2}{desc}\
-         <div class=\"price\">{MC} {price}</div>{badge}{action}</div>",
+         <div class=\"price\">{MC} {price}</div>{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
         price = it.price,
