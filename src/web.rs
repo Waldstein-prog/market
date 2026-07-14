@@ -1014,6 +1014,7 @@ async fn market(
         db::owned_item_ids(&st.pool, &uid).into_iter().collect();
 
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
+    let has_perma = db::has_perma_access(&st.pool, &uid);
 
     // Render alle schappen precies zoals in Manage: schap-titel + de items erop.
     // Lege schappen worden overgeslagen.
@@ -1022,7 +1023,7 @@ async fn market(
         .map(|(sid, title)| {
             let slots: String = db::shelf_items(&st.pool, *sid)
                 .iter()
-                .map(|it| shop_slot(it, owned.contains(&it.id), has_name))
+                .map(|it| shop_slot(it, owned.contains(&it.id), has_name, has_perma))
                 .collect();
             if slots.is_empty() {
                 return String::new();
@@ -1086,9 +1087,11 @@ fn item_thumb(it: &db::Item) -> String {
 
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
-fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
-    // Reeds gekocht verzamel-item: kaart grijs + groene ✓, geen Buy-knop meer.
-    let bought = owned && it.category == "inventory";
+fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool) -> String {
+    // Reeds gekocht → kaart grijs + groene ✓, geen Buy-knop meer. Geldt voor bezeten
+    // verzamel-items én voor de permanente Hytale-pas zodra je permanente toegang hebt.
+    let bought = (owned && it.category == "inventory")
+        || (it.category == "boost" && it.duration == 0 && has_perma);
     let action = if bought {
         String::new()
     } else {
