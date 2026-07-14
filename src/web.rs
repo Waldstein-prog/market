@@ -1020,7 +1020,7 @@ async fn market(
            if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
            function step(t){{var k=Math.min(1,(t-s)/d);\
              el.textContent=Math.round(from+(to-from)*k);\
-             if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>",
+             if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>{KEEP_SCROLL_JS}",
     );
     Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, ""), true, &body))
         .into_response()
