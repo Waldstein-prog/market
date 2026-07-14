@@ -14,6 +14,34 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-14 avond) — embed-"site"-knop: admins → /market, rest → /info, LIVE
+> **GEBOUWD + GEDEPLOYD + LIVE + door user bevestigd + GECOMMIT/GEPUSHT** (`28285d1` op `master`,
+> subtree-gepusht `market-gh main` `e20b0b5..2259c50`).
+
+**Aanleiding:** de "site"-knop in de Discord-embed (`site_access`) gaf iedereen enkel een
+under-construction-melding. De user wil dat **admins** vanuit die knop in de **echte market**
+raken, terwijl **gewone leden** op de publieke **`/info`**-pagina blijven.
+
+**Kernprobleem:** de web-`gate` stuurt niet-admins naar `/info`, maar kan een **niet-ingelogde
+admin niet herkennen** (geen sessie-cookie) → die belandde óók op `/info`. De enige plek waar de
+identiteit al bekend is vóór login is de **Discord-knop** (bot kent `mc.user.id`).
+
+**Oplossing (`src/bot.rs` + `src/web.rs`):**
+- `site_access`-handler reageert nu per persoon: **admin** → ephemeral link `…/login?next=/market`;
+  **niet-admin** → `…/info`. (`crate::web::is_admin` — daarvoor `is_admin` `pub(crate)` gemaakt.)
+- `/login` accepteert `?next=<pad>` met **open-redirect-guard** (`safe_next`: enkel paden die met
+  één `/` beginnen, niet `//`); bewaard over de OAuth-roundtrip via `oauth_next`-cookie; `callback`
+  keert daarheen terug i.p.v. altijd `/`. Non-admins met `next=/market` worden door de gate alsnog
+  naar `/info` geleid — enkel admins raken echt in de market.
+- **Bugfix onderweg** (gaf "Something went wrong" bij inloggen): twee `Set-Cookie`-headers werden
+  met `insert` gezet → de tweede (`oauth_next`) overschreef de eerste (`oauth_state`) → CSRF-check
+  faalde. Nieuwe helper **`set_cookies()`** gebruikt `append`. Idem bij de `callback`.
+
+**Open follow-ups:** geen dwingende. Admin moet één keer via Discord-login (zit in de link); zolang
+de sessie-cookie leeft gaat het daarna direct door.
+
+---
+
 ## ⏭️ Sessie (2026-07-14 nacht) — volledige market-event-logging + refunds op de logpagina, LIVE
 > **GEBOUWD + GEDEPLOYD + LIVE + geverifieerd + GECOMMIT/GEPUSHT** (`deploy.sh` → systemd `market`
 > `active (running)`, geen errors/panics in de opstartlogs, migratie schoon; `refunded`-kolom bevestigd
