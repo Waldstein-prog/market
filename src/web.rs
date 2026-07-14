@@ -50,6 +50,21 @@ const SAVED_FLASH_JS: &str = "<script>(function(){\
 if(location.search.indexOf('saved=')>-1){history.replaceState({},'',location.pathname);}\
 setTimeout(function(){document.querySelectorAll('.savedflash').forEach(function(e){e.style.opacity='0';});},2500);\
 })();</script>";
+/// Elk item-update-formulier persisteert zich AUTOMATISCH bij een veldwijziging
+/// (op 'change', via sendBeacon zodat het ook een navigatie overleeft). Zo gaat een
+/// getypte prijs nooit meer verloren als je daarna op Upload/◀▶/Move klikt (aparte
+/// formulieren die het prijsveld niet meesturen). Toont een korte "✓ Saved"-flits.
+const AUTOSAVE_JS: &str = "<script>(function(){\
+document.querySelectorAll('form[action=\"/admin/item/update\"]').forEach(function(f){\
+f.addEventListener('change',function(){\
+var q=new URLSearchParams(new FormData(f)).toString();\
+try{var ok=navigator.sendBeacon&&navigator.sendBeacon(f.action,new Blob([q],{type:'application/x-www-form-urlencoded'}));\
+if(!ok)fetch(f.action,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q,keepalive:true});}catch(e){}\
+var c=f.closest('.aitem');if(!c)return;var fl=c.querySelector('.autoflash');\
+if(!fl){fl=document.createElement('div');fl.className='autoflash';c.appendChild(fl);}\
+fl.textContent='\\u2713 Saved';fl.style.opacity='1';\
+clearTimeout(fl._t);fl._t=setTimeout(function(){fl.style.opacity='0';},1500);\
+});});})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
 
 #[derive(Clone)]
@@ -92,6 +107,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/move", post(admin_item_move))
         .route("/admin/item/shelf", post(admin_item_shelf))
         .route("/admin/item/image/clear", post(admin_item_image_clear))
+        .route("/admin/item/image2/clear", post(admin_item_image2_clear))
         .route("/admin/coins", get(admin_coins))
         .route("/admin/coins/add", post(admin_coins_add))
         .route("/admin/coins/set", post(admin_coins_set))
@@ -372,6 +388,9 @@ a.link{{color:{MEADOW}}}
 .slot .lock{{font-size:1.5rem;filter:grayscale(1)}}
 .buy.on.eq{{background:#2c3d2a;color:#cfe0c8;cursor:default}}
 .slot .thumb img{{width:100%;height:100%;object-fit:contain;border-radius:9px}}
+/* Tweede afbeelding onder de titel in de shop: kleiner, gecentreerd. */
+.slot .thumb2{{margin:.25rem auto .1rem;text-align:center;line-height:0}}
+.slot .thumb2 img{{max-width:62%;max-height:64px;object-fit:contain;border-radius:7px}}
 .gem-empty{{background:#22301f}}
 .btn.small{{margin-top:0;padding:.35rem .55rem;font-size:.82rem;border-radius:8px}}
 .btn.ghost{{background:#2c3d2a;color:#cfe0c8}}
@@ -382,6 +401,18 @@ a.link{{color:{MEADOW}}}
 .savedflash{{position:absolute;top:.45rem;right:.45rem;z-index:2;background:#2f7a3a;
   color:#eafff0;font-size:.66rem;font-weight:800;padding:.15rem .45rem;border-radius:6px;
   box-shadow:0 1px 4px rgba(0,0,0,.4);transition:opacity .6s}}
+/* Auto-save-flits (op veldwijziging), onderaan de kaart zodat hij de ✓ Saved-badge niet overlapt. */
+.autoflash{{position:absolute;bottom:.45rem;right:.45rem;z-index:2;background:#2f7a3a;
+  color:#eafff0;font-size:.62rem;font-weight:800;padding:.1rem .4rem;border-radius:6px;
+  opacity:0;transition:opacity .3s;pointer-events:none}}
+/* Beheerblok voor de tweede afbeelding (plain items). */
+.img2box{{margin-top:.35rem;border-top:1px dashed #2c3d2a;padding-top:.4rem;
+  display:flex;flex-direction:column;gap:.35rem}}
+.img2box .lbl2{{font-size:.62rem;color:#9db095;font-weight:700}}
+.img2box .thumb2{{aspect-ratio:1;border:1px solid #26331f;border-radius:9px;background:#0e1510;
+  display:grid;place-items:center;overflow:hidden;max-height:88px}}
+.img2box .thumb2 img{{max-width:100%;max-height:100%;object-fit:contain;border-radius:7px}}
+.img2box .thumb2.empty{{font-size:.62rem;color:#6b7d63}}
 .aitem .save{{width:100%;margin-top:.1rem}}
 .arow{{display:flex;gap:.3rem;align-items:center}}
 .arow .iform{{margin:0}}
@@ -922,9 +953,19 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
             id = it.id,
         )
     };
+    // Plain items (geen gem/pass) mogen een tweede, kleinere afbeelding onder de
+    // titel dragen.
+    let img2 = if it.category.is_empty() && !it.image2.is_empty() {
+        format!(
+            "<div class=\"thumb2\"><img src=\"/uploads/{}\" alt=\"\"></div>",
+            esc(&it.image2)
+        )
+    } else {
+        String::new()
+    };
     format!(
         "<div class=\"slot\"><div class=\"thumb\">{thumb}</div>\
-         <div class=\"name\">{name}</div>\
+         <div class=\"name\">{name}</div>{img2}\
          <div class=\"price\">{MC} {price}</div>{badge}{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
@@ -1452,6 +1493,39 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         String::new()
     };
 
+    // Tweede afbeelding (klein, onder de titel in de shop) — enkel voor plain items.
+    let img2_ui = if it.category.is_empty() {
+        let thumb2 = if it.image2.is_empty() {
+            "<div class=\"thumb2 empty\">— no 2nd image —</div>".to_string()
+        } else {
+            format!(
+                "<div class=\"thumb2\"><img src=\"/uploads/{}\" alt=\"\"></div>",
+                esc(&it.image2)
+            )
+        };
+        let remove2 = if it.image2.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<form method=\"post\" action=\"/admin/item/image2/clear\" class=\"iform\">\
+                   <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                   <button class=\"btn small ghost\" type=\"submit\">Remove 2nd</button></form>",
+                id = it.id,
+            )
+        };
+        format!(
+            "<div class=\"img2box\"><div class=\"lbl2\">2nd image (under title)</div>{thumb2}\
+               <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
+                 <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                 <input type=\"hidden\" name=\"slot\" value=\"2\">\
+                 <input type=\"file\" name=\"file\" accept=\"image/*\">\
+                 <button class=\"btn small ghost\" type=\"submit\">Upload 2nd</button></form>{remove2}</div>",
+            id = it.id,
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         "<div class=\"aitem\" id=\"item-{id}\">{flash}<div class=\"thumb\">{thumb}</div>\
          <form method=\"post\" action=\"/admin/item/update\">\
@@ -1472,7 +1546,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
          <form class=\"iupload\" method=\"post\" action=\"/admin/item/image\" enctype=\"multipart/form-data\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <input type=\"file\" name=\"file\" accept=\"image/*\">\
-           <button class=\"btn small ghost\" type=\"submit\">Upload</button></form>{remove_img}\
+           <button class=\"btn small ghost\" type=\"submit\">Upload</button></form>{remove_img}{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
              <input type=\"hidden\" name=\"id\" value=\"{id}\">\
@@ -1496,6 +1570,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         cp = sel("primary"),
         cs = sel("secondary"),
         cpr = sel("prism"),
+        img2_ui = img2_ui,
     )
 }
 
@@ -1551,7 +1626,7 @@ async fn admin_market(
         "<h1>⚙ Shop management</h1>{shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
            <input name=\"title\" placeholder=\"New shelf name\" required>\
-           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}"
+           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}{AUTOSAVE_JS}"
     );
     let body = format!("{}{}", admin_subtabs("market"), body);
     Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true, ""), true, &body)).into_response()
@@ -2199,12 +2274,16 @@ async fn admin_item_image(
         return Redirect::to("/").into_response();
     }
     let mut id: Option<i64> = None;
+    let mut slot = String::new();
     let mut file: Option<(String, Vec<u8>)> = None;
     while let Ok(Some(field)) = mp.next_field().await {
         let field_name = field.name().map(|s| s.to_string());
         match field_name.as_deref() {
             Some("id") => {
                 id = field.text().await.ok().and_then(|s| s.trim().parse().ok());
+            }
+            Some("slot") => {
+                slot = field.text().await.unwrap_or_default();
             }
             Some("file") => {
                 let ct = field.content_type().map(|s| s.to_string());
@@ -2219,10 +2298,33 @@ async fn admin_item_image(
         }
     }
     if let (Some(id), Some((ext, bytes))) = (id, file) {
-        let filename = format!("item_{id}.{ext}");
+        // slot "2" = de tweede afbeelding; alle andere waarden = de hoofdafbeelding.
+        let is2 = slot.trim() == "2";
+        let filename = if is2 {
+            format!("item_{id}_2.{ext}")
+        } else {
+            format!("item_{id}.{ext}")
+        };
         if std::fs::write(format!("{UPLOAD_DIR}/{filename}"), &bytes).is_ok() {
-            db::set_item_image(&st.pool, id, &filename);
+            if is2 {
+                db::set_item_image2(&st.pool, id, &filename);
+            } else {
+                db::set_item_image(&st.pool, id, &filename);
+            }
         }
+    }
+    Redirect::to(&format!("/admin/market?saved={}", id.unwrap_or(0))).into_response()
+}
+
+/// De tweede afbeelding van een item wissen.
+async fn admin_item_image2_clear(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<IdForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::clear_item_image2(&st.pool, f.id);
+        return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
     Redirect::to("/admin/market").into_response()
 }

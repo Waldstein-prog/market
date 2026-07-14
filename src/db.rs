@@ -131,6 +131,7 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "category", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "description", "TEXT NOT NULL DEFAULT ''");
+    ensure_column(&conn, "items", "image2", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "inventory", "item_id", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
     // Hytale-tickets zijn boosts (voor de Boosts-tab).
@@ -990,6 +991,7 @@ pub struct Item {
     pub name: String,
     pub price: i64,
     pub image: String,
+    pub image2: String, // optionele tweede afbeelding (plain items: kleiner onder de titel)
     pub color: String,
     pub role_id: String,
     pub duration: i64, // 0 = permanent, >0 = seconden
@@ -1005,6 +1007,7 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         name: r.get("name")?,
         price: r.get("price")?,
         image: r.get("image")?,
+        image2: r.get("image2")?,
         color: r.get("color")?,
         role_id: r.get("role_id")?,
         duration: r.get("duration")?,
@@ -1032,7 +1035,7 @@ pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items
              WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
         )
         .expect("prepare shelf_items");
@@ -1045,7 +1048,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items
              WHERE zone = 'lucky' ORDER BY position, id",
         )
         .expect("prepare lucky_items");
@@ -1057,7 +1060,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
 pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items WHERE id = ?1",
+        "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items WHERE id = ?1",
         params![id],
         row_to_item,
     )
@@ -1143,6 +1146,20 @@ pub fn clear_item_image(pool: &DbPool, id: i64) {
     let conn = pool.get().expect("db");
     conn.execute("UPDATE items SET image = '' WHERE id = ?1", params![id])
         .expect("clear image");
+}
+
+/// De tweede afbeelding van een item zetten (plain items: klein onder de titel).
+pub fn set_item_image2(pool: &DbPool, id: i64, image: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE items SET image2 = ?2 WHERE id = ?1", params![id, image])
+        .expect("set image2");
+}
+
+/// De tweede afbeelding van een item wissen.
+pub fn clear_item_image2(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE items SET image2 = '' WHERE id = ?1", params![id])
+        .expect("clear image2");
 }
 
 /// Verplaats een item één plaats naar links (dir<0) of rechts (dir>0) binnen
@@ -1436,7 +1453,7 @@ pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, color, role_id, duration, category, description, zone, shelf_id FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items
              WHERE category = ?1 ORDER BY position, id",
         )
         .expect("prepare gems_by_category");
