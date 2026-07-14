@@ -105,6 +105,32 @@ impl Discord {
         Ok(out)
     }
 
+    /// Het rol-ID van de rol met exact deze naam (hoofdletter-ongevoelig) in de eigen guild
+    /// (`self.guild`). Ok(None) = geen rol met die naam.
+    pub async fn role_id_by_name(&self, name: &str) -> Result<Option<String>, String> {
+        let url = format!("{API}/guilds/{}/roles", self.guild);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+        }
+        let arr: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(roles) = arr.as_array() {
+            for r in roles {
+                if r["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+                    return Ok(r["id"].as_str().map(|s| s.to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Alle guild-leden (max 1000): (user_id, weergavenaam). Bots overgeslagen.
     /// Vereist de GUILD_MEMBERS-intent (staat aan voor de gateway-bot).
     pub async fn list_members(&self, guild: &str) -> Result<Vec<(String, String)>, String> {

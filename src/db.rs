@@ -126,6 +126,7 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "discord_color", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "hytale_name", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "daily_streak", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "coins", "equipped_gem", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "admin_undo", "prev_earned", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
@@ -1501,6 +1502,30 @@ pub fn owned_item_ids(pool: &DbPool, uid: &str) -> Vec<i64> {
     rows.filter_map(Result::ok).collect()
 }
 
+/// De naam van de momenteel "gebruikte" gem (voor de bijhorende Discord-rol). Leeg = geen.
+pub fn get_equipped_gem(pool: &DbPool, uid: &str) -> String {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT equipped_gem FROM coins WHERE user_id = ?1",
+        params![uid],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// De "gebruikte" gem-naam vastleggen (of leeg om te wissen).
+pub fn set_equipped_gem(pool: &DbPool, uid: &str, gem: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE coins SET equipped_gem = ?2 WHERE user_id = ?1",
+        params![uid, gem],
+    )
+    .ok();
+}
+
 /// Bezeten booster-items (categorie 'booster', bv. Lucky Horseshoe) met het aantal.
 /// (naam, afbeelding, kleur, aantal). Enkel wat de user effectief bezit (aantal > 0).
 pub fn owned_booster_items(pool: &DbPool, uid: &str) -> Vec<(String, String, String, i64)> {
@@ -1548,8 +1573,11 @@ pub fn reset_test_collection(pool: &DbPool, uid: &str) -> i64 {
         params![uid],
     )
     .ok();
-    tx.execute("UPDATE coins SET name_color = '' WHERE user_id = ?1", params![uid])
-        .ok();
+    tx.execute(
+        "UPDATE coins SET name_color = '', equipped_gem = '' WHERE user_id = ?1",
+        params![uid],
+    )
+    .ok();
     tx.commit().ok();
     refund
 }

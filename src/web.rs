@@ -890,8 +890,7 @@ fn inventory_home(
     // Admin-testhulp: verzamel-aankopen terugdraaien (coins terug). (Sync gem colors staat
     // op de Manage-pagina.)
     let admin_reset = if admin {
-        "<form method=\"post\" action=\"/admin/reset-collection\" style=\"margin:.2rem 0 .8rem\" \
-           onsubmit=\"return confirm('Reset your test collection? This refunds the coins you spent on inventory items and un-owns them.')\">\
+        "<form method=\"post\" action=\"/admin/reset-collection\" style=\"margin:.2rem 0 .8rem\">\
            <button class=\"btn small ghost\" type=\"submit\">🧪 Reset my test collection</button></form>"
     } else {
         ""
@@ -1052,10 +1051,21 @@ async fn market(
         .into_response()
 }
 
+/// Cache-buster op basis van de bestand-mtime: een vervangen afbeelding krijgt zo een nieuwe
+/// URL, terwijl de browser ongewijzigde afbeeldingen uit z'n cache haalt (geen herlaad-flits).
+fn img_ver(image: &str) -> u64 {
+    std::fs::metadata(format!("{UPLOAD_DIR}/{image}"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Thumbnail uit (afbeelding, kleur): geüploade afbeelding, anders een gem-bol.
 fn thumb_html(image: &str, color: &str) -> String {
     if !image.is_empty() {
-        format!("<img src=\"/uploads/{}\" alt=\"\">", esc(image))
+        format!("<img src=\"/uploads/{}?v={}\" alt=\"\">", esc(image), img_ver(image))
     } else if !color.is_empty() {
         format!(
             "<span class=\"gem\" style=\"background:radial-gradient(circle at 35% 30%,#ffffffcc,{})\"></span>",
@@ -1111,8 +1121,9 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool) -> String {
         String::new()
     } else {
         format!(
-            "<div class=\"thumb2\"><img src=\"/uploads/{}\" alt=\"\"></div>",
-            esc(&it.image2)
+            "<div class=\"thumb2\"><img src=\"/uploads/{}?v={}\" alt=\"\"></div>",
+            esc(&it.image2),
+            img_ver(&it.image2)
         )
     };
     // Omschrijving (uit Manage) tonen onder de titel/2e afbeelding.
@@ -1579,18 +1590,45 @@ async fn set_hytale_name_route(
     Redirect::to(&format!("/?tab=boosts&msg={}", pct(&msg))).into_response()
 }
 
-/// Een ontgrendelde gem "gebruiken": zet je naamkleur op de gem-kleur.
+/// Een bezeten gem "gebruiken": zet je naamkleur (site) én ken de bijhorende Discord-rol
+/// toe (gem-naam = rolnaam, in `cfg.guild_id` = de dev-guild). De vorige gem-rol wordt
+/// eerst ingetrokken zodat er maar één gem-kleur tegelijk actief is.
 async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
-    if let Some((uid, name)) = require_flowerborn(&st, &headers).await {
-        if db::owned_item_ids(&st.pool, &uid).contains(&f.item_id) {
-            if let Some(item) = db::get_item(&st.pool, f.item_id) {
-                if !item.category.is_empty() {
-                    db::set_name_color(&st.pool, &uid, &name, &item.color);
-                }
-            }
+    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    if !db::owned_item_ids(&st.pool, &uid).contains(&f.item_id) {
+        return Redirect::to("/?tab=gems").into_response();
+    }
+    let Some(item) = db::get_item(&st.pool, f.item_id) else {
+        return Redirect::to("/?tab=gems").into_response();
+    };
+    if item.category != "inventory" {
+        return Redirect::to("/?tab=gems").into_response();
+    }
+
+    // Vorige gem-rol intrekken (indien een andere gem geëquipt was).
+    let prev = db::get_equipped_gem(&st.pool, &uid);
+    if !prev.is_empty() && !prev.eq_ignore_ascii_case(&item.name) {
+        if let Ok(Some(rid)) = st.dc.role_id_by_name(&prev).await {
+            let _ = st.dc.set_role(&uid, &rid, false).await;
         }
     }
-    Redirect::to("/?tab=gems").into_response()
+
+    // Naamkleur (site) + equipped bijhouden.
+    db::set_name_color(&st.pool, &uid, &name, &item.color);
+    db::set_equipped_gem(&st.pool, &uid, &item.name);
+
+    // Discord-rol toekennen (gem-naam = rolnaam).
+    let msg = match st.dc.role_id_by_name(&item.name).await {
+        Ok(Some(rid)) => match st.dc.set_role(&uid, &rid, true).await {
+            Ok(_) => format!("✨ Equipped {} — your Discord name colour is now set.", item.name),
+            Err(e) => format!("⚠️ Couldn't assign the '{}' Discord role: {e}", item.name),
+        },
+        Ok(None) => format!("⚠️ No Discord role named '{}' found (yet).", item.name),
+        Err(e) => format!("⚠️ Discord lookup failed: {e}"),
+    };
+    Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response()
 }
 
 /// Human-friendly duration ("1 day", "24 h", "30 min").
@@ -1672,8 +1710,9 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
             "<div class=\"thumb2 empty\">— no 2nd image —</div>".to_string()
         } else {
             format!(
-                "<div class=\"thumb2\"><img src=\"/uploads/{}\" alt=\"\"></div>",
-                esc(&it.image2)
+                "<div class=\"thumb2\"><img src=\"/uploads/{}?v={}\" alt=\"\"></div>",
+                esc(&it.image2),
+                img_ver(&it.image2)
             )
         };
         let remove2 = if it.image2.is_empty() {
@@ -2522,6 +2561,13 @@ async fn admin_sync_gem_colors(State(st): State<AppState>, headers: HeaderMap) -
 /// coin-gevolgen. Raakt passen niet.
 async fn admin_reset_collection(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if let Some((uid, _name)) = require_admin(&st, &headers) {
+        // Eerst de eventueel geëquipte gem-rol op Discord intrekken.
+        let prev = db::get_equipped_gem(&st.pool, &uid);
+        if !prev.is_empty() {
+            if let Ok(Some(rid)) = st.dc.role_id_by_name(&prev).await {
+                let _ = st.dc.set_role(&uid, &rid, false).await;
+            }
+        }
         let refunded = db::reset_test_collection(&st.pool, &uid);
         let msg = format!("🧪 Test reset — refunded {refunded} coins and cleared your collection.");
         return Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response();
@@ -2595,7 +2641,12 @@ async fn serve_upload(Path(name): Path<String>) -> Response {
     }
     match std::fs::read(format!("{UPLOAD_DIR}/{name}")) {
         Ok(bytes) => (
-            [(axum::http::header::CONTENT_TYPE, content_type_for(&name))],
+            [
+                (axum::http::header::CONTENT_TYPE, content_type_for(&name)),
+                // Lang cachen; de render hangt er een ?v=<mtime> aan, dus een vervangen
+                // afbeelding krijgt automatisch een nieuwe URL.
+                (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
             bytes,
         )
             .into_response(),
