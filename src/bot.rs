@@ -844,8 +844,28 @@ async fn pop_chest(
         return;
     }
 
-    // Genoeg deelnemers → open: random winnaar, prijs, log, resultaat onderaan.
-    let idx = rand::thread_rng().gen_range(0..joiners.len());
+    // Genoeg deelnemers → open. De winnaar wordt GEWOGEN getrokken: wie een Lucky
+    // Horseshoe gebruikte, heeft 2 loten i.p.v. 1 (dubbele kans). Nadien is die boost
+    // opgebruikt — enkel bij een echt uitbetalende chest, niet bij een despawn.
+    let weights: Vec<u32> = joiners.iter().map(|(uid, _)| db::chest_weight(&pool, uid)).collect();
+    let total_weight: u32 = weights.iter().sum();
+    let mut roll = rand::thread_rng().gen_range(0..total_weight);
+    let mut idx = 0;
+    for (i, w) in weights.iter().enumerate() {
+        if roll < *w {
+            idx = i;
+            break;
+        }
+        roll -= *w;
+    }
+    let winner_had_luck = weights[idx] > 1;
+    // Boost verbruiken bij álle deelnemers die er een hadden (ze deden mee aan een
+    // uitbetalende chest, dus het hoefijzer is nu op).
+    for ((uid, _), w) in joiners.iter().zip(&weights) {
+        if *w > 1 {
+            db::clear_chest_luck(&pool, uid);
+        }
+    }
     let (winner_uid, winner_name) = &joiners[idx];
     let prize = chest_prize();
     let total = db::award(&pool, winner_uid, winner_name, prize, now_secs());
@@ -868,11 +888,16 @@ async fn pop_chest(
                 joiners.len()
             )),
     );
+    let luck_line = if winner_had_luck {
+        "\n🍀 Their Lucky Horseshoe doubled the odds!"
+    } else {
+        ""
+    };
     let embed = serenity::CreateEmbed::new()
         .title("The Magic Chest opened!")
         .description(format!(
             "Out of **{}** {opener_word}, <@{winner_uid}> got lucky!\n\
-             They won **{prize}** {COIN_EMOJI} !!!",
+             They won **{prize}** {COIN_EMOJI} !!!{luck_line}",
             joiners.len()
         ))
         .colour(0x6B_9B_52);

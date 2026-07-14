@@ -14,6 +14,36 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-14 late) — Lucky Horseshoe-effect LIVE (chest-luck) + pas-check
+> Gebouwd, **op dev getest** (web-only, `MARKET_WEB_ONLY=1` op een DB-kopie met gesmede sessie),
+> **GEDEPLOYD + LIVE** (`deploy.sh` → systemd `market` actief, migratie schoon gelopen op prod-DB)
+> en **gecommit**. Nog te doen: **de gewogen chest-trekking live valideren op de dev-guild** met
+> `!chest` (kansmatig, dus lokaal niet te bewijzen — user test later).
+
+**Lucky Horseshoe = chest-luck-booster (eindelijk werkend).** Use verbruikt één hoefijzer en geeft
+**dubbele lot-kans** (2 loten i.p.v. 1) bij de eerstvolgende **uitbetalende** treasure chest waaraan
+het lid meedoet. Eenmalig; nadien op.
+- **`db.rs`**: nieuwe kolom `coins.chest_luck` (0/1). `activate_horseshoe` (atomisch: verbruik 1 exemplaar
+  + zet vlag; **guard**: al actief → `Ok(false)`, geen tweede hoefijzer opbranden; geen bezit → `Err`),
+  `chest_weight` (2 bij actief, anders 1), `has_chest_luck`, `clear_chest_luck`. `owned_booster_items`
+  geeft nu ook `item_id` terug. Reset ruimt `chest_luck` mee op.
+- **`bot.rs`** `pop_chest`: winnaar-trekking is nu **GEWOGEN** i.p.v. uniform (hoefijzer-houder = gewicht 2).
+  Boost wordt verbruikt bij **álle** deelnemers die er een hadden — **enkel bij een echt uitbetalende chest**
+  (niet bij een despawn). Win-embed toont *"🍀 Their Lucky Horseshoe doubled the odds!"* als de winnaar er
+  een had.
+- **`web.rs`**: route `/use/booster` + handler; Use-knop bekabeld (was "coming soon"). Actieve boost →
+  **banner "🍀 A Lucky Horseshoe is active…"** (LOS van bezit — anders verdween met je laatste hoefijzer
+  ook élk teken van de boost; **op dev gevonden UX-gat, meteen gefixt**) + kaart-badge "Active" + knop grijst uit.
+- **⚠️ Latente prod-bug gefixt (nooit getriggerd):** de Lucky Horseshoe stond in mijn dev-DB als categorie
+  **`boost`** (= Hytale-pás) met `duration=0` → kopen zou via de pas-flow **permanente Hytale-toegang** geven!
+  Migratie corrigeert nu robuust `Lucky Horseshoe` → `booster` bij élke andere categorie (prijs/afbeelding
+  blijven). Geverifieerd: niemand had hem gekocht, niemand kreeg onterecht toegang.
+
+**Pas-vraag beantwoord (geen codewijziging nodig):** dagpas kopen, 5 min later permapas → **werkt vlot**.
+`grant_perma_whitelist` doet `ON CONFLICT(user_id) DO UPDATE SET expires=NULL` → je whitelist-rij wordt
+**ter plaatse opgewaardeerd** naar permanent, geen dubbele rij, geen toegangsonderbreking (enkel resterende
+dagpas-uren vervallen, geen verrekening). Omgekeerd (dagpas ná perma) wordt correct geblokkeerd in `purchase`.
+
 ## ⏭️ Sessie (2026-07-14 avond) — website: gems-collectie + passen + Discord-rollen + UX
 > **Parallelle "website-sessie"** (naast de Twitch-sessie hieronder). Alles GEBOUWD + lokaal e2e
 > getest (poort 8710, `MARKET_ENV=dev`) + **GEDEPLOYD + LIVE** + gecommit/subtree-gepusht
@@ -58,7 +88,8 @@ client-thema = privé; profiel-thema-kleuren (`/users/{id}/profile`) = **403 voo
 = eeuwig. Manage toont read-only "Access"; het minuten-veld is overal weg.
 
 **Boosters** (🍀 op de Boosts-tab): bezeten `booster`-items (Lucky Horseshoe) met aantal ×N + een
-**uitgeschakelde Use-knop** (Use-logica volgt later). Geen verzamel-/grey-out-logica; herkoopbaar.
+**werkende Use-knop** (chest-luck-effect — zie sessie *2026-07-14 late* bovenaan). Geen verzamel-/
+grey-out-logica; herkoopbaar.
 
 **🧪 Reset all test purchases** (Gems-tab, admin-only): refundt ALLE aankopen (gems + passen + boosters),
 maakt inventory leeg, verwijdert de **`hytale_whitelist`-grant + `perma_access`**, reset naamkleur/equipped-
@@ -73,9 +104,9 @@ Manage-afbeeldingskaders; **2e afbeelding** per item + **auto-save** van de Mana
 item-omschrijving **cursief** in de shop; **bredere shop-kaders** (210px); Amber-prijs-fix.
 
 **Open / volgend:** (1) **font-in-preview** bouwen (`font_id`→webfont-mapping); (2) **Fortuna's rol hoger
-slepen** (dev+prod) voor waterdichte gem-kleuren; (3) **Booster-Use-logica** (Lucky Horseshoe-effect);
-(4) losse **Ruby-testrol** bij Waldstein in de **prod**-guild opruimen; (5) shop members-zichtbaar maken
-(site-gate weg) zodra de graphics af zijn.
+slepen** (dev+prod) voor waterdichte gem-kleuren; (3) ~~Booster-Use-logica (Lucky Horseshoe-effect)~~ ✅
+**GEDAAN** (sessie *2026-07-14 late*) — enkel nog live valideren op dev-guild; (4) losse **Ruby-testrol** bij
+Waldstein in de **prod**-guild opruimen; (5) shop members-zichtbaar maken (site-gate weg) zodra de graphics af zijn.
 
 ## ⏭️ Laatste sessie (2026-07-14 avond) — Twitch-pas → Rust + tale fd-lek + panel-timer
 > Parallelle sessie naast de website-sessie (die aan `web.rs`/templates werkte) en een

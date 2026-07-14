@@ -127,6 +127,9 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "hytale_name", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "daily_streak", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "equipped_gem", "TEXT NOT NULL DEFAULT ''");
+    // Lucky Horseshoe: 0 = geen boost, 1 = dubbele lot-kans bij de eerstvolgende
+    // uitbetalende treasure chest waaraan het lid meedoet (nadien terug op 0).
+    ensure_column(&conn, "coins", "chest_luck", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "admin_undo", "prev_earned", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "items", "role_id", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "duration", "INTEGER NOT NULL DEFAULT 0");
@@ -150,11 +153,13 @@ pub fn init_pool(path: &str) -> DbPool {
         [],
     )
     .ok();
-    // Lucky Horseshoe is een 'booster' (geen verzamel-item: gewoon herkoopbaar, geen grey-out,
-    // hoort op de Boosters-tab). Eenmalige fix van de foute inventory-migratie; nadien
-    // overschrijfbaar in Manage.
+    // Lucky Horseshoe is ALTIJD een 'booster' (herkoopbaar, geen grey-out, hoort op de
+    // Boosters-tab, effect = chest-luck). Fix zowel de oude 'inventory'-migratie ALS een
+    // handmatige mis-configuratie naar 'boost' — die laatste is de Hytale-pás-categorie:
+    // met duration=0 zou kopen van een hoefijzer anders permanente Hytale-toegang geven!
+    // Enkel de categorie wordt gecorrigeerd; prijs/afbeelding uit Manage blijven behouden.
     conn.execute(
-        "UPDATE items SET category='booster' WHERE name='Lucky Horseshoe' AND category='inventory'",
+        "UPDATE items SET category='booster' WHERE name='Lucky Horseshoe' AND category != 'booster'",
         [],
     )
     .ok();
@@ -1358,6 +1363,83 @@ pub fn consume_item(pool: &DbPool, uid: &str, item_id: i64) {
     .expect("consume item");
 }
 
+/// Staat er nu een chest-luck-boost (Lucky Horseshoe) klaar voor dit lid?
+pub fn has_chest_luck(pool: &DbPool, uid: &str) -> bool {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT chest_luck FROM coins WHERE user_id = ?1",
+        params![uid],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+        > 0
+}
+
+/// Het lot-gewicht van dit lid bij een treasure-chest-trekking: 2 met een actieve
+/// Lucky Horseshoe, anders 1.
+pub fn chest_weight(pool: &DbPool, uid: &str) -> u32 {
+    if has_chest_luck(pool, uid) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Verbruik de chest-luck-boost (na een uitbetalende chest). Idempotent.
+pub fn clear_chest_luck(pool: &DbPool, uid: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE coins SET chest_luck = 0 WHERE user_id = ?1",
+        params![uid],
+    )
+    .ok();
+}
+
+/// Gebruik een Lucky Horseshoe: verbruik één exemplaar uit de inventory en zet de
+/// chest-luck-boost aan. Atomisch. Retourneert:
+///   Ok(true)  = geactiveerd,
+///   Ok(false) = er stond al een boost klaar (niets verbruikt, geen verspilling),
+///   Err(_)    = geen exemplaar in bezit.
+pub fn activate_horseshoe(pool: &DbPool, uid: &str, item_id: i64) -> Result<bool, String> {
+    let mut conn = pool.get().expect("db");
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let already: i64 = tx
+        .query_row(
+            "SELECT chest_luck FROM coins WHERE user_id = ?1",
+            params![uid],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+    if already > 0 {
+        return Ok(false); // al actief — geen tweede hoefijzer opbranden
+    }
+    let row_id: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM inventory WHERE user_id = ?1 AND item_id = ?2 LIMIT 1",
+            params![uid, item_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(row_id) = row_id else {
+        return Err("You don't own a Lucky Horseshoe.".to_string());
+    };
+    tx.execute("DELETE FROM inventory WHERE id = ?1", params![row_id])
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE coins SET chest_luck = 1 WHERE user_id = ?1",
+        params![uid],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// Zet de permanente-toegangsvlag (na gebruik van de permanente pas).
 pub fn set_perma_access(pool: &DbPool, uid: &str, username: &str) {
     let conn = pool.get().expect("db");
@@ -1527,21 +1609,23 @@ pub fn set_equipped_gem(pool: &DbPool, uid: &str, gem: &str) {
 }
 
 /// Bezeten booster-items (categorie 'booster', bv. Lucky Horseshoe) met het aantal.
-/// (naam, afbeelding, kleur, aantal). Enkel wat de user effectief bezit (aantal > 0).
-pub fn owned_booster_items(pool: &DbPool, uid: &str) -> Vec<(String, String, String, i64)> {
+/// (item_id, naam, afbeelding, kleur, aantal). Enkel wat de user effectief bezit (aantal > 0).
+pub fn owned_booster_items(pool: &DbPool, uid: &str) -> Vec<(i64, String, String, String, i64)> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT i.name, i.image, i.color, COUNT(inv.id) FROM items i
+            "SELECT i.id, i.name, i.image, i.color, COUNT(inv.id) FROM items i
                JOIN inventory inv ON inv.item_id = i.id AND inv.user_id = ?1
               WHERE i.category = 'booster'
               GROUP BY i.id HAVING COUNT(inv.id) > 0 ORDER BY i.name",
         )
         .expect("prep boosters");
-    stmt.query_map(params![uid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .expect("q boosters")
-        .filter_map(Result::ok)
-        .collect()
+    stmt.query_map(params![uid], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })
+    .expect("q boosters")
+    .filter_map(Result::ok)
+    .collect()
 }
 
 /// Admin-testhulp: draai ALLE testaankopen terug. Stort de op elk gekocht item (gems +
@@ -1570,7 +1654,7 @@ pub fn reset_test_collection(pool: &DbPool, uid: &str) -> i64 {
     // Pas-test terugdraaien: whitelist-grant weg (tale-bot reconcilet → van whitelist.json/panel).
     tx.execute("DELETE FROM hytale_whitelist WHERE user_id = ?1", params![uid]).ok();
     tx.execute(
-        "UPDATE coins SET name_color = '', equipped_gem = '', perma_access = 0 WHERE user_id = ?1",
+        "UPDATE coins SET name_color = '', equipped_gem = '', perma_access = 0, chest_luck = 0 WHERE user_id = ?1",
         params![uid],
     )
     .ok();

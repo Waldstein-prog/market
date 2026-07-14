@@ -148,6 +148,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/public", post(set_public_route))
         .route("/buy", post(buy))
         .route("/use/gem", post(use_gem))
+        .route("/use/booster", post(use_booster))
         .route("/hytale/name", post(set_hytale_name_route))
         .route("/admin/market", get(admin_market))
         .route("/admin/shelf/add", post(admin_shelf_add))
@@ -459,6 +460,9 @@ a.link{{color:{MEADOW}}}
 .gemcard.previewsel{{outline:2px solid {MEADOW};outline-offset:2px}}
 .gemcard .gdesc{{font-size:.7rem;color:#9db095;line-height:1.25;
   max-height:2.6em;overflow:hidden}}
+.booster-active{{font-size:.72rem;color:#c9a227;font-weight:700;text-align:center;margin:.15rem 0 .3rem}}
+.booster-banner{{background:rgba(201,162,39,.12);border:1px solid rgba(201,162,39,.5);
+  color:#e0c56a;border-radius:10px;padding:.55rem .8rem;margin:.6rem 0;font-size:.85rem;font-weight:600}}
 .slot.locked{{opacity:.5}}
 .slot.locked .thumb{{display:grid;place-items:center}}
 .slot .lock{{font-size:1.5rem;filter:grayscale(1)}}
@@ -948,24 +952,47 @@ fn inventory_home(
             )
         };
 
-        // Boosters (bv. Lucky Horseshoe): bezeten exemplaren met een (voorlopig)
-        // uitgeschakelde Use-knop — de Use-logica volgt later.
+        // Boosters (bv. Lucky Horseshoe): bezeten exemplaren met een werkende Use-knop.
+        // Gebruiken = één hoefijzer opbranden + dubbele lot-kans bij de eerstvolgende
+        // treasure chest. Zolang die boost klaarstaat, grijst de knop uit (geen tweede
+        // hoefijzer verspillen) en toont de kaart een "Active"-badge.
         let boosters = db::owned_booster_items(pool, uid);
-        let boosters_section = if boosters.is_empty() {
+        let luck_active = db::has_chest_luck(pool, uid);
+        // Banner LOS van bezit: ook wie z'n laatste hoefijzer al opbrandde ziet dat de
+        // boost klaarstaat voor de volgende chest (anders verdwijnt met het item ook elk
+        // spoor van de actieve boost).
+        let luck_banner = if luck_active {
+            "<div class=\"booster-banner\">🍀 A Lucky Horseshoe is active — your odds in the \
+             next treasure chest are doubled.</div>"
+                .to_string()
+        } else {
+            String::new()
+        };
+        let shelf = if boosters.is_empty() {
             String::new()
         } else {
             let cards: String = boosters
                 .iter()
-                .map(|(bname, image, color, count)| {
+                .map(|(id, bname, image, color, count)| {
                     let qty = if *count > 1 {
                         format!(" <span style=\"color:#9db095\">×{count}</span>")
                     } else {
                         String::new()
                     };
+                    let action = if luck_active {
+                        "<div class=\"booster-active\">🍀 Active — next chest</div>\
+                         <button class=\"buy\" type=\"button\" disabled title=\"A Lucky Horseshoe is already active for your next chest\">Use</button>".to_string()
+                    } else {
+                        format!(
+                            "<form method=\"post\" action=\"/use/booster\" class=\"buyform\">\
+                               <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
+                               <button class=\"buy\" type=\"submit\" title=\"Double your odds in the next treasure chest\">Use</button>\
+                             </form>"
+                        )
+                    };
                     format!(
                         "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
-                         <div class=\"name\">{nm}{qty}</div>\
-                         <button class=\"buy\" type=\"button\" disabled title=\"Use coming soon\">Use</button></div>",
+                         <div class=\"name\">{nm}{qty}</div>{action}</div>",
                         thumb = thumb_html(image, color),
                         nm = esc(bname),
                     )
@@ -973,7 +1000,7 @@ fn inventory_home(
                 .collect();
             format!("<h2 class=\"shelf-title\">🍀 Boosters</h2><div class=\"shelf\">{cards}</div>")
         };
-        format!("{status}{name_block}{boosters_section}")
+        format!("{status}{name_block}{luck_banner}{shelf}")
     };
 
     let cls = |t: &str| if t == active { " on" } else { "" };
@@ -1632,6 +1659,29 @@ async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<B
         Err(e) => format!("⚠️ Discord lookup failed: {e}"),
     };
     Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response()
+}
+
+/// Gebruik een booster (Lucky Horseshoe): verbruik één exemplaar en zet de
+/// chest-luck-boost aan (dubbele lot-kans bij de eerstvolgende treasure chest).
+async fn use_booster(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
+    let Some((uid, _name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let Some(item) = db::get_item(&st.pool, f.item_id) else {
+        return Redirect::to("/?tab=boosts").into_response();
+    };
+    if item.category != "booster" {
+        return Redirect::to("/?tab=boosts").into_response();
+    }
+    let msg = match db::activate_horseshoe(&st.pool, &uid, f.item_id) {
+        Ok(true) => format!(
+            "🍀 {} used — your odds in the next treasure chest are doubled!",
+            item.name
+        ),
+        Ok(false) => "🍀 You already have a Lucky Horseshoe active for your next chest.".to_string(),
+        Err(e) => format!("⚠️ {e}"),
+    };
+    Redirect::to(&format!("/?tab=boosts&msg={}", pct(&msg))).into_response()
 }
 
 /// Human-friendly duration ("1 day", "24 h", "30 min").
