@@ -14,6 +14,60 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-15g) — voorraad + 1 per persoon, embed-knop, poorten dicht
+
+**(A) Voorraadsysteem vervangt "One at a time"** (die leefde één sessie; user: "dit werkt niet
+zo"). Nu een echte teller: **`items.stock`** — **-1 = onbeperkt** (default, want gems mogen niet
+plots uitverkocht zijn), anders het aantal dat nog te koop is. Manage-kaart heeft een eigen
+**"+ Add stock"**-formuliertje dat **optelt** ("er komen er 3 bij" — zo denkt een admin) plus
+een **∞**-knop om weer onbeperkt te zetten. De shop toont de voorraad (`3 left` / rood
+`out of stock`), want dan weet een speler of wachten zin heeft.
+**Twee onafhankelijke grendels:** voorraad = globaal (op 0 dicht voor iedereen tot je bijvult);
+**1 per persoon** = wie een lopende pas heeft ziet Out of Stock, ook al ligt er nog voorraad.
+Beide zitten in **`db::purchase`**, atomisch mét het afboeken van de coins — de voorraad telt af
+met `WHERE stock > 0`, dus twee gelijktijdige klikkers nemen nooit samen de laatste mee.
+`auto_sold_out` is weg, kolom incl. (`DROP COLUMN`), anders staan er twee mechanismen naast elkaar.
+Getest met drie echte leden: 3 → koop → koper ziet dicht maar anderen `2 left` → … → 0 → dicht
+voor iedereen → admin vult bij → open. ⚠️ Begrenst het **aantal aankopen**, niet de opgespaarde
+tijd; het echte plafond blijft de TODO hieronder.
+
+**(B) Shop ververst zichzelf.** `AUTO_REFRESH_JS` bestond al (Log/Coins/Channels) maar stond
+níét op de shop → voorraad-aanvullingen verschenen pas na een handmatige F5. Nu een
+`auto_refresh_js(ms)`-helper: **shop 5s** (user-wens: voorraad meteen zien landen), Log/Coins/
+Channels blijven **20s** (daar zit je te lezen). Slaat over zolang je in een veld staat.
+NB: een tabblad dat vóór de deploy geladen is heeft het script nog niet — één keer F5.
+
+**(C) Embed-knop stuurde mensen weg.** Klacht "de redirect staat nog op, mensen geraken niet in
+de shop" was **niet** de (verwijderde) gate: de knop `site_access` in de #🧺market-embed was een
+**interactie**-knop die een ephemeral terugstuurde met `…/info` voor niet-admins. Nu een
+**link-knop** → `https://magicmeadow.org/login?next=/market`: geen interactie dus **geen
+ephemeral**, en iedereen landt na login op de shop. Bericht `1526273201456414894` in kanaal
+`1403810528039665745` ge-PATCHt; Check In + Info bleven. De `site_access`-handler in `bot.rs` is
+daarmee dood — **nog op te ruimen**.
+
+**(D) 🔒 Poorten 8700 + 8090 dicht** (v4+v6). Aanleiding: user wou het server-IP aan spelers
+geven. Dat is veilig — het IP staat sowieso in DNS en de whitelist gate't de game — maar de
+doorlichting toonde dat **market op 8700 en het panel op 8090 rechtstreeks van het internet
+bereikbaar waren, buiten Caddy om**. Daardoor was mijn "Caddy blokkeert `/internal/*`"-laag in de
+praktijk géén laag: wie 8700 kende stond recht voor het revoke-endpoint (enkel het geheim hield
+hem tegen). Nu: alles via het domein (Caddy → 127.0.0.1). Van buitenaf geverifieerd: IP:8700 en
+IP:8090 onbereikbaar, `magicmeadow.org` + `/panel` + `/market` werken, `/internal` geeft 404.
+⚠️ Rechtstreeks `https://IP:8090` werkt dus niet meer → gebruik **Manage → 🖥 Server**.
+
+**(E) 🅿️ TODO — fail2ban + SSH.** SSH staat open voor **wachtwoord-login** en er draait **geen
+fail2ban**: niets vertraagt iemand die eindeloos wachtwoorden probeert. Root mag enkel met
+sleutel (goed). User: "todo voor later, we willen nu asap testen". Fail2ban is risicoloos;
+SSH op keys-only vraagt eerst een bevestigde werkende sleutel (anders sluit je jezelf buiten).
+
+**(F) Hytale-server draait nu onder Faybelle's profiel.** `discovery link` gaf 403 *"session
+token needs to be from same profile as server"*: de server was ooit met `/auth login device`
+onder **Waldstein** ingelogd, terwijl Faybelle de discovery-token uit háár account haalde.
+Opgelost via console: `/auth logout` → `/auth login device` → zij bevestigde de device-code →
+`Profile: Faybelle (963f818d-…)`, link geslaagd om 17:19, **sindsdien geen enkele 403 meer**.
+⚠️ Vangnet `Server/auth.enc.bak-waldstein` staat er nog — weg zodra dit stabiel blijkt.
+NB: `/auth select` = kiezen tussen game-profielen bínnen één account; voor een ánder account is
+`logout` + `login device` nodig. De server is tussen die twee even niet geauthenticeerd.
+
 ## ⏭️ Sessie (2026-07-15f) — "One at a time" + chat-brug naar prod
 
 **(A) Toelaten met de druppelaar.** User wou tijdens de testfase geen limietsysteem maar wel

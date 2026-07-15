@@ -54,7 +54,18 @@ const HYTALE_PASS_PNG: &[u8] = include_bytes!("../artwork/HytalePass_Button.png"
 // Prod-guild (Magic Meadow): de coins-beheerpagina + kanalen-picklist lezen hiervan.
 const COINS_GUILD_ID: &str = "1296469405651435592";
 // Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
-const AUTO_REFRESH_JS: &str = "<script>setInterval(function(){var a=document.activeElement;if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'))return;location.reload();},20000);</script>";
+/// Herlaadt de pagina periodiek, maar **niet** terwijl je in een veld staat — anders
+/// verdwijnt een half ingetypte waarde onder je handen. Scrollpositie: zie KEEP_SCROLL_JS.
+fn auto_refresh_js(ms: u32) -> String {
+    format!(
+        "<script>setInterval(function(){{var a=document.activeElement;\
+           if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'))return;location.reload();}},{ms});</script>"
+    )
+}
+/// Log/Coins/Channels: daar zit je te lézen, een herlaadflits om de paar seconden helpt niemand.
+const AUTO_REFRESH_MS: u32 = 20_000;
+/// Shop: een admin die voorraad bijvult wil dat meteen zien landen (user-wens 2026-07-15).
+const AUTO_REFRESH_SHOP_MS: u32 = 5_000;
 // Bewaart de scrollpositie vóór een form-submit en herstelt ze na de POST→redirect
 // reload, zodat CRUD-acties (delete/update/upload/add) de pagina niet naar boven
 // laten springen. Per-pad gesleuteld in sessionStorage.
@@ -182,6 +193,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/add", post(admin_item_add))
         .route("/admin/item/update", post(admin_item_update))
         .route("/admin/item/delete", post(admin_item_delete))
+        .route("/admin/item/stock", post(admin_item_stock))
         .route("/admin/item/move", post(admin_item_move))
         .route("/admin/item/shelf", post(admin_item_shelf))
         .route("/admin/item/image/clear", post(admin_item_image_clear))
@@ -565,6 +577,17 @@ a.link{{color:{MEADOW}}}
 .aitem .fld{{display:flex;flex-direction:column;gap:.12rem;text-align:left;
   font-size:.62rem;color:#9db095;font-weight:700}}
 .aitem .hint{{font-weight:400;color:#6b7d63}}
+/* Voorraad in de shop: klein regeltje onder de prijs. */
+.slot .stock{{font-size:.72rem;color:#9db095;font-weight:600;margin:.1rem 0 .2rem}}
+.slot .stock.none{{color:#c0562f}}
+/* Voorraadvak op de Manage-kaart: eigen formulier, dus visueel afgezet. */
+.aitem .stockbox{{border-top:1px solid #2c3d2a;padding-top:.45rem;margin:.1rem 0 0;
+  display:flex;flex-direction:column;gap:.3rem}}
+.aitem .stockbox .lbl{{font-size:.72rem;color:#9db095;text-align:left}}
+.aitem .stockbox .num{{width:4rem;background:#0e1510;border:1px solid #2c3d2a;color:#e8f0e4;
+  border-radius:8px;padding:.25rem .35rem;font:inherit;font-size:.78rem}}
+.aitem .stockbox .arow{{display:flex;gap:.3rem;align-items:center}}
+.soldout{{color:#c0562f}}
 /* Out-of-stock-vinkje op de item-kaart: op één regel, klikbaar label. */
 .aitem .chk{{display:flex;align-items:center;gap:.4rem;font-size:.74rem;color:#cfe0c8;
   cursor:pointer;text-align:left;flex-wrap:wrap}}
@@ -1125,6 +1148,7 @@ async fn market(
     headers: HeaderMap,
     Query(q): Query<MarketQuery>,
 ) -> Response {
+    let refresh = auto_refresh_js(AUTO_REFRESH_SHOP_MS);
     let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
     };
@@ -1137,7 +1161,10 @@ async fn market(
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
 
-    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma);
+    // Heb je zelf al een lopende pas? Dan is de dagpas voor jou dicht (één per persoon),
+    // ongeacht de voorraad die er voor anderen nog ligt.
+    let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
+    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass);
 
     // GAME-TEST (SHOP_TEST_DAY_PASS_ONLY): enkel de dagpas ligt in de winkel, zodat testers
     // recht op de whitelist-keten afgaan zonder afleiding. Anders: de dagrotatie
@@ -1182,7 +1209,8 @@ async fn market(
            if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
            function step(t){{var k=Math.min(1,(t-s)/d);\
              el.textContent=Math.round(from+(to-from)*k);\
-             if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>{KEEP_SCROLL_JS}",
+             if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>\
+         {KEEP_SCROLL_JS}{refresh}",
     );
     Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, ""), true, &body))
         .into_response()
@@ -1196,6 +1224,7 @@ async fn admin_shop(
     headers: HeaderMap,
     Query(q): Query<MarketQuery>,
 ) -> Response {
+    let refresh = auto_refresh_js(AUTO_REFRESH_SHOP_MS);
     let Some((uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
@@ -1205,6 +1234,7 @@ async fn admin_shop(
         db::owned_item_ids(&st.pool, &uid).into_iter().collect();
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
+    let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
 
     // Alle schappen met al hun items; lege schappen overslaan.
     let shelves: String = db::list_shelves(&st.pool)
@@ -1212,7 +1242,7 @@ async fn admin_shop(
         .map(|(sid, title)| {
             let slots: String = db::shelf_items(&st.pool, *sid)
                 .iter()
-                .map(|it| shop_slot(it, owned.contains(&it.id), has_name, has_perma))
+                .map(|it| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass))
                 .collect();
             if slots.is_empty() {
                 return String::new();
@@ -1232,7 +1262,7 @@ async fn admin_shop(
          <h1 class=\"shoptitle\">🛍 Admin shop</h1>\
          <p class=\"muted\">The full catalogue — buy anything to test. Members only see the \
           daily picks on the <a class=\"link\" href=\"/market\">Shop</a> page.</p>\
-         {notice}{shelves}{KEEP_SCROLL_JS}",
+         {notice}{shelves}{KEEP_SCROLL_JS}{refresh}",
         subtabs = admin_subtabs("shop"),
     );
     Html(shell("Admin shop — Meadow Market", &chrome(&name, "admin", true, ""), true, &body))
@@ -1291,14 +1321,21 @@ fn item_thumb(it: &db::Item) -> String {
 
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
-fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool) -> String {
+fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pass: bool) -> String {
     // Reeds gekocht → kaart grijs + groene ✓, geen Buy-knop meer. Geldt voor bezeten
     // verzamel-items én voor de permanente Hytale-pas zodra je permanente toegang hebt.
     let bought = (owned && it.category == "inventory")
         || (it.category == "boost" && it.duration == 0 && has_perma);
-    // Uitverkocht: item blijft staan (je ziet wát er komt), maar de knop is dood.
-    // De échte rem zit in `buy()` — een grijze knop houdt niemand tegen die POST.
-    let action = if it.sold_out && !bought {
+    // Dicht voor déze bezoeker, om drie redenen:
+    //  * handmatig op Out of stock gezet;
+    //  * voorraad op 0 → voor iedereen dicht tot een admin aanvult;
+    //  * je hebt zelf al een lopende pas (één per persoon) → dicht voor jou, ook al ligt
+    //    er nog voorraad voor anderen.
+    // Item blijft wél staan: je ziet wát er te koop is. De échte rem zit in buy()/purchase() —
+    // een grijze knop houdt niemand tegen die zelf een POST stuurt.
+    let dagpas = it.category == "boost" && it.duration > 0;
+    let dicht = it.sold_out || it.stock == 0 || (dagpas && has_pass);
+    let action = if dicht && !bought {
         "<button class=\"buy\" type=\"button\" disabled>Out of Stock</button>".to_string()
     } else if bought {
         String::new()
@@ -1343,10 +1380,19 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool) -> Str
     } else {
         format!("<div class=\"sdesc\">{}</div>", esc(&it.description))
     };
+    // Voorraad tonen zodra ze geteld wordt (-1 = onbeperkt → niets tonen): eerlijk naar de
+    // speler, die ziet meteen of het de moeite is om te wachten.
+    let stock = if it.stock < 0 {
+        String::new()
+    } else if it.stock == 0 {
+        "<div class=\"stock none\">out of stock</div>".to_string()
+    } else {
+        format!("<div class=\"stock\">{} left</div>", it.stock)
+    };
     format!(
         "<div class=\"slot{slotcls}\">{mark}<div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div>{img2}{desc}\
-         <div class=\"price\">{MC} {price}</div>{action}</div>",
+         <div class=\"price\">{MC} {price}</div>{stock}{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
         price = it.price,
@@ -1813,27 +1859,9 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         return Redirect::to(&format!("/market?err={}", pct("This item no longer exists.")))
             .into_response();
     };
-    // "Eén per keer": meteen ná een geslaagde aankoop springt dit item weer op uitverkocht,
-    // zodat een admin bewust moet vrijgeven vóór de volgende koper erbij kan. Zo laat je
-    // tijdens de testfase gradueel spelers toe zonder al een limietsysteem te bouwen.
-    // (Beide koop-paden hieronder — pas én gewoon item — lopen hierlangs.)
-    let close_after = |st: &AppState| {
-        if item.auto_sold_out {
-            db::set_sold_out(&st.pool, item.id);
-            db::log_event(
-                &st.pool,
-                now_secs(),
-                &db::LogEntry::new("admin", "auto_sold_out")
-                    .reference(item.id as u64)
-                    .detail(format!(
-                        "{} → out of stock na aankoop door {name} (one at a time)",
-                        item.name
-                    )),
-            );
-        }
-    };
     // Uitverkocht: hier weigeren, niet enkel de knop grijzen. Die knop bestaat alleen in
-    // de browser; deze POST kan iedereen zelf sturen.
+    // de browser; deze POST kan iedereen zelf sturen. (De voorraad en de één-pas-per-persoon
+    // -regel zitten in `db::purchase`, atomisch samen met het afboeken van de coins.)
     if item.sold_out {
         return Redirect::to(&format!(
             "/market?err={}",
@@ -1899,7 +1927,6 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                 .amount(item.price)
                 .detail(format!("{} → whitelisted as {hname}", item.name)),
         );
-        close_after(&st);
         return Redirect::to(&format!("/market?ok={}&from={}", pct(&msg), oldbal)).into_response();
     }
 
@@ -1917,7 +1944,6 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                     .amount(item.price)
                     .detail(item.name.clone()),
             );
-            close_after(&st);
             format!("/market?from={}", bal + item.price)
         }
         Err(e) => format!("/market?err={}", pct(&e)),
@@ -2094,7 +2120,34 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
     let so = if it.sold_out { " checked" } else { "" };
-    let aso = if it.auto_sold_out { " checked" } else { "" };
+    // Voorraad: eigen formuliertje (los van Save), want "Add stock" telt óp bij wat er al
+    // ligt i.p.v. een waarde te zetten — dat is hoe een admin erover denkt: "er komen er 3 bij".
+    let stock_ui = {
+        let nu = if it.stock < 0 {
+            "<b>unlimited</b>".to_string()
+        } else if it.stock == 0 {
+            "<b class=\"soldout\">0 — out of stock</b>".to_string()
+        } else {
+            format!("<b>{}</b> in stock", it.stock)
+        };
+        let inf = if it.stock >= 0 {
+            "<button class=\"btn small ghost\" type=\"submit\" name=\"unlimited\" value=\"1\" \
+               title=\"Niet meer tellen: altijd te koop\">∞</button>"
+        } else {
+            ""
+        };
+        format!(
+            "<form method=\"post\" action=\"/admin/item/stock\" class=\"stockbox\">\
+               <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+               <div class=\"lbl\">Stock: {nu}</div>\
+               <div class=\"arow\">\
+                 <input class=\"num\" type=\"number\" name=\"add\" value=\"1\" step=\"1\" \
+                   title=\"Hoeveel exemplaren erbij\">\
+                 <button class=\"btn small\" type=\"submit\">+ Add stock</button>{inf}\
+               </div></form>",
+            id = it.id,
+        )
+    };
 
     // Duur. De **dagpas** (boost mét looptijd) krijgt een instelbaar minuten-veld: dát
     // getal bepaalt sinds 2026-07-15 écht hoe lang de pas geldig is (`buy()` leest
@@ -2214,9 +2267,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
            {dur_field}\
            <label class=\"chk\"><input type=\"checkbox\" name=\"sold_out\" value=\"1\"{so}>\
              Out of stock <span class=\"hint\">(zichtbaar, maar niet koopbaar)</span></label>\
-           <label class=\"chk\"><input type=\"checkbox\" name=\"auto_sold_out\" value=\"1\"{aso}>\
-             One at a time <span class=\"hint\">(elke aankoop zet Out of stock weer aan)</span></label>\
-           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
+           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{stock_ui}{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
              <input type=\"hidden\" name=\"id\" value=\"{id}\">\
@@ -2327,6 +2378,7 @@ async fn admin_coins(
     headers: HeaderMap,
     Query(q): Query<CoinsQuery>,
 ) -> Response {
+    let refresh = auto_refresh_js(AUTO_REFRESH_MS);
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
@@ -2446,7 +2498,7 @@ async fn admin_coins(
         "<div class=\"chead\"><h1>🪙 Coins management</h1>{undo}</div>\
          <div class=\"ctoolbar\">{sorts}</div>{note}\
          <table class=\"ctable\"><thead><tr><th>Member</th><th>Balance</th><th>All-time</th><th>Adjust</th></tr></thead>\
-         <tbody>{rows}</tbody></table>{AUTO_REFRESH_JS}"
+         <tbody>{rows}</tbody></table>{refresh}"
     );
     let body = format!("{}{}", admin_subtabs("coins"), body);
     Html(shell(
@@ -2613,6 +2665,7 @@ async fn admin_log(
     headers: HeaderMap,
     Query(q): Query<LogQuery>,
 ) -> Response {
+    let refresh = auto_refresh_js(AUTO_REFRESH_MS);
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
@@ -2782,7 +2835,7 @@ async fn admin_log(
          <div class=\"chips\">{filters}</div>\
          <table class=\"log\"><thead><tr>\
            <th>When</th><th>Event</th><th>Who</th><th>Amount</th><th>Detail</th><th></th>\
-         </tr></thead><tbody>{body_rows}</tbody></table>{ts_js}{AUTO_REFRESH_JS}"
+         </tr></thead><tbody>{body_rows}</tbody></table>{ts_js}{refresh}"
     );
     let body = format!("{}{}", admin_subtabs("log"), body);
     Html(shell(
@@ -2851,6 +2904,7 @@ fn sep(url: &str) -> &'static str {
 
 /// Beheer de lijst van kanalen waar coins verdiend kunnen worden.
 async fn admin_channels(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let refresh = auto_refresh_js(AUTO_REFRESH_MS);
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
@@ -2906,7 +2960,7 @@ async fn admin_channels(State(st): State<AppState>, headers: HeaderMap) -> Respo
          <form method=\"post\" action=\"/admin/channels/add\" class=\"addbar\">\
            <select name=\"channel\" required>\
              <option value=\"\" disabled selected>Pick a channel…</option>{options}</select>\
-           <button class=\"btn\" type=\"submit\">＋ Add</button></form>{AUTO_REFRESH_JS}"
+           <button class=\"btn\" type=\"submit\">＋ Add</button></form>{refresh}"
     );
     let body = format!("{}{}", admin_subtabs("channels"), body);
     Html(shell(
@@ -2997,8 +3051,6 @@ struct ItemUpdate {
     #[serde(default)]
     sold_out: Option<String>,
     #[serde(default)]
-    auto_sold_out: Option<String>,
-    #[serde(default)]
     category: String,
     #[serde(default)]
     description: String,
@@ -3088,7 +3140,6 @@ async fn admin_item_update(
             }
         }
         let sold_out = f.sold_out.is_some();
-        let auto_sold_out = f.auto_sold_out.is_some();
         db::update_item(
             &st.pool,
             f.id,
@@ -3099,7 +3150,6 @@ async fn admin_item_update(
             f.category.trim(),
             f.description.trim(),
             sold_out,
-            auto_sold_out,
         );
         // Enkel de velden die écht veranderden in het logboek; niets gewijzigd = geen regel.
         if let Some(b) = before {
@@ -3117,12 +3167,6 @@ async fn admin_item_update(
             if b.sold_out != sold_out {
                 changes.push(
                     if sold_out { "→ out of stock" } else { "→ back in stock" }.to_string(),
-                );
-            }
-            if b.auto_sold_out != auto_sold_out {
-                changes.push(
-                    if auto_sold_out { "→ one at a time aan" } else { "→ one at a time uit" }
-                        .to_string(),
                 );
             }
             if !changes.is_empty() {
@@ -3187,6 +3231,45 @@ async fn admin_item_shelf(
 ) -> Response {
     if require_admin(&st, &headers).is_some() {
         db::set_item_shelf(&st.pool, f.id, f.shelf_id);
+    }
+    Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
+}
+
+#[derive(Deserialize)]
+struct StockForm {
+    id: i64,
+    #[serde(default)]
+    add: i64,
+    /// Aanwezig als er op de ∞-knop geduwd is: voorraad niet meer tellen.
+    #[serde(default)]
+    unlimited: Option<String>,
+}
+
+/// Voorraad aanvullen: "Add stock 3" telt er drie bíj. Of ∞ = niet meer tellen.
+async fn admin_item_stock(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<StockForm>,
+) -> Response {
+    if let Some((admin_uid, admin)) = require_admin(&st, &headers) {
+        let naam = db::get_item(&st.pool, f.id).map(|i| i.name).unwrap_or_default();
+        let detail = if f.unlimited.is_some() {
+            db::set_stock_unlimited(&st.pool, f.id);
+            format!("{naam} · stock → unlimited · by {admin}")
+        } else if f.add != 0 {
+            let nieuw = db::add_stock(&st.pool, f.id, f.add);
+            format!("{naam} · stock {:+} → {nieuw} · by {admin}", f.add)
+        } else {
+            return Redirect::to("/admin/market").into_response();
+        };
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "stock")
+                .actor(&admin_uid, &admin)
+                .reference(f.id as u64)
+                .detail(detail),
+        );
     }
     Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
 }
