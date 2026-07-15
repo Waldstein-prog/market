@@ -1526,9 +1526,20 @@ fn safe_next(next: Option<&str>) -> String {
     }
 }
 
-async fn login(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> Response {
+async fn login(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LoginQuery>,
+) -> Response {
     if !st.cfg.oauth_ready() {
         return err_page("OAuth is not configured on the server yet.");
+    }
+    // Al een geldige sessie? Dan niet opnieuw langs Discord — meteen naar de bestemming.
+    // De embed-knop wijst naar `/login?next=/market`, dus zónder deze check stuurt élke
+    // klik je door de hele OAuth-roundtrip, ook al ben je al ingelogd (en dat voelt als
+    // "ik moet steeds opnieuw inloggen", ook al is de cookie 90 dagen geldig).
+    if session_user(&st, &headers).is_some() {
+        return Redirect::to(&safe_next(q.next.as_deref())).into_response();
     }
     let state = rand_token();
     let redirect = st.cfg.oauth_redirect();
