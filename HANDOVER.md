@@ -120,10 +120,9 @@ geen kale snowflake in het embed.
 **Volgende stap:** variant verwerken → `cargo build --release` → `./deploy/deploy.sh` → commit.
 
 ## ⏭️ Sessie (2026-07-14 nacht) — chest-state volledig herstart-persistent + rescue-commando + odds
-> **GEBOUWD + GEDEPLOYD + LIVE** (systemd `market` active) + **GECOMMIT** (`f2f716e`).
-> ⚠️ **GIT-SCHULD (per 2026-07-15): nog NIET GEPUSHT.** `master` staat `ahead 1` op
-> `tale-gh/master` en `market-gh/main` eindigt op de handover-commit ervóór (`bdee3a0`).
-> Nog te doen: push naar `tale-gh` + `git subtree push --prefix=market market-gh main`.
+> **GEBOUWD + GEDEPLOYD + LIVE** (systemd `market` active) + **GECOMMIT** (`f2f716e`)
+> + **GEPUSHT** op 2026-07-15 (`tale-gh/master` `c4225c8..0ea1b57`, `market-gh/main`
+> `bdee3a0..ca7aa38`). Geen git-schuld meer.
 
 **Aanleiding:** er spawnde telkens te snel een nieuwe treasure chest. Oorzaak: de hele
 `ChestTracker` (cooldowns, `active`, lopende chests, pop-timers) leefde **enkel in geheugen** →
