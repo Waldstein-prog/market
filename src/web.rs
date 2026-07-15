@@ -1280,8 +1280,10 @@ fn thumb_html(image: &str, color: &str) -> String {
 }
 
 fn item_thumb(it: &db::Item) -> String {
-    // De 24h-pas (boost met looptijd) krijgt het vaste ticket-icoon.
-    if it.category == "boost" && it.duration > 0 {
+    // Een zelf geüploade afbeelding wint altijd. De dagpas kreeg vroeger onvoorwaardelijk
+    // het ingebakken ticket-icoon, waardoor een upload wél opsloeg maar nooit te zien was
+    // ("de upload doet niks"). Het ticket is nu enkel de terugval zolang er niets geüpload is.
+    if it.image.is_empty() && it.category == "boost" && it.duration > 0 {
         return "<img src=\"/img/ticket.png\" alt=\"24h Hytale pass\">".to_string();
     }
     thumb_html(&it.image, &it.color)

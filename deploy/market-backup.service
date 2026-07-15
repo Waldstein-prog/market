@@ -1,0 +1,17 @@
+[Unit]
+Description=Meadow Market — dagelijkse snapshot van coins.db
+Documentation=https://github.com/Waldstein-prog/market
+
+[Service]
+Type=oneshot
+# Als 'market': de bron is van market, en zo kan dit proces niets anders raken.
+User=market
+Group=market
+ExecStart=/usr/bin/python3 /opt/market/backup-coins.py
+Nice=10
+# Zelfde hardening als de app zelf.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# ProtectSystem=full zet /usr en /boot read-only; /opt/backups moet schrijfbaar blijven.
+ReadWritePaths=/opt/backups/market

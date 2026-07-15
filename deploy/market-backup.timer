@@ -1,0 +1,13 @@
+[Unit]
+Description=Meadow Market — dagelijkse coins.db-backup
+
+[Timer]
+OnCalendar=daily
+# Was de VPS uit/aan het herstarten op het geplande moment, dan draait de backup
+# alsnog bij de eerstvolgende start i.p.v. die dag over te slaan.
+Persistent=true
+# Spreid de start, zodat de backup niet exact samenvalt met andere middernacht-taken.
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

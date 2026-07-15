@@ -14,6 +14,19 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## 💾 BACKUP van coins.db — LIVE sinds 2026-07-15
+Er was er **geen**: saldo's, aankopen, passen, shop-instellingen en het logboek leefden in
+één bestand op één VPS. Nu: systemd-timer **`market-backup.timer`** (dagelijks, `Persistent=true`
+→ haalt een gemiste run in, `RandomizedDelaySec=15m`) draait `/opt/market/backup-coins.py`
+als user `market` → **`/opt/backups/market/coins-YYYY-MM-DD.db.gz`**, 30 dagen bewaard (~18 KB
+per stuk).
+Gebruikt SQLite's **online-backup-API**, geen `cp`: market schrijft door, een kale kopie kan
+een half geschreven transactie vangen. Doet daarna `PRAGMA integrity_check` en gooit de
+snapshot weg als die niet 'ok' zegt. **Herstelproef gedaan** (uitpakken → integrity ok → 20
+leden, 15 items, 55 logregels leesbaar). Bron: `deploy/backup-coins.py` + de twee units.
+**Nog open:** dit staat op **dezelfde schijf als de DB** — een off-site kopie (bv. naar de PC)
+is er nog niet. Zie ook [[ops-techstuff]] (de oude backup-plannen daar zijn niet uitgevoerd).
+
 ## ⏭️ Sessie (2026-07-15e) — eerlijke verwijderknop, Out of Stock, 3D-knoppen
 
 **(A) Panel-verwijderknop loog — nu eerlijk.** User meldde: pas gekocht, zichzelf verwijderd,
