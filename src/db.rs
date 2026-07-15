@@ -2157,7 +2157,7 @@ pub struct LogRow {
 }
 
 /// De recentste events, nieuwste eerst. `category = None` = alle categorieën.
-pub fn recent_log(pool: &DbPool, category: Option<&str>, limit: usize) -> Vec<LogRow> {
+pub fn recent_log(pool: &DbPool, category: &[&str], limit: usize) -> Vec<LogRow> {
     let conn = pool.get().expect("db");
     let map = |r: &rusqlite::Row| {
         Ok(LogRow {
@@ -2175,30 +2175,32 @@ pub fn recent_log(pool: &DbPool, category: Option<&str>, limit: usize) -> Vec<Lo
         })
     };
     let cols = "id, ts, category, event, actor_uid, actor_name, channel_id, ref_id, amount, detail, refunded";
-    match category {
-        Some(cat) => {
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT {cols} FROM server_log WHERE category = ?1 ORDER BY id DESC LIMIT ?2"
-                ))
-                .expect("prepare recent_log");
-            stmt.query_map(params![cat, limit as i64], map)
-                .expect("query recent_log")
-                .filter_map(Result::ok)
-                .collect()
-        }
-        None => {
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT {cols} FROM server_log ORDER BY id DESC LIMIT ?1"
-                ))
-                .expect("prepare recent_log");
-            stmt.query_map(params![limit as i64], map)
-                .expect("query recent_log")
-                .filter_map(Result::ok)
-                .collect()
-        }
+    // Leeg = alles. Meerdere categorieën kunnen: één filterknop bundelt er soms een paar
+    // (Inventory = gem + booster).
+    if category.is_empty() {
+        let mut stmt = conn
+            .prepare(&format!("SELECT {cols} FROM server_log ORDER BY id DESC LIMIT ?1"))
+            .expect("prepare recent_log");
+        return stmt
+            .query_map(params![limit as i64], map)
+            .expect("query recent_log")
+            .filter_map(Result::ok)
+            .collect();
     }
+    let holes = std::iter::repeat_n("?", category.len()).collect::<Vec<_>>().join(",");
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {cols} FROM server_log WHERE category IN ({holes}) ORDER BY id DESC LIMIT ?{}",
+            category.len() + 1
+        ))
+        .expect("prepare recent_log");
+    let mut vals: Vec<Box<dyn rusqlite::ToSql>> =
+        category.iter().map(|c| Box::new(c.to_string()) as Box<dyn rusqlite::ToSql>).collect();
+    vals.push(Box::new(limit as i64));
+    stmt.query_map(rusqlite::params_from_iter(vals.iter()), map)
+        .expect("query recent_log")
+        .filter_map(Result::ok)
+        .collect()
 }
 
 /// Alle voorkomende categorieën (voor de filterknoppen), alfabetisch.

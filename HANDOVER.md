@@ -14,6 +14,35 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-15c) — item-/prijs-logging + Shop/Inventory-filters op de logpagina
+
+**Aanleiding:** de "Faybelle kreeg 1017 voor een heliodor van 1000"-vraag kostte een uur
+forensiek, puur omdat **prijswijzigingen nergens werden vastgelegd**. User: "kunnen we niet
+beter meer in detail loggen?" → ja, maar enkel de zeldzame admin-mutaties; niet elke
+paginaweergave of coin-per-bericht (dat zit al in `earn_log`).
+
+**Wat er al gelogd bleek:** gem-equip, booster-gebruik, admin-saldo-ingrepen, aankopen,
+passen, refunds, test-reset. Die knoppen ontbraken enkel omdat er nog geen zulke rijen wáren
+(de chips werden uit de aanwezige categorieën afgeleid).
+
+**Toegevoegd (`web.rs`):** `admin/item_update` (leest de oude waarde vóór de schrijf → detail
+"Ruby · price 40 → 60 · by Waldstein"; niets gewijzigd = géén regel), `admin/item_add`,
+`admin/item_delete` (naam+prijs vastgelegd vóór het wissen). Nieuwe badges voor die drie +
+`admin/correction` + `gem/unequip` (badge staat klaar; de **unequip-knop zelf bestaat nog
+niet** — zie shop-herwerking).
+⚠️ `amount` op `item_update` = de **nieuwe prijs**, geen coin-bedrag zoals bij de andere
+regels. User weet dit; eruit halen als het verwart in de kolom.
+
+**Filterknoppen = groepen (`LOG_GROUPS` in web.rs).** Eén knop mag meerdere categorieën
+bundelen: **🎒 Inventory** = `gem` + `booster` (zat verspreid, is voor een admin één ding),
+**🛒 Shop** = `shop`, **🪙 Coins** = `daily` + `level`. `db::recent_log` neemt nu `&[&str]`
+i.p.v. `Option<&str>` (leeg = alles). Categorieën die in géén groep zitten krijgen alsnog
+automatisch een eigen knop → een nieuw event-type kan nooit stil uit beeld vallen.
+
+**Getest** (lokaal, echte routes tegen een kopie van prod-`coins.db`): Shop toont enkel
+shop-events, Inventory bundelt equip+unequip+booster, Admin toont de prijswijziging; drie
+POSTs op `/admin/item/update` (prijs, no-op, naam) → exact 2 logregels. **Gedeployed.**
+
 ## ⏭️ Sessie (2026-07-15b) — Hytale-panel onder Manage + wereldbeheer uitgezet
 
 **(A) Panel → market Manage → 🖥 Server — LIVE + e2e geverifieerd.** User koos expliciet

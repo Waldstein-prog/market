@@ -2268,6 +2268,23 @@ struct LogQuery {
 /// Server-logboek (admin): alle gelogde events, nieuwste eerst, filterbaar op
 /// categorie. Nu vooral chest-events (spawn/join/win/despawn/te-laat); later
 /// breiden we de categorieën en filters uit.
+/// De filterknoppen op de logpagina: (`?cat=`-sleutel, knoptekst, categorieën erachter).
+/// Eén knop mag meerdere categorieën bundelen — "Inventory" zit verspreid over `gem`
+/// (equip/unequip) en `booster` (gebruik), maar is voor een admin één ding.
+const LOG_GROUPS: [(&str, &str, &[&str]); 6] = [
+    ("shop", "🛒 Shop", &["shop"]),
+    ("inventory", "🎒 Inventory", &["gem", "booster"]),
+    ("chest", "🎁 Chests", &["chest"]),
+    ("coins", "🪙 Coins", &["daily", "level"]),
+    ("admin", "⚙ Admin", &["admin"]),
+    ("twitch", "🟣 Twitch", &["twitch"]),
+];
+
+/// De categorieën achter een filterknop, of None als de sleutel geen groep is.
+fn log_group(key: &str) -> Option<&'static [&'static str]> {
+    LOG_GROUPS.iter().find(|(k, _, _)| *k == key).map(|(_, _, cats)| *cats)
+}
+
 async fn admin_log(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -2278,9 +2295,20 @@ async fn admin_log(
     };
     let cats = db::log_categories(&st.pool);
     let active = q.cat.as_deref().filter(|c| !c.is_empty());
-    let rows = db::recent_log(&st.pool, active, 500);
+    // Een filterknop staat voor een groep categorieën, niet per se voor één. Onbekende
+    // `?cat=` (bv. een oude link) valt terug op de categorie zelf, zodat niets breekt.
+    let selected: Vec<&str> = match active {
+        Some(k) => log_group(k).unwrap_or(&[]).to_vec(),
+        None => Vec::new(),
+    };
+    let selected: Vec<&str> = match (active, selected.is_empty()) {
+        (Some(k), true) => vec![k],
+        _ => selected,
+    };
+    let rows = db::recent_log(&st.pool, &selected, 500);
 
-    // Filterknoppen: "Alles" + één knop per voorkomende categorie.
+    // Filterknoppen: "All" + de vaste groepen, daarna nog losse knoppen voor categorieën
+    // die (nog) in geen groep zitten — zo verdwijnt een nieuw event-type nooit uit beeld.
     let chip = |key: Option<&str>, label: &str| {
         let on = active == key;
         let href = match key {
@@ -2291,7 +2319,11 @@ async fn admin_log(
         format!("<a class=\"{cls}\" href=\"{href}\">{}</a>", esc(label))
     };
     let mut filters = chip(None, "All");
-    for c in &cats {
+    for (key, label, _) in LOG_GROUPS {
+        filters.push_str(&chip(Some(key), label));
+    }
+    let grouped: Vec<&str> = LOG_GROUPS.iter().flat_map(|(_, _, c)| c.iter().copied()).collect();
+    for c in cats.iter().filter(|c| !grouped.contains(&c.as_str())) {
         filters.push_str(&chip(Some(c), c));
     }
 
@@ -2310,6 +2342,7 @@ async fn admin_log(
             ("shop", "pass_perma") => ("#0c8599", "🎟 perma pass"),
             // Inventory-gebruik
             ("gem", "equip") => ("#e64980", "💎 equip gem"),
+            ("gem", "unequip") => ("#a61e4d", "💎 unequip gem"),
             ("booster", "use") => ("#66a80f", "🍀 booster"),
             // Dagelijkse check-in + level-up
             ("daily", "checkin") => ("#f59f00", "📅 daily"),
@@ -2325,6 +2358,10 @@ async fn admin_log(
             ("admin", "coins_discard") => ("#c92a2a", "🗑 discard"),
             ("admin", "reset_collection") => ("#a61e4d", "🧪 test reset"),
             ("admin", "refund") => ("#1971c2", "↩ refund"),
+            ("admin", "item_add") => ("#5f3dc4", "➕ item added"),
+            ("admin", "item_update") => ("#6741d9", "🏷 item changed"),
+            ("admin", "item_delete") => ("#862e9c", "🗑 item deleted"),
+            ("admin", "correction") => ("#c92a2a", "🩹 correction"),
             _ => ("#868e96", event),
         };
         format!(
@@ -2681,10 +2718,20 @@ async fn admin_item_add(
     headers: HeaderMap,
     Form(f): Form<ItemAdd>,
 ) -> Response {
-    if require_admin(&st, &headers).is_some() {
+    if let Some((admin_uid, admin)) = require_admin(&st, &headers) {
         let zone = if f.zone == "lucky" { "lucky" } else { "shelf" };
         let shelf_id = if zone == "shelf" { f.shelf_id } else { None };
-        db::add_item(&st.pool, zone, shelf_id);
+        let id = db::add_item(&st.pool, zone, shelf_id);
+        // Nog een leeg slot: naam/prijs volgen bij de eerste item_update. We loggen hier enkel
+        // dát er een slot bijkwam, zodat de reeks item_update-regels erna een begin heeft.
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "item_add")
+                .actor(&admin_uid, &admin)
+                .reference(id as u64)
+                .detail(format!("new {zone} slot · by {admin}")),
+        );
     }
     Redirect::to("/admin/market").into_response()
 }
@@ -2694,17 +2741,44 @@ async fn admin_item_update(
     headers: HeaderMap,
     Form(f): Form<ItemUpdate>,
 ) -> Response {
-    if require_admin(&st, &headers).is_some() {
+    if let Some((admin_uid, admin)) = require_admin(&st, &headers) {
+        // Vóór de schrijf lezen: enkel zo kunnen we "prijs 1000 → 1200" loggen. Zonder dat
+        // spoor is achteraf niet meer te achterhalen wat een item ooit kostte, en dus ook
+        // niet waarom een oude aankoop/refund een bepaald bedrag had.
+        let before = db::get_item(&st.pool, f.id);
+        let price = f.price.max(0);
+        let name = f.name.trim();
         db::update_item(
             &st.pool,
             f.id,
-            f.name.trim(),
-            f.price.max(0),
+            name,
+            price,
             f.role_id.trim(),
             f.duration_min.max(0) * 60,
             f.category.trim(),
             f.description.trim(),
         );
+        // Enkel de velden die écht veranderden in het logboek; niets gewijzigd = geen regel.
+        if let Some(b) = before {
+            let mut changes: Vec<String> = Vec::new();
+            if b.price != price {
+                changes.push(format!("price {} → {}", b.price, price));
+            }
+            if b.name != name {
+                changes.push(format!("name '{}' → '{}'", b.name, name));
+            }
+            if !changes.is_empty() {
+                db::log_event(
+                    &st.pool,
+                    now_secs(),
+                    &db::LogEntry::new("admin", "item_update")
+                        .actor(&admin_uid, &admin)
+                        .reference(f.id as u64)
+                        .amount(price)
+                        .detail(format!("{} · {} · by {admin}", b.name, changes.join(" · "))),
+                );
+            }
+        }
         return Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response();
     }
     Redirect::to("/admin/market").into_response()
@@ -2715,8 +2789,22 @@ async fn admin_item_delete(
     headers: HeaderMap,
     Form(f): Form<IdForm>,
 ) -> Response {
-    if require_admin(&st, &headers).is_some() {
+    if let Some((admin_uid, admin)) = require_admin(&st, &headers) {
+        // Naam/prijs vastleggen vóór het wissen — daarna is het item weg en kan de logregel
+        // niet meer zeggen wát er verdween.
+        let gone = db::get_item(&st.pool, f.id);
         db::delete_item(&st.pool, f.id);
+        if let Some(it) = gone {
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "item_delete")
+                    .actor(&admin_uid, &admin)
+                    .reference(f.id as u64)
+                    .amount(it.price)
+                    .detail(format!("{} (was {} coins) · by {admin}", it.name, it.price)),
+            );
+        }
     }
     Redirect::to("/admin/market").into_response()
 }
