@@ -1,4 +1,4 @@
-# Handover — Meadow Market (2026-07-14 nacht)
+# Handover — Meadow Market (2026-07-15)
 
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
@@ -14,9 +14,116 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-15b) — Hytale-panel onder Manage + wereldbeheer uitgezet
+
+**(A) Panel → market Manage → 🖥 Server — LIVE + e2e geverifieerd.** User koos expliciet
+**"gewoon een link + zelfde look"** boven een Rust-port of een iframe ("het mooist en het
+efficiëntst voor nu"). Zie [[market-project]]-memory voor het volledige recept. Kort:
+- `admin_subtabs` (web.rs) → 5e tab **🖥 Server** naar `/panel`; panel linkt terug naar Manage.
+- Caddy `handle_path /panel*` → `reverse_proxy https://127.0.0.1:8090` + `tls_insecure_skip_verify`
+  → **geldig cert, geen poort, geen waarschuwing**. (Subdomein kon niet: geen wildcard op Porkbun.)
+- `panel.py`: nieuwe env **`PANEL_BASE=/panel`** (in `hytale-panel.service`), JS bouwt `B+pad`,
+  `do_GET` aanvaardt ook `""`. CSS = market's thema + market-topbar.
+- ⚠️ **Cookie-botsing gefixt:** panel zette `session` op `Path=/` — market's cookienaam. Nu
+  **`panel_session`** op `Path=/panel`. Oude panel-sessies eenmalig ongeldig.
+- Geverifieerd via Caddy: login → cookie `Path=/panel` → `/api/stats` (echte uptime 23u27m),
+  `/api/whitelist`, `/api/console`. Apex + market ongemoeid.
+
+**(B) Wereldbeheerpagina (`/techstuff`, ops :8091) UITGEZET** op vraag van de user: moet **van de
+grond af herdacht** en **in de admin-sectie geïntegreerd** worden, "maar dat is niet voor nu".
+`systemctl disable --now techstuff` + `handle_path /techstuff*` uit beide Caddyfiles. `/techstuff`
+valt nu door naar market (303). Code blijft in `lab/ops`; niets hing eraan vast (geen
+backup-cron/timer verwijst ernaar — geverifieerd).
+
+**(C) Twee stille DB-bugs gevonden + gefixt** (`src/db.rs`, meegedeployd in dezelfde binary):
+- **`total_earned`-backfill lekte via refunds.** De regel `UPDATE coins SET total_earned =
+  max_balance WHERE total_earned < max_balance` was een **eenmalige** migratie van toen die kolom
+  bijkwam, maar draaide bij **élke opstart**. Een refund verhoogt `coins` zonder verdiensten →
+  `max_balance` volgt dat saldo → de eerstvolgende herstart promoveerde die refund stil tot
+  "all-time verdiend", waar het **levelsysteem** op draait. Nu gegate op **`PRAGMA user_version`**
+  (`< 1` → backfill + zet 1), dus enkel op een DB die de migratie nog nooit zag. Prod geverifieerd:
+  `user_version = 1`, 0 rijen met `total_earned < max_balance`.
+- **Refund kon het verkeerde bedrag/rij pakken.** `refund_purchase` zocht de inventory-rij met
+  `ORDER BY id LIMIT 1` (= de **oudste** rij van dat item) en betaalde `inventory.price` terug. Bij
+  een tweede aankoop van hetzelfde item trof dat de verkeerde rij, en bij een prijswijziging tussen
+  beide aankopen het verkeerde bedrag. Nu: rij via **`ORDER BY ABS(acquired - ts)`** (dichtst bij de
+  logtijd — `purchase` en `log_event` schrijven vlak na elkaar) en terugbetaling = **`amount` uit
+  díe logrij** (wat er toen écht betaald is); `inventory.price` blijft enkel de terugval voor oude
+  logrijen zonder `amount`.
+
+**Status:** panel + Caddy + market-binary **gedeployed en geverifieerd** (prod-binary = deze build,
+identieke sha256; geen errors in de logs sinds de herstart van 13:24).
+
+**Openstaand / overwegen:** poort **8090** staat nog open in ufw en het panel bindt nog op
+`0.0.0.0` — nu alles via Caddy loopt, kan dat dicht (`ufw delete allow 8090/tcp` + bind op
+127.0.0.1). Niet gedaan: zou het rechtstreekse `https://IP:8090` breken, en dat is niet gevraagd.
+
+## ⏭️ Sessie (2026-07-15) — uurlijkse shout-out → top 10-embed zonder tags, alfabetisch
+> **AF — layout beslist door de user, gebouwd, gedeployed en in dev #general goedgekeurd
+> ("de embed is prima").** De varianten A-D hieronder zijn achterhaald. Eindvorm:
+> - **titel** = `⏳ Earners of the last hour` (user schreef "Eaners"/"…" — typo + puntjes
+>   weg op zijn bevestiging; de ⏳ bleef uit de bestaande conventie).
+> - **10** grootste verdieners i.p.v. 5 (`HOURLY_SHOUTOUT_TOP = 10`).
+> - **alfabetisch op naam** i.p.v. op coins → de DB selecteert nog steeds de top 10 op coins
+>   (`ORDER BY total DESC LIMIT 10`), daarna `sort_by_key(name.to_lowercase())`.
+> - **medailles 👑🥈🥉 eruit** (iedereen 🌼) — bij een alfabetische lijst suggereren die een
+>   rangschikking die er niet is. Voorgesteld door Claude, door de user bevestigd.
+> - drempel **≥1 coin** (`HOURLY_SHOUTOUT_MIN = 1`).
+>
+> **Visuele check gedaan** (dev #general, bericht `1526902795129716883`): omdat het laatste uur
+> maar 1 verdiener had (Waldstein, 1 coin) is een **als demo gelabelde** post over de laatste
+> **7 dagen** gestuurd — 9 namen, dus de sortering is écht zichtbaar. Script:
+> `scratchpad/demo_post.py` (repliceert de opmaak 1-op-1; leest prod-`coins.db` read-only +
+> post via bot-token & Discord REST). Meteen bevestigd: sortering is hoofdletter-ongevoelig
+> (`easycomes` tussen CookiesOfOreo en FayBelle), `escape_md` ontsnapt de blokhaken in
+> `Yâ-Ôd [Kalia Lune de Demain]`, `ねこ` sorteert achteraan.
+> **NB:** posten vereist de bot-token uit `secrets.json`; de auto-mode-classifier blokkeert dat
+> uitlezen tenzij de user het expliciet vraagt/toestaat (dat was hier het geval).
+
+**Aanleiding (user-vraag):** de uurlijkse shout-out postte een **apart bericht per lid** dat ≥100
+coins verdiende, **met een mention** (`<@uid>, wow you've earned…`). Dat pingt leden elk uur.
+Nieuwe wens: **één embed, top 5, géén tags, iedereen met minstens 1 coin komt in aanmerking**.
+
+**Gewijzigd (`src/bot.rs` + `src/db.rs`, lokaal):**
+- `HOURLY_SHOUTOUT_MIN` **100 → 1**; nieuwe const **`HOURLY_SHOUTOUT_TOP = 10`**.
+  `HOURLY_TEST_MIN` 3 → 1 (test-modus volgt dezelfde drempel).
+- **`db::hourly_earners`** kreeg een **`limit`-param** → `LIMIT ?4` op de bestaande
+  `ORDER BY total DESC`. Verder ongewijzigd (venster + `HAVING total >= min` bleven).
+- **`hourly_shoutouts`** postte een `say()` per lid; doet nu **één `CreateEmbed`** in
+  `PROD_COINS_CHANNEL_ID`, in dezelfde stijl/kleur (`0x6B_9B_52`) als het weekly leaderboard,
+  maar **alfabetisch en zonder medailles** (iedereen 🌼 — zie de eindvorm bovenaan). Namen als
+  **platte tekst** i.p.v. `<@uid>`.
+- Nieuwe helper **`escape_md()`** — namen staan nu als platte tekst in het embed, dus een `_` of
+  `*` in een Discord-naam zou de opmaak van de regel breken. (Het weekly leaderboard gebruikt nog
+  mentions en heeft dit dus niet nodig.)
+
+**Getest:** `cargo build` + `--release` groen (enkel de bekende `role_id`-warning). De query
+gevalideerd op een **kopie van `coins.db`** met gezaaide rijen: exact 5 rijen, aflopend gesorteerd,
+venster gerespecteerd (rijen vóór/na het uur vallen weg), #6 en #7 correct afgekapt door de LIMIT.
+Live testen kan niet zonder in het **echte prod #coins** te posten (kanaal-ID is hardcoded), dus
+niet gedaan.
+
+**Geverifieerd onderweg:** de `COALESCE(c.username, e.user_id)`-fallback in `hourly_earners` kan
+in de praktijk niet vuren — `log_earn_event` wordt **binnen** `db::award` (en de daily-claim)
+aangeroepen, dezelfde call die de username upsert. Een `earn_log`-rij impliceert dus een naam →
+geen kale snowflake in het embed.
+
+**Varianten voorgelegd aan Faybelle** (inhoud identiek, enkel vorm):
+- **A** = zoals gebouwd: titel "⏳ Top earners of the past hour" + medaille-lijst.
+- **B** = "🪙 Hourly top 5" + introzin + genummerd 1-5 *(Claude's voorkeur: rijmt op het weekly
+  leaderboard en de introzin duidt meteen het venster).*
+- **C** = winnaar uitgelicht met een regel eronder, rest compact.
+- **D** = uitgelijnde kolommen in een codeblok. **Let op:** in een codeblok rendert de
+  Meadowcoins-emoji **niet** (wordt letterlijke `<:Meadowcoins:...>`-tekst) en kan het kader op
+  smalle gsm-schermen afbreken.
+
+**Volgende stap:** variant verwerken → `cargo build --release` → `./deploy/deploy.sh` → commit.
+
 ## ⏭️ Sessie (2026-07-14 nacht) — chest-state volledig herstart-persistent + rescue-commando + odds
-> **GEBOUWD + GEDEPLOYD + LIVE** (systemd `market` active). **Nog te COMMITTEN/PUSHEN** bij het
-> schrijven van deze handover (gebeurt in dezelfde commit als deze regel).
+> **GEBOUWD + GEDEPLOYD + LIVE** (systemd `market` active) + **GECOMMIT** (`f2f716e`).
+> ⚠️ **GIT-SCHULD (per 2026-07-15): nog NIET GEPUSHT.** `master` staat `ahead 1` op
+> `tale-gh/master` en `market-gh/main` eindigt op de handover-commit ervóór (`bdee3a0`).
+> Nog te doen: push naar `tale-gh` + `git subtree push --prefix=market market-gh main`.
 
 **Aanleiding:** er spawnde telkens te snel een nieuwe treasure chest. Oorzaak: de hele
 `ChestTracker` (cooldowns, `active`, lopende chests, pop-timers) leefde **enkel in geheugen** →
@@ -378,14 +485,36 @@ Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten 
     + route + nav-tab). *(Intussen wél gecommit — commit `515cb9c`.)*
 
 ## 📝 Open TODO's
+> Nagekeken tegen code + prod-DB op **2026-07-15**; wat af was is hier weggehaald (zie
+> "✅ Afgevinkt" onderaan deze lijst). Niets op deze lijst is nog dringend.
+
+- **⚠️ Prod-shopwaarden staan nog op TEST** *(hoogste prioriteit van deze lijst)*: op de **prod-DB**
+  heeft de **Hytale Day Pass** `duration = 60` **seconden** (!) en `price = 10`; de **Permanent
+  Pass** `price = 10`. Day Pass moet naar **86400s (24u)** + een echte prijs. **Niet acuut** — de
+  shop is gate-d (enkel admins raken in `/market`) — maar **moet rechtstaan vóór de gate opengaat**.
+  Zetbaar via **Manage Shop**.
+- **Permanent Pass `role_id` is leeg** op prod → `Use` zet enkel `perma_access`, kent **geen
+  Discord-rol** toe. Invullen via Manage Shop.
 - **Shop-graphics**: de shop toont nu álle schappen; gems/boosters zonder afbeelding renderen als
   gekleurde bol. Echte item-graphics maken vóór de shop **members-zichtbaar** wordt (site-gate weg).
+- **Prijzen/economie balanceren**: prod toont een rare mix (gems 40/80/**1000**, Lucky Horseshoe
+  120, **Realgar 0**). Hoort samen met de Day Pass-waarden hierboven.
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
 - **(WIP) Birthday-present**: registreer verjaardag → claim een cadeau (staat als "WIP" op /info).
 - **Faybelle's oude −270** zit enkel in `coins`, niet in `total_earned` (van vóór de checkbox-fix) —
   evt. gelijktrekken via Set met enkel "all time" aangevinkt.
+- **Public-profiel**: `coins.is_public` bestaat in de DB maar wordt nergens gelezen (leaderboard
+  toont iedereen); ooit een profielpagina met public-filter.
+
+### ✅ Afgevinkt op 2026-07-15 (stonden hier ten onrechte nog open)
+- ~~Lucky Horseshoe heeft nog geen effect~~ → **LIVE** sinds `c82b14e` (`chest_luck`, dubbele
+  chest-lot-kans).
+- ~~Prod-guild: alles draait nog op de dev-guild~~ → achterhaald door de **go-live van 2026-07-13**.
+- ~~Losse asset `static/MeadowShard.png`~~ → **bestand bestaat niet meer**.
+- ~~Weekly leaderboard bouwen~~ → **bestaat dubbel**: het zaterdag-embed in de bot
+  (`weekly_leaderboard`) **én** de "This week"-subtab op de site (`web.rs`, `leaderboard_week`).
 
 ## 🌐 Discord-guilds & kanalen
 - **Dev-guild** (WaldsteinDevZone): `652452615879262220` — nog steeds `cfg.guild_id` (bot-gateway),
@@ -687,25 +816,20 @@ Leaderboard · ⚙ Manage (admin) · Log out`.
   bij login. Verschijnt pas na **opnieuw inloggen**; enkel als de user een accentkleur heeft.
 
 ## Openstaand / mogelijke bijsturing
-1. **Permanente waarden** zetten (Manage): Day Pass terug naar 24u (1440 min) + echte prijs;
-   whitelist-rol op de **Permanent Pass** invullen (rol-ID staat nu leeg → Use zet enkel
-   `perma_access`, kent nog geen rol toe).
-2. **Prijzen/economie** balanceren (gems/tickets/horseshoe); Lucky Horseshoe heeft nog **geen
-   effect** (enkel koopbaar).
-3. **Prod-guild**: alles draait nog op de **dev-guild**. Voor de echte community: guild/rollen
-   in secrets/env aanpassen + bot inviten + hiërarchie.
-4. **Tale-integratie**: ✅ LIVE sinds 2026-07-12 (namiddag). Market schrijft grants in
-   `hytale_whitelist`; de tale-bot reconcilet elke **1 min** read-only naar `whitelist.json`
-   (`whitelist.json` = `enabled:true`, wordt afgedwongen). Zie de bovenste sessie-sectie.
-5. **Public-profiel**: `coins.is_public` bestaat nog maar wordt niet gebruikt (leaderboard toont
-   iedereen); ooit een profielpagina met public-filter.
-6. Losse asset `static/MeadowShard.png` (debug) staat nog in de repo, ongebruikt.
-7. **TODO (voor later, apart gezet): weekly leaderboard.** Derde leaderboard-tab **"This week"**
-   = coins verdiend in de lopende week (per-week teller, reset wekelijks — vergt tracking van
-   verdiensten per week, bv. een `weekly_earned` + weekstart, of award-events met timestamp).
-   Dit wekelijkse klassement wordt **elke zaterdag 16:00 Brusselse tijd** als een **mooie embed
-   in het #general-kanaal** gepost (geplande taak in de bot, tz Europe/Brussels, via Discord REST
-   webhook/`POST /channels/{id}/messages` zoals de bestaande embeds).
+> Deze lijst dubbelde met **📝 Open TODO's** hierboven en was op 4 punten achterhaald; op
+> **2026-07-15** samengevoegd. **Openstaand werk staat nu enkel bij 📝 Open TODO's.**
+> Wat hier overblijft zijn feiten die je nog nodig hebt:
+
+- **Tale-integratie**: ✅ LIVE sinds 2026-07-12 (namiddag). Market schrijft grants in
+  `hytale_whitelist`; de tale-bot reconcilet elke **1 min** read-only naar `whitelist.json`
+  (`whitelist.json` = `enabled:true`, wordt afgedwongen).
+- **Weekly leaderboard**: ✅ gebouwd (stond hier lang als "voor later"). Twee stukken:
+  `weekly_leaderboard` in `bot.rs` post het embed in prod #general, en de **"This week"**-subtab
+  op de site leest `db::leaderboard_week`. Venster = sinds de vorige zaterdag; `earn_log` wordt
+  **~8 dagen** bewaard (`prune_earn_log`) net om dit te voeden.
+  ⚠️ **Tijdstip**: deze handover zei jarenlang "zaterdag **16:00**", maar de code doet
+  **15:00 Brusselse tijd** (`next_saturday_1500_brussels`). De code is de waarheid; als 16:00 de
+  bedoeling was, is dát een openstaande fix.
 
 ## Zo pik je het op
 1. `cd lab/market`, `MARKET_WEB_ONLY=1 DISCORD_ROLE_ID=1525249217897955590 cargo run`, open

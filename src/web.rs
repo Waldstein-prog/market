@@ -640,19 +640,24 @@ fn nav_html(active: &str, admin: bool) -> String {
     )
 }
 
-/// Sub-tabbalk binnen de Manage-sectie: Shop / Coins / Channels / Log.
+/// Sub-tabbalk binnen de Manage-sectie: Shop / Coins / Channels / Log / Server.
 /// `active` = "market" | "coins" | "channels" | "log".
+///
+/// De Server-tab verlaat market: `/panel` is het Hytale-panel (aparte service,
+/// door Caddy geproxyd naar 127.0.0.1:8090) met een eigen wachtwoord-login. Het
+/// heeft dus geen `active`-toestand en linkt zelf terug naar `/admin/market`.
 fn admin_subtabs(active: &str) -> String {
     let item = |href: &str, key: &str, label: &str| {
         let on = if key == active { " on" } else { "" };
         format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
     };
     format!(
-        "<div class=\"subtabs\">{}{}{}{}</div>",
+        "<div class=\"subtabs\">{}{}{}{}{}</div>",
         item("/admin/market", "market", "🛒 Shop"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
         item("/admin/log", "log", "📜 Log"),
+        item("/panel", "server", "🖥 Server"),
     )
 }
 

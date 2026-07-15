@@ -186,14 +186,24 @@ pub fn init_pool(path: &str) -> DbPool {
         [],
     )
     .ok();
+    // max_balance = hoogste saldo ooit, dus dit is een echte invariant: veilig bij elke start.
     conn.execute("UPDATE coins SET max_balance = coins WHERE max_balance < coins", [])
         .expect("backfill max_balance");
-    // total_earned kunnen we niet reconstrueren; als ondergrens het hoogste saldo ooit.
-    conn.execute(
-        "UPDATE coins SET total_earned = max_balance WHERE total_earned < max_balance",
-        [],
-    )
-    .expect("backfill total_earned");
+    // EENMALIGE migratie (toen `total_earned` als kolom bijkwam en niet te reconstrueren was:
+    // als ondergrens het hoogste saldo ooit). Draaide vroeger bij ELKE start, en dat was een
+    // lek: een refund verhoogt `coins` zonder verdiensten, `max_balance` volgt dat saldo, en
+    // de eerstvolgende herstart promoveerde die refund dan stil tot "all-time verdiend" —
+    // waar het levelsysteem op draait. Nu gated op user_version, dus enkel op een DB die de
+    // migratie nog nooit zag.
+    let migrated: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+    if migrated < 1 {
+        conn.execute(
+            "UPDATE coins SET total_earned = max_balance WHERE total_earned < max_balance",
+            [],
+        )
+        .expect("backfill total_earned");
+        conn.execute("PRAGMA user_version = 1", []).expect("set user_version");
+    }
     drop(conn);
     seed_hytale(&pool);
     // seed_gems is bewust NIET meer aangeroepen: items worden nu manueel beheerd in Manage
@@ -470,9 +480,15 @@ fn log_earn_event(conn: &rusqlite::Connection, user_id: &str, amount: i64, ts: f
     );
 }
 
-/// Verdieners van ≥100 coins in het venster [since, until): (user_id, naam, totaal),
-/// aflopend. Gebruikt voor de uurlijkse shout-out.
-pub fn hourly_earners(pool: &DbPool, since: f64, until: f64, min: i64) -> Vec<(String, String, i64)> {
+/// Verdieners van ≥`min` coins in het venster [since, until): (user_id, naam, totaal),
+/// aflopend, hoogstens `limit` rijen. Gebruikt voor het uurlijkse top-embed.
+pub fn hourly_earners(
+    pool: &DbPool,
+    since: f64,
+    until: f64,
+    min: i64,
+    limit: i64,
+) -> Vec<(String, String, i64)> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
@@ -481,11 +497,12 @@ pub fn hourly_earners(pool: &DbPool, since: f64, until: f64, min: i64) -> Vec<(S
              WHERE e.ts >= ?1 AND e.ts < ?2
              GROUP BY e.user_id
              HAVING total >= ?3
-             ORDER BY total DESC",
+             ORDER BY total DESC
+             LIMIT ?4",
         )
         .expect("prepare hourly_earners");
     let rows = stmt
-        .query_map(params![since, until, min], |r| {
+        .query_map(params![since, until, min, limit], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
         })
         .expect("query hourly_earners");
@@ -1811,19 +1828,20 @@ pub fn refund_purchase(pool: &DbPool, log_id: i64) -> Result<RefundOutcome, Stri
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
     // Logrij ophalen + valideren: enkel een niet-gerefunde shop-aankoop is terugdraaibaar.
-    let (category, event, uid, ref_id, amount, refunded): (
+    let (category, event, uid, ref_id, amount, refunded, ts): (
         String,
         String,
         String,
         String,
         Option<i64>,
         i64,
+        f64,
     ) = tx
         .query_row(
-            "SELECT category, event, actor_uid, ref_id, amount, refunded
+            "SELECT category, event, actor_uid, ref_id, amount, refunded, ts
                FROM server_log WHERE id = ?1",
             params![log_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?
@@ -1839,20 +1857,27 @@ pub fn refund_purchase(pool: &DbPool, log_id: i64) -> Result<RefundOutcome, Stri
         return Err("This purchase predates refund support (no item reference).".into());
     }
 
-    // De concrete inventory-rij van deze aankoop draagt naam + prijs, ook als het shop-item
-    // nadien verwijderd is. Ontbreekt ze (item al verbruikt/gewist), dan refunden we alsnog
-    // de gelogde prijs en draaien we de neveneffecten terug.
+    // De inventory-rij van DEZE aankoop: van hetzelfde item die met de dichtstbijzijnde
+    // aankooptijd (`purchase` en `log_event` schrijven vlak na elkaar). Blind de oudste
+    // rij pakken zou bij een tweede aankoop van hetzelfde item de verkeerde treffen.
+    // Ontbreekt ze (item al verbruikt/gewist), dan refunden we alsnog en draaien we de
+    // neveneffecten terug.
     let inv: Option<(i64, String, i64)> = tx
         .query_row(
             "SELECT id, name, price FROM inventory
-               WHERE user_id = ?1 AND item_id = ?2 ORDER BY id LIMIT 1",
-            params![uid, item_id],
+               WHERE user_id = ?1 AND item_id = ?2
+               ORDER BY ABS(acquired - ?3) LIMIT 1",
+            params![uid, item_id, ts],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
+    // Terug te storten = het bedrag uit DEZE logrij, want dat is exact wat er toen
+    // betaald is. `inventory.price` is enkel de terugval voor oude logrijen zonder
+    // `amount`: die momentopname kan van een ándere aankoop van hetzelfde item komen
+    // (prijzen wijzigen), en dan refund je het verkeerde bedrag.
     let (inv_id, item_name, price) = match inv {
-        Some((id, name, p)) => (Some(id), name, p),
+        Some((id, name, p)) => (Some(id), name, amount.unwrap_or(p)),
         None => (None, String::new(), amount.unwrap_or(0)),
     };
 

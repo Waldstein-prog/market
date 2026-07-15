@@ -1,13 +1,31 @@
 # Meadow Market — Caddy reverse-proxy / TLS
 #
-# Apex proxyt de Rust-app (Axum op 127.0.0.1:8700). De app-index is meteen de
-# login/account-pagina (Discord OAuth2). www → 302 naar apex.
+# Apex proxyt de Rust-app (Axum op 127.0.0.1:8700). /panel → het Hytale-panel
+# (127.0.0.1:8090, bereikbaar via Manage → 🖥 Server); handle_path strip't het
+# prefix. www → 302 naar apex.
+#
+# /techstuff (ops-console, :8091) stond hier ook — op 2026-07-15 uitgezet op vraag
+# van de user: de wereldbeheerpagina wordt van nul herdacht en later in de admin-
+# sectie geïntegreerd. De code leeft nog in lab/ops; de unit `techstuff` is
+# gestopt+disabled. Zet die twee samen terug aan als je hem weer nodig hebt.
 #
 # Terug naar een statische landing? Vervang het reverse_proxy-blok door:
 #     magicmeadow.org { root * /var/www/magicmeadow ; file_server }
 
 magicmeadow.org {
-    reverse_proxy 127.0.0.1:8700
+    # Het panel spreekt zelf TLS met een self-signed cert; naar buiten toe is dit
+    # gewoon magicmeadow.org's echte cert. Het panel weet van het /panel-prefix
+    # via PANEL_BASE (zie tale/panel/hytale-panel.service).
+    handle_path /panel* {
+        reverse_proxy https://127.0.0.1:8090 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8700
+    }
 }
 
 www.magicmeadow.org {

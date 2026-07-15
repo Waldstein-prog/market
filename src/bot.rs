@@ -25,12 +25,13 @@ const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 0; // saldo-log uit op prod (fortuna-lo
 const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
 const PROD_GENERAL_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow ☀️general (weekly zaterdag 15u)
 const PROD_GUILD_ID: u64 = 1296469405651435592; // Magic Meadow — leave/rejoin-archief triggert enkel hier
-const HOURLY_SHOUTOUT_MIN: i64 = 100; // drempel voor de uurlijkse shout-out (coins verdiend in het afgelopen uur)
-// TEST-modus: vuur elke HOURLY_TEST_INTERVAL sec met venster = die interval en een
-// lage drempel, i.p.v. op het uur. Zet op false voor prod (dan HH:01 + ≥100/uur).
+const HOURLY_SHOUTOUT_MIN: i64 = 1; // drempel: minstens 1 coin verdiend in het afgelopen uur
+const HOURLY_SHOUTOUT_TOP: i64 = 10; // hoeveel leden in het uurlijkse top-embed
+// TEST-modus: vuur elke HOURLY_TEST_INTERVAL sec met venster = die interval,
+// i.p.v. op het uur. Zet op false voor prod (dan HH:01 + venster = het klok-uur).
 const HOURLY_SHOUTOUT_TEST: bool = false;
 const HOURLY_TEST_INTERVAL: f64 = 2.0 * 60.0; // test: interval én venster (s)
-const HOURLY_TEST_MIN: i64 = 3; // test-drempel
+const HOURLY_TEST_MIN: i64 = 1; // test-drempel
 // De custom Meadowcoins-emoji (guild-emoji). Bots moeten <:naam:id> sturen, niet :naam:.
 const COIN_EMOJI: &str = "<:Meadowcoins:1526188363110023308>"; // Magic Meadow-emoji; bot zit in prod → rendert op beide guilds
 const PREFIX: &str = "!"; // deze berichten leveren geen coins op (oude commando-syntax)
@@ -1071,9 +1072,26 @@ async fn role_grant_sweeper(pool: DbPool, cfg: Config) {
     }
 }
 
-/// Post om HH:01 een shout-out in #coins voor iedereen die in het net afgelopen
-/// klok-uur ≥ HOURLY_SHOUTOUT_MIN coins verdiende. Geen bericht als niemand de
-/// drempel haalde. State zit in de DB (earn_log) → overleeft een herstart.
+/// Namen komen als platte tekst in een embed; `_` en `*` in een Discord-naam zouden
+/// anders de opmaak van de regel breken.
+fn escape_md(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if matches!(ch, '*' | '_' | '~' | '`' | '|' | '\\' | '>' | '#' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Post om HH:01 in #coins een embed met de grootste HOURLY_SHOUTOUT_TOP verdieners
+/// van het net afgelopen klok-uur (≥ HOURLY_SHOUTOUT_MIN coins). De DB selecteert op
+/// coins, maar het embed toont ze **alfabetisch** — het is een eregalerij, geen
+/// rangschikking, dus geen medailles/plaatsnummers. Namen staan als platte
+/// tekst in het embed — bewust géén mentions, dat pingt het hele lijstje elk uur.
+/// Geen bericht als niemand iets verdiende. State zit in de DB (earn_log) →
+/// overleeft een herstart.
 async fn hourly_shoutouts(http: Arc<serenity::Http>, pool: DbPool) {
     loop {
         let (since, until, min) = if HOURLY_SHOUTOUT_TEST {
@@ -1094,17 +1112,24 @@ async fn hourly_shoutouts(http: Arc<serenity::Http>, pool: DbPool) {
             (hour_end - 3600.0, hour_end, HOURLY_SHOUTOUT_MIN)
         };
 
-        let earners = db::hourly_earners(&pool, since, until, min);
-        for (uid, _name, total) in &earners {
-            let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
-                .say(
-                    &http,
-                    format!("<@{uid}>, wow you've earned **{total}** {COIN_EMOJI} over the last hour! Well done!"),
-                )
-                .await;
-        }
+        let mut earners = db::hourly_earners(&pool, since, until, min, HOURLY_SHOUTOUT_TOP);
         if !earners.is_empty() {
-            tracing::info!("shout-out: {} lid/leden ≥{min} coins", earners.len());
+            // De query koos de grootste verdieners; het embed toont ze alfabetisch.
+            earners.sort_by_key(|(_uid, name, _total)| name.to_lowercase());
+            let lines: String = earners
+                .iter()
+                .map(|(_uid, name, total)| {
+                    format!("🌼 {} — **{total}** {COIN_EMOJI}\n", escape_md(name))
+                })
+                .collect();
+            let embed = serenity::CreateEmbed::new()
+                .title("⏳ Earners of the last hour")
+                .description(lines)
+                .colour(0x6B_9B_52);
+            let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+                .send_message(http.as_ref(), serenity::CreateMessage::new().embed(embed))
+                .await;
+            tracing::info!("uurlijkse top: {} lid/leden ≥{min} coins", earners.len());
         }
         // Bewaar ~8 dagen earn_log (het weekly leaderboard leest ervan).
         db::prune_earn_log(&pool, now_secs() - 8.0 * 86400.0);
