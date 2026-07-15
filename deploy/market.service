@@ -11,8 +11,17 @@ WorkingDirectory=/opt/market
 Environment=RUST_LOG=info,serenity=warn,tracing=warn
 # Publieke basis-URL voor de OAuth2 redirect-URI (HTTPS via Caddy).
 Environment=MARKET_BASE_URL=https://magicmeadow.org
-# Shop-toegangsrol (Flowerborn) — overschrijft role_id uit secrets.json.
-Environment=DISCORD_ROLE_ID=1525249217897955590
+# Guild + shop-toegangsrol (Flowerborn), allebei expliciet — overschrijft secrets.json.
+#
+# ⚠️ Stond tot 2026-07-15 op 1525249217897955590: dat is de Flowerborn van de DEV-guild
+# (WaldsteinDevZone), een overblijfsel uit de dev-fase. Die rol bestáát niet in Magic
+# Meadow, dus `has_role` gaf voor élk prod-lid false → iedereen zakte door de rolcheck en
+# zag de regels-pagina i.p.v. de shop. Beide guilds hebben een rol "Flowerborn" met een
+# ándere ID; hetzelfde geldt voor de kleurrollen (Amber, Ruby, …). Die laatste worden
+# op **naam** opgezocht (`role_id_by_name`), dus die volgen de guild vanzelf — enkel deze
+# twee ID's moeten kloppen.
+Environment=DISCORD_GUILD_ID=1296469405651435592
+Environment=DISCORD_ROLE_ID=1399336425069219881
 ExecStart=/opt/market/market
 Restart=always
 RestartSec=10

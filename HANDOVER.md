@@ -14,6 +14,60 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## 🚦 GO-LIVE-SCHAKELAAR (klaarzetten op user-commando "we zijn go")
+De **`gate`-middleware** (`web.rs`, ~r242) stuurt op dit moment **elke niet-admin** naar
+`/info` — enkel `/info`, `/img/*`, `/login`, `/auth/callback`, `/logout`, `/healthz` en
+`/favicon.ico` zijn publiek. Daardoor loopt de embed-knop naar de shop voor gewone leden
+dood op de info-pagina. **Bij go-live:** die admin-check eruit zodat Flowerborns bij
+`/market` raken en een dagpas kunnen kopen (`require_flowerborn` op `market()` blijft de
+échte gate). User-instructie 2026-07-15: **"doe dit seffens als we klaar zijn voor de go"**
+— dus **nog NIET doen**, wachten op zijn woord.
+
+## 🔴 GAME-TEST — nog één tijdelijke instelling LIVE (2026-07-15)
+> **Terugzetten vóór echte spelers erop komen:**
+> - **`protected_names = ["Faybelle"]`** (`/opt/hytale/bot/config.toml`) — Waldstein is er
+>   op eigen vraag uitgehaald voor de koop-test; zonder dat kan zijn eigen toegang verlopen.
+>
+> ✅ **`DAY_PASS_SECS` staat weer op `24 * 3600`** (stond even op 2 min voor de verval-test).
+>
+> Aan, en mag blijven tot de go: `SHOP_TEST_DAY_PASS_ONLY = true` (shop toont enkel de
+> dagpas; prijs staat op **1 coin** in de DB — vóór de go op een echte prijs zetten) en de
+> reconcile-lus op **15s** (was 1 min).
+
+## ⏭️ Sessie (2026-07-15d) — shop-herwerking + prod-config-blocker + pas-keten live getest
+
+**(A) Shop herwerkt.** Publieke shop = **4 dagitems** (`shop_offers`, willekeurig uit de 13
+niet-boost items, voor iedereen dezelfde, stabiel tot middernacht UTC) + de **passen** los
+eronder, altijd te koop. De vroegere volledige catalogus leeft voort als **Manage → 🛍 Admin
+shop** (`/admin/shop`, alles koopbaar om te testen). Admins krijgen een **↻**-knopje naast de
+dagitems (`/admin/shop/reroll`, gelogd). `shop_offers` bestond al maar stond achter
+`#[allow(dead_code)]` — hergebruikt i.p.v. herbouwd. Verder: **Unequip**-knop op de geëquipte
+gem (naamkleur terug + rol eraf, gem blijft; guard: enkel de gem die je écht draagt) en het
+**gem-raster wrapt** nu (stond in een zijwaartse schuifstrip → je zag niet alles).
+
+**(B) ⚠️ PROD-BLOCKER GEVONDEN EN GEFIXT — niemand kon in de shop.** `deploy/market.service`
+zette `DISCORD_ROLE_ID=1525249217897955590`: de Flowerborn van de **dev**-guild. Die rol
+bestaat niet in Magic Meadow → `has_role` gaf voor élk prod-lid false → alle **32** Flowerborns
+zagen de regels-pagina i.p.v. de shop. Nu staan **guild én rol expliciet** in de unit
+(`1296469405651435592` + `1399336425069219881`). Rolcheck nagespeeld: Waldstein, FayBelle,
+TechHeadFred en ねこ krijgen toegang. **NB:** de kleurrollen (Amber, Ruby, …) bestaan in béide
+guilds met andere ID's, maar worden op **naam** opgezocht (`role_id_by_name`) → die volgen de
+guild vanzelf; enkel deze twee ID's moesten kloppen.
+
+**(C) Pas-keten end-to-end live getest** (Waldstein, pas van 2 min):
+`15:27:44 ✅ market-whitelist add Waldstein` → `15:29:43 🚫 Geen geldige pass meer — van de
+whitelist gehaald (ok)`. Kopen → naam → whitelist → verval werkt volledig.
+**Bevinding: een verlopen pas kickt niet** — de whitelist blokkeert enkel nieuwe joins, wie al
+ingelogd is speelt door tot hij uitlogt. `kick <naam>` via de console wérkt (land-claim
+`deploy.sh` gebruikt het), maar de fix hoort in **tale/Argus**, niet hier (user-beslissing).
+Zie `[[tale-whitelist-passes]]`.
+
+**(D) Naam-font van TechHeadFred — feature bewust geschrapt.** Zijn naam is platte ASCII; de
+styling zit in `display_name_styles` (`{font_id: 8, effect_id: 1, colors: [747943]}`), een
+Discord-Shop-cosmetic. 4 van de 38 leden hebben er een, twee met gradient. Het font zelf zit in
+Discord's client — wij krijgen enkel een nummer, geen font-bestand → niet reproduceerbaar.
+Admin bevestigde dat op hun server **de rollen** de kleur bepalen, nitro of niet.
+
 ## ⏭️ Sessie (2026-07-15c) — item-/prijs-logging + Shop/Inventory-filters op de logpagina
 
 **Aanleiding:** de "Faybelle kreeg 1017 voor een heliodor van 1000"-vraag kostte een uur

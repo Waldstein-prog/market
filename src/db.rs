@@ -242,9 +242,9 @@ fn seed_horseshoe(pool: &DbPool) {
 }
 
 /// De dagelijkse shop-selectie: `n` items voor `day`, stabiel bewaard in
-/// daily_shop. Pool = alle koopbare niet-boost items (gems + boosters).
-/// (Tijdelijk ongebruikt: shop toont voorlopig enkel de Hytale-passen.)
-#[allow(dead_code)]
+/// daily_shop. Pool = alle koopbare niet-boost items (gems + boosters); de
+/// Hytale-passen vallen er bewust buiten, die staan altijd apart te koop.
+/// De selectie is voor iedereen dezelfde — dat maakt verzamelen spannender.
 pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut ids: Vec<i64> = {
@@ -276,6 +276,29 @@ pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
             .expect("insert daily_shop");
         }
     }
+    ids.iter().filter_map(|id| get_item(pool, *id)).collect()
+}
+
+/// Gooi de dagselectie van `day` weg; de eerstvolgende `shop_offers` trekt opnieuw.
+/// (Admin-knopje naast de dagitems — handig om te testen zonder een dag te wachten.)
+pub fn clear_shop_day(pool: &DbPool, day: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM daily_shop WHERE day = ?1", params![day])
+        .expect("clear daily_shop");
+}
+
+/// De Hytale-passen (dagpas + permanent). Staan altijd te koop, los van de dagrotatie.
+/// Dagpas eerst (duration > 0), dan de permanente.
+pub fn boost_items(pool: &DbPool) -> Vec<Item> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT id FROM items WHERE category = 'boost' ORDER BY duration DESC, id")
+        .expect("prepare boost_items");
+    let ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .expect("query boost_items")
+        .filter_map(Result::ok)
+        .collect();
     ids.iter().filter_map(|id| get_item(pool, *id)).collect()
 }
 

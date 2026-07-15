@@ -7,12 +7,11 @@
 //! - `/admin`       de Fase-I rol-toggle (intern beheertool, ongewijzigd).
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Form, Multipart, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Form, Multipart, Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{COOKIE, SET_COOKIE},
     },
-    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -28,11 +27,30 @@ use crate::discord_rest::Discord;
 
 const SESSION_MAX_AGE: i64 = 90 * 24 * 3600; // ~90 dagen: voelt als "één keer inloggen"
 const MEADOW: &str = "#6b9b52";
+
+/// Hoeveel items er dagelijks in de publieke shop liggen. De rest van de catalogus is
+/// enkel via de Admin shop te koop — zo blijft alles verzamelen een werk van dagen.
+const SHOP_DAILY_N: i64 = 4;
+
+/// GAME-TEST (aan sinds 2026-07-15): de shop toont **enkel de Hytale-dagpas**, zodat
+/// testers zonder afleiding de whitelist-keten kunnen aflopen. De prijs van die pas is
+/// gewoon data (Manage → Shop), geen constante — nu op 1 coin gezet.
+/// Terug op `false` → dagrotatie + beide passen komen weer tevoorschijn. De Admin shop
+/// toont sowieso alles, ook tijdens de test.
+const SHOP_TEST_DAY_PASS_ONLY: bool = true;
+
+/// De dag waarop de shop-rotatie draait (hele dagen sinds epoch, UTC → rolt om
+/// middernacht UTC, 01:00/02:00 Brusselse tijd).
+fn shop_day() -> i64 {
+    (now_secs() / 86400.0).floor() as i64
+}
 // Meadowcoins-emoji als inline afbeelding (Discord-CDN); schaalt mee met font-size (1em).
 const MC: &str = "<img class=\"mc\" src=\"https://cdn.discordapp.com/emojis/1526188363110023308.png?size=48\" alt=\"coins\">";
 // Ticket-afbeelding voor de 24h-pas, ingebakken in de binary (geserveerd op /img/ticket.png).
 const TICKET_IMG: &[u8] = include_bytes!("../artwork/24hHytale.png");
 const CHEST_PNG: &[u8] = include_bytes!("../artwork/treasure chest.png"); // chest-embed image via URL (/img/chest.png)
+/// Ronde Hytale-knop; draagt de aflopende pas-timer op de Coins-tab (/img/hytalepass.png).
+const HYTALE_PASS_PNG: &[u8] = include_bytes!("../artwork/HytalePass_Button.png");
 // Prod-guild (Magic Meadow): de coins-beheerpagina + kanalen-picklist lezen hiervan.
 const COINS_GUILD_ID: &str = "1296469405651435592";
 // Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
@@ -92,8 +110,12 @@ sw.forEach(function(s){s.style.color=col;});\
 document.querySelectorAll('.gemcard.previewsel').forEach(function(x){x.classList.remove('previewsel');});\
 card.classList.add('previewsel');});});})();</script>";
 const UPLOAD_DIR: &str = "uploads"; // in WorkingDirectory (/opt/market/uploads op prod)
-/// Een Hytale-dagpas geeft vast 24 uur toegang; de permanente pas geldt eeuwig.
-/// Er is geen instelbare pas-duur meer (day pass = 24h, hardcoded).
+/// Standaardduur van een Hytale-dagpas, enkel nog gebruikt bij het **seeden** van een
+/// nieuwe pas. De echte duur is sinds 2026-07-15 weer **per item instelbaar** in
+/// Manage → Shop (veld "Access (minutes)" → `items.duration`), en `buy()` leest dát.
+/// Was tijdelijk hardcoded; op vraag van de user terug instelbaar gemaakt zodat verval
+/// te testen valt zonder een dag te wachten. `duration == 0` blijft "permanente pas".
+#[allow(dead_code)]
 const DAY_PASS_SECS: i64 = 24 * 3600;
 
 #[derive(Clone)]
@@ -148,9 +170,12 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/public", post(set_public_route))
         .route("/buy", post(buy))
         .route("/use/gem", post(use_gem))
+        .route("/use/gem/unequip", post(unequip_gem))
         .route("/use/booster", post(use_booster))
         .route("/hytale/name", post(set_hytale_name_route))
         .route("/admin/market", get(admin_market))
+        .route("/admin/shop", get(admin_shop))
+        .route("/admin/shop/reroll", post(admin_shop_reroll))
         .route("/admin/shelf/add", post(admin_shelf_add))
         .route("/admin/shelf/rename", post(admin_shelf_rename))
         .route("/admin/shelf/delete", post(admin_shelf_delete))
@@ -181,6 +206,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/uploads/{name}", get(serve_upload))
         .route("/img/ticket.png", get(serve_ticket))
         .route("/img/chest.png", get(serve_chest))
+        .route("/img/hytalepass.png", get(serve_hytale_pass))
         .route("/info", get(info_page))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
@@ -190,7 +216,6 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/api/toggle", post(api_toggle))
         .route("/api/balance", get(api_balance))
         .route("/healthz", get(|| async { "ok" }))
-        .layer(middleware::from_fn_with_state(state.clone(), gate))
         .with_state(state);
 
     // Poort: default 8700, overschrijfbaar met MARKET_PORT (bv. voor lokale tests naast
@@ -207,31 +232,12 @@ pub async fn serve(cfg: Config, pool: DbPool) {
     axum::serve(listener, app).await.expect("web-server crashte");
 }
 
-/// Toegangs-gate: niet-admins zien enkel de publieke /info-pagina (+ afbeeldingen,
-/// login/oauth, healthz). Alle andere paden → redirect naar /info. Admins houden
-/// volle toegang tot de hele site (tijdelijk, tot de site publiek opengaat).
-async fn gate(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    let path = req.uri().path();
-    let public = path == "/info"
-        || path.starts_with("/img/")
-        || path == "/login"
-        || path == "/auth/callback"
-        || path == "/logout"
-        || path == "/healthz"
-        || path == "/favicon.ico";
-    if public {
-        return next.run(req).await;
-    }
-    let admin = cookie(req.headers(), "session")
-        .and_then(|t| db::get_session(&st.pool, &t))
-        .map(|(uid, _)| is_admin(&uid))
-        .unwrap_or(false);
-    if admin {
-        next.run(req).await
-    } else {
-        Redirect::to("/info").into_response()
-    }
-}
+// De site-brede `gate`-middleware is weg (2026-07-15, go-live): die stuurde élke niet-admin
+// naar /info, waardoor de embed-knop voor gewone leden doodliep. Toegang loopt nu per route
+// via het eigen slot: `require_flowerborn` op de ledenpagina's (shop/inventory/leaderboard/
+// buy/use), `require_admin` op alles onder /admin én op de oude toggle-UI + /api/status +
+// /api/toggle. Die laatste drie leunden vroeger volledig op de gate — vandaar dat ze bij het
+// weghalen ervan hun eigen check kregen (zonder dat kon eender wie zichzelf Flowerborn maken).
 
 // --- helpers ------------------------------------------------------------
 
@@ -452,12 +458,31 @@ a.link{{color:{MEADOW}}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
 .notice.err{{background:#3a201c;color:#f0c9c0;border:1px solid #6e352c}}
 .shelf{{display:flex;gap:.6rem;overflow-x:auto;padding:.2rem 0 .5rem}}
+/* Inventory: gems mogen niet in een zijwaartse schuifstrip verdwijnen — laat ze
+   gewoon doorlopen en afbreken over een paar rijen, zodat je alles in één blik ziet. */
+.shelf.wrap{{flex-wrap:wrap;overflow-x:visible}}
 .shelf .slot{{flex:0 0 auto;width:136px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
 .shelf.shop .slot{{width:210px}}
 .shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700}}
+.shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700;
+  display:flex;align-items:center;gap:.5rem}}
+.reroll-f{{display:inline;margin:0}}
+.reroll{{background:transparent;border:1px solid #2c3d2a;color:#9db095;border-radius:999px;
+  width:1.6rem;height:1.6rem;padding:0;font-size:.9rem;line-height:1;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center}}
+.reroll:hover{{background:#20301e;color:#e8f0e4;border-color:#3a4d38}}
+/* Ronde Hytale-knop onderaan de Coins-tab, met de pas-timer eróver. De H in de
+   afbeelding is druk, dus de tijd krijgt een donker pilletje — anders leest hij niet. */
+.passbtn{{position:relative;width:125px;margin:1.4rem auto .2rem;line-height:0}}
+.passbtn img{{width:100%;height:auto;border-radius:50%;display:block;
+  box-shadow:0 6px 18px rgba(0,0,0,.45)}}
+.passtime{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  background:rgba(14,21,16,.82);color:#e8f0e4;font:800 1.9rem/1.2 system-ui,sans-serif;
+  padding:.1rem .5rem;border-radius:999px;white-space:nowrap;
+  font-variant-numeric:tabular-nums;border:1px solid rgba(232,240,228,.18)}}
+.passtime.out{{background:rgba(192,86,47,.9);color:#fff}}
 /* Zwevende naam-preview: blijft bovenaan zichtbaar terwijl je door de gems scrolt. */
 .nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap;
   position:sticky;top:.6rem;z-index:20;background:#182319;padding:.5rem;
@@ -652,8 +677,9 @@ fn admin_subtabs(active: &str) -> String {
         format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
     };
     format!(
-        "<div class=\"subtabs\">{}{}{}{}{}</div>",
+        "<div class=\"subtabs\">{}{}{}{}{}{}</div>",
         item("/admin/market", "market", "🛒 Shop"),
+        item("/admin/shop", "shop", "🛍 Admin shop"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
         item("/admin/log", "log", "📜 Log"),
@@ -810,18 +836,20 @@ fn gem_slot(it: &db::Item, owned: bool, equipped: bool) -> String {
                 <div class=\"name muted\">???</div></div>"
             .to_string();
     }
-    let (label, extra, disabled) = if equipped {
-        ("Equipped", " eq", " disabled")
+    // De geëquipte gem krijgt géén dode "Equipped"-knop meer, maar Unequip: dat zet je
+    // naamkleur terug op standaard en trekt de bijhorende Discord-rol in.
+    let (label, extra, action) = if equipped {
+        ("Unequip", " eq", "/use/gem/unequip")
     } else {
-        ("Use", "", "")
+        ("Use", "", "/use/gem")
     };
     format!(
         "<div class=\"slot gemcard previewable\" data-color=\"{col}\">\
          <div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div><div class=\"gdesc\">{desc}</div>\
-         <form method=\"post\" action=\"/use/gem\" class=\"buyform\">\
+         <form method=\"post\" action=\"{action}\" class=\"buyform\">\
            <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
-           <button class=\"buy on{extra}\" type=\"submit\"{disabled}>{label}</button></form></div>",
+           <button class=\"buy on{extra}\" type=\"submit\">{label}</button></form></div>",
         col = esc(&it.color),
         thumb = thumb_html(&it.image, &it.color),
         name = esc(&it.name),
@@ -851,6 +879,32 @@ fn inventory_home(
         "MAX".to_string()
     };
 
+    // Onderaan de Coins-tab: de ronde Hytale-knop met de resterende pas-geldigheid eróver.
+    // Enkel bij een lópende dagpas. Geen pas, verlopen, óf permanente toegang → geen knop:
+    // een afteller zonder einddatum (of zonder pas) zegt niets.
+    // Eigen `data-passexp` i.p.v. de `.grant[data-exp]` van de Boosts-tab: die scripts
+    // scannen het hele document, en alle tabs staan tegelijk in de HTML (enkel verborgen
+    // via CSS), dus anders zouden twee timers op hetzelfde element vechten.
+    let pass_btn = |inner: String| {
+        format!(
+            "<div class=\"passbtn\"><img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">\
+               {inner}</div>"
+        )
+    };
+    let pass_row = match db::get_whitelist(pool, uid, now_secs()) {
+        Some((_n, Some(exp))) => format!(
+            "{}\
+             <script>(function(){{var e=document.querySelector('[data-passexp]');if(!e)return;\
+               var exp=+e.dataset.passexp;function t(){{var s=Math.max(0,exp-Date.now()/1000);\
+               var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
+               e.textContent=s>0?(h>0?h+'h '+m+'m':m+'m '+sec+'s'):'expired';\
+               e.classList.toggle('out',s<=0);\
+               if(s>0)setTimeout(t,1000);}}t();}})();</script>",
+            pass_btn(format!("<span class=\"passtime\" data-passexp=\"{exp}\">…</span>"))
+        ),
+        // Permanente pas (of helemaal geen pas): niets te tellen → geen knop.
+        Some((_, None)) | None => String::new(),
+    };
     let coins_panel = format!(
         "<div class=\"earned\">{MC} <span data-bal>{coins}</span></div>\
          <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">current balance</p>\
@@ -858,7 +912,7 @@ fn inventory_home(
            <div class=\"bar\"><div class=\"fill\" data-fill style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\" data-lvlnm>{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Coins earned all-time</span>\
-           <span>{MC} <b data-earned>{total_earned}</b></span></div>{grants}",
+           <span>{MC} <b data-earned>{total_earned}</b></span></div>{grants}{pass_row}",
         grants = grants_html(grants),
     );
 
@@ -903,7 +957,7 @@ fn inventory_home(
                 return String::new();
             }
             format!(
-                "<h2 class=\"shelf-title\">{}</h2><div class=\"shelf\">{}</div>",
+                "<h2 class=\"shelf-title\">{}</h2><div class=\"shelf wrap\">{}</div>",
                 esc(title),
                 slots
             )
@@ -1061,8 +1115,76 @@ async fn market(
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
 
-    // Render alle schappen precies zoals in Manage: schap-titel + de items erop.
-    // Lege schappen worden overgeslagen.
+    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma);
+
+    // GAME-TEST (SHOP_TEST_DAY_PASS_ONLY): enkel de dagpas ligt in de winkel, zodat testers
+    // recht op de whitelist-keten afgaan zonder afleiding. Anders: de dagrotatie
+    // (SHOP_DAILY_N willekeurige items, voor iedereen dezelfde, stabiel tot middernacht UTC)
+    // met daaronder los de passen — die moeten altijd te koop zijn.
+    let shelves = if SHOP_TEST_DAY_PASS_ONLY {
+        let pass: String = db::boost_items(&st.pool)
+            .iter()
+            .filter(|it| it.duration > 0) // dagpas = de boost mét looptijd
+            .map(slot)
+            .collect();
+        format!(
+            "<h2 class=\"shelf-title\">🎟 Hytale access</h2><div class=\"shelf shop\">{pass}</div>"
+        )
+    } else {
+        let offers: String =
+            db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
+        // Admins mogen opnieuw laten trekken zonder een dag te wachten (test-knopje).
+        let reroll = if admin {
+            "<form method=\"post\" action=\"/admin/shop/reroll\" class=\"reroll-f\">\
+               <button class=\"reroll\" title=\"Roll a new daily selection (admin)\">↻</button></form>"
+        } else {
+            ""
+        };
+        let passes: String = db::boost_items(&st.pool).iter().map(slot).collect();
+        format!(
+            "<h2 class=\"shelf-title\">✨ Today's picks{reroll}</h2>\
+             <div class=\"shelf shop\">{offers}</div>\
+             <h2 class=\"shelf-title\">🎟 Hytale access</h2>\
+             <div class=\"shelf shop\">{passes}</div>"
+        )
+    };
+
+    let from = q.from.unwrap_or(coins);
+
+    let body = format!(
+        "<div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
+           <span class=\"purse-n\" data-bal>{coins}</span></div>\
+         <h1 class=\"shoptitle\">🛒 Shop</h1>{notice}{shelves}\
+         <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
+           var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
+           if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
+           function step(t){{var k=Math.min(1,(t-s)/d);\
+             el.textContent=Math.round(from+(to-from)*k);\
+             if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>{KEEP_SCROLL_JS}",
+    );
+    Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, ""), true, &body))
+        .into_response()
+}
+
+/// De **Admin shop**: de volledige catalogus, koopbaar, zoals de gewone shop er vroeger
+/// uitzag. De publieke shop toont sinds de herwerking nog maar `SHOP_DAILY_N` dagitems —
+/// admins moeten alles kunnen kopen om te testen, dus dat oude beeld leeft hier voort.
+async fn admin_shop(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<MarketQuery>,
+) -> Response {
+    let Some((uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let (coins, _m, _p, _te) = db::get_stats(&st.pool, &uid);
+    let notice = market_notice(&q);
+    let owned: std::collections::HashSet<i64> =
+        db::owned_item_ids(&st.pool, &uid).into_iter().collect();
+    let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
+    let has_perma = db::has_perma_access(&st.pool, &uid);
+
+    // Alle schappen met al hun items; lege schappen overslaan.
     let shelves: String = db::list_shelves(&st.pool)
         .iter()
         .map(|(sid, title)| {
@@ -1081,20 +1203,33 @@ async fn market(
         .collect();
 
     let from = q.from.unwrap_or(coins);
-
     let body = format!(
-        "<div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
+        "{subtabs}\
+         <div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
            <span class=\"purse-n\" data-bal>{coins}</span></div>\
-         <h1 class=\"shoptitle\">🛒 Shop</h1>{notice}{shelves}\
-         <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
-           var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
-           if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
-           function step(t){{var k=Math.min(1,(t-s)/d);\
-             el.textContent=Math.round(from+(to-from)*k);\
-             if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>{KEEP_SCROLL_JS}",
+         <h1 class=\"shoptitle\">🛍 Admin shop</h1>\
+         <p class=\"muted\">The full catalogue — buy anything to test. Members only see the \
+          daily picks on the <a class=\"link\" href=\"/market\">Shop</a> page.</p>\
+         {notice}{shelves}{KEEP_SCROLL_JS}",
+        subtabs = admin_subtabs("shop"),
     );
-    Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, ""), true, &body))
+    Html(shell("Admin shop — Meadow Market", &chrome(&name, "admin", true, ""), true, &body))
         .into_response()
+}
+
+/// Admin-knopje naast de dagitems: gooi de selectie van vandaag weg en trek opnieuw.
+async fn admin_shop_reroll(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some((admin_uid, admin)) = require_admin(&st, &headers) {
+        db::clear_shop_day(&st.pool, shop_day());
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "shop_reroll")
+                .actor(&admin_uid, &admin)
+                .detail(format!("nieuwe dagselectie getrokken · by {admin}")),
+        );
+    }
+    Redirect::to("/market").into_response()
 }
 
 /// Cache-buster op basis van de bestand-mtime: een vervangen afbeelding krijgt zo een nieuwe
@@ -1438,7 +1573,12 @@ async fn logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
 
 // --- /admin : Fase-I rol-toggle (ongewijzigd) ---------------------------
 
-async fn admin(State(st): State<AppState>) -> Html<String> {
+/// De oorspronkelijke rol-toggle-UI (PoC). Blijft bestaan naast de echte Manage-sectie,
+/// maar is **admin-only**: ze bedient `/api/toggle`, dat rollen op de échte guild zet.
+async fn admin(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&st, &headers).is_none() {
+        return Redirect::to("/").into_response();
+    }
     let tmpl = include_str!("../templates/index.html");
     let css = include_str!("../static/style.css");
     let pinned_json = serde_json::to_string(&st.cfg.user_id).unwrap_or_else(|_| "\"\"".into());
@@ -1448,7 +1588,7 @@ async fn admin(State(st): State<AppState>) -> Html<String> {
         .replace("{{ROLE_LABEL}}", &st.cfg.role_label)
         .replace("{{PINNED_USER_JSON}}", &pinned_json)
         .replace("{{ROLE_LABEL_JSON}}", &label_json);
-    Html(html)
+    Html(html).into_response()
 }
 
 fn is_digits(s: &str) -> bool {
@@ -1460,7 +1600,16 @@ struct StatusQuery {
     user_id: String,
 }
 
-async fn api_status(State(st): State<AppState>, Query(q): Query<StatusQuery>) -> JsonResp {
+/// Rol-status van een willekeurige Discord-ID. **Admin-only**: dit vertelt of iemand een
+/// rol heeft, en dat gaat een bezoeker niet aan.
+async fn api_status(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StatusQuery>,
+) -> JsonResp {
+    if require_admin(&st, &headers).is_none() {
+        return (StatusCode::FORBIDDEN, Json(json!({"ok": false, "error": "admin only"})));
+    }
     let uid = q.user_id.trim().to_string();
     if !is_digits(&uid) {
         return bad("Enter a valid Discord user ID (digits).");
@@ -1508,7 +1657,17 @@ struct ToggleBody {
     enable: bool,
 }
 
-async fn api_toggle(State(st): State<AppState>, Json(b): Json<ToggleBody>) -> JsonResp {
+/// Kent de shop-toegangsrol toe of neemt ze af, op de échte guild. **Admin-only** — zonder
+/// deze check kan eender wie zichzelf Flowerborn maken. Stond tot 2026-07-15 enkel achter de
+/// site-brede `gate`; die is bij de go-live weg, dus de check hoort hier.
+async fn api_toggle(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(b): Json<ToggleBody>,
+) -> JsonResp {
+    if require_admin(&st, &headers).is_none() {
+        return (StatusCode::FORBIDDEN, Json(json!({"ok": false, "error": "admin only"})));
+    }
     let uid = b.user_id.trim().to_string();
     if !is_digits(&uid) {
         return bad("Enter a valid Discord user ID (digits).");
@@ -1610,7 +1769,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         // Activeer meteen: dagpas → whitelist-timer (stapelt), perma → permanente whitelist.
         let msg = if item.duration > 0 {
             let exp =
-                db::grant_day_whitelist(&st.pool, &uid, &hname, DAY_PASS_SECS as f64, now_secs());
+                db::grant_day_whitelist(&st.pool, &uid, &hname, item.duration as f64, now_secs());
             if exp.is_finite() {
                 // Rond op hele minuten af: `now` valt ~1s ná de grant, anders "1439 min".
                 let left = ((exp - now_secs()) / 60.0).round().max(0.0) as i64 * 60;
@@ -1733,6 +1892,47 @@ async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<B
     Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response()
 }
 
+/// Leg de geëquipte gem weer af: naamkleur terug naar standaard en de bijhorende
+/// Discord-rol eraf. De gem blijft uiteraard in je collectie.
+async fn unequip_gem(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<BuyForm>,
+) -> Response {
+    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
+        return Redirect::to("/").into_response();
+    };
+    let Some(item) = db::get_item(&st.pool, f.item_id) else {
+        return Redirect::to("/?tab=gems").into_response();
+    };
+    // Enkel de gem die je écht draagt kan eraf — anders zou een gepost formulier van een
+    // andere kaart je huidige kleur wissen.
+    let equipped = db::get_equipped_gem(&st.pool, &uid);
+    if !equipped.eq_ignore_ascii_case(&item.name) {
+        return Redirect::to("/?tab=gems").into_response();
+    }
+
+    db::set_name_color(&st.pool, &uid, &name, "");
+    db::set_equipped_gem(&st.pool, &uid, "");
+
+    db::log_event(
+        &st.pool,
+        now_secs(),
+        &db::LogEntry::new("gem", "unequip").actor(&uid, &name).detail(item.name.clone()),
+    );
+
+    let msg = match st.dc.role_id_by_name(&item.name).await {
+        Ok(Some(rid)) => match st.dc.set_role(&uid, &rid, false).await {
+            Ok(_) => format!("Unequipped {} — your name colour is back to default.", item.name),
+            Err(e) => format!("⚠️ Couldn't remove the '{}' Discord role: {e}", item.name),
+        },
+        // Geen rol gevonden = niets in te trekken; de site-kleur is al terug op standaard.
+        Ok(None) => format!("Unequipped {} — your name colour is back to default.", item.name),
+        Err(e) => format!("⚠️ Discord lookup failed: {e}"),
+    };
+    Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response()
+}
+
 /// Gebruik een booster (Lucky Horseshoe): verbruik één exemplaar en zet de
 /// chest-luck-boost aan (dubbele lot-kans bij de eerstvolgende treasure chest).
 async fn use_booster(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
@@ -1785,16 +1985,24 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
 
-    // Duur: het minuten-veld is verdwenen. Hytale-passen tonen een vaste, leesbare
-    // Access-notitie (day pass = 24h, permanent = eeuwig) + een hidden input die de
-    // bestaande waarde als >0/0-vlag bewaart. Alle andere items hebben geen duur (die had
-    // geen functie) — géén veld, en de update zet hun duration gewoon op 0.
-    let dur_field = if it.category == "boost" {
-        let access = if it.duration > 0 { "24 hours (day pass)" } else { "permanent" };
+    // Duur. De **dagpas** (boost mét looptijd) krijgt een instelbaar minuten-veld: dát
+    // getal bepaalt sinds 2026-07-15 écht hoe lang de pas geldig is (`buy()` leest
+    // `item.duration`, niet meer een hardcoded 24u). Handig om verval te testen zonder
+    // een dag te wachten. De **permanente** pas heeft niets in te stellen (duration 0 =
+    // eeuwig) en houdt zijn vlag via een hidden input. Alle andere items hebben geen duur
+    // — géén veld, en de update zet hun duration gewoon op 0.
+    let dur_field = if it.category == "boost" && it.duration > 0 {
+        let uren = dur_min as f64 / 60.0;
         format!(
-            "<div class=\"fld\">Access<div class=\"rdonly\">{access}</div></div>\
-             <input type=\"hidden\" name=\"duration_min\" value=\"{dur_min}\">"
+            "<div class=\"fld\">Access (minutes)\
+               <input type=\"number\" name=\"duration_min\" value=\"{dur_min}\" min=\"1\" \
+                 step=\"1\" title=\"How long a day pass stays valid. 1440 = 24 hours.\">\
+               <div class=\"hint\">= {uren:.1} h · 1440 = 24 h</div></div>"
         )
+    } else if it.category == "boost" {
+        "<div class=\"fld\">Access<div class=\"rdonly\">permanent</div></div>\
+         <input type=\"hidden\" name=\"duration_min\" value=\"0\">"
+            .to_string()
     } else {
         String::new()
     };
@@ -2362,6 +2570,7 @@ async fn admin_log(
             ("admin", "item_update") => ("#6741d9", "🏷 item changed"),
             ("admin", "item_delete") => ("#862e9c", "🗑 item deleted"),
             ("admin", "correction") => ("#c92a2a", "🩹 correction"),
+            ("admin", "shop_reroll") => ("#3b5bdb", "↻ shop reroll"),
             _ => ("#868e96", event),
         };
         format!(
@@ -2748,13 +2957,22 @@ async fn admin_item_update(
         let before = db::get_item(&st.pool, f.id);
         let price = f.price.max(0);
         let name = f.name.trim();
+        // `duration == 0` betekent "permanente pas". Een dagpas op 0 minuten zetten zou
+        // hem dus stil in een permanente pas veranderen — nooit de bedoeling van dat
+        // veldje. Een item dat al een dagpas is, blijft daarom minstens 1 minuut.
+        let mut duration = f.duration_min.max(0) * 60;
+        if let Some(b) = &before {
+            if b.category == "boost" && b.duration > 0 {
+                duration = duration.max(60);
+            }
+        }
         db::update_item(
             &st.pool,
             f.id,
             name,
             price,
             f.role_id.trim(),
-            f.duration_min.max(0) * 60,
+            duration,
             f.category.trim(),
             f.description.trim(),
         );
@@ -2766,6 +2984,10 @@ async fn admin_item_update(
             }
             if b.name != name {
                 changes.push(format!("name '{}' → '{}'", b.name, name));
+            }
+            // Duur stuurt sinds 2026-07-15 de échte pas-lengte → wijzigingen horen in de log.
+            if b.duration != duration {
+                changes.push(format!("duration {} min → {} min", b.duration / 60, duration / 60));
             }
             if !changes.is_empty() {
                 db::log_event(
@@ -2969,6 +3191,15 @@ async fn serve_chest() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         CHEST_PNG,
+    )
+        .into_response()
+}
+
+/// De ingebakken ronde Hytale-knop (draagt de pas-timer op de Coins-tab).
+async fn serve_hytale_pass() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        HYTALE_PASS_PNG,
     )
         .into_response()
 }

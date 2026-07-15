@@ -10,3 +10,9 @@ backend/secrets.json
 /target/
 /secrets.json
 /coins.db
+
+# Via de admin-UI geüploade item-afbeeldingen = runtime-data, geen broncode. Ze leven op
+# de server in /opt/market/uploads en deploy.sh raakt ze niet aan; wat hier lokaal ligt is
+# enkel testrommel. (De vaste artwork-bestanden zitten wél in git: die bakt include_bytes!
+# in de binary.)
+/uploads/
