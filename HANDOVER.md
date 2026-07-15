@@ -14,6 +14,52 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-15e) — eerlijke verwijderknop, Out of Stock, 3D-knoppen
+
+**(A) Panel-verwijderknop loog — nu eerlijk.** User meldde: pas gekocht, zichzelf verwijderd,
+opnieuw gekocht → **47u i.p.v. 24u**. Diagnose: `grant_day_whitelist` **stapelt** bewust
+(+24u bovenop resterende tijd — dat is een feature), maar de panel-knop deed enkel
+`whitelist remove` op de Hytale-server en raakte **market's `hytale_whitelist` niet aan**.
+Dus: de betaalde tijd bleef staan, de volgende aankoop stapelde erop, én de reconcile-lus
+zette hem binnen 15s gewoon terug. De verwijdering was zinloos.
+Nu doet `whitelist_remove` (panel): **kick → alle pas-bronnen wissen → van de whitelist**,
+in die volgorde (eerst kicken, want de whitelist blokkeert enkel nieuwe joins; en
+andersom zou de reconcile hem tussenin terugzetten). Mislukt de revoke → knop weigert en
+zegt het eerlijk. **Geen coins terug** (user-keuze: moderatie-actie; de refund op de
+logpagina blijft de vriendelijke variant).
+**Koppeling:** het panel draait als `hytale` en kan `coins.db` (user `market`) enkel lézen
+→ het **vraagt** market om te revoken via **`POST /internal/pass/revoke`**
+(`db::revoke_pass_by_name`, hoofdletter-ongevoelig, wist ook `perma_access`, logt
+`admin/pass_revoke`). Market blijft zo de enige schrijver van z'n DB.
+**Beveiliging in 2 lagen:** Caddy geeft `/internal/*` van buitenaf een **404**, en market
+eist een gedeeld geheim (constante-tijd-vergelijking; leeg geheim = alles weigeren).
+⚠️ **Het geheim staat NIET in git**: market leest het uit `secrets.json` (mode 600), het
+panel uit `EnvironmentFile=/opt/hytale/panel/market.env` (mode 600) — de unit-bestanden
+zitten wél in git. Live geverifieerd: extern 404, fout/geen geheim 403, en de echte knop
+wiste Waldsteins 47,6u-pas waarna de reconcile hem niet terugzette.
+
+**(B) Out of Stock** — vinkje per item in Manage (`items.sold_out`, idempotente migratie).
+Item blijft zichtbaar met een grijze dode "Out of Stock"-knop; de **échte** rem zit in
+`buy()` (een grijze knop houdt niemand tegen die zelf POST — getest: geweigerd, geen coins
+of pas bewogen). Wijziging komt in de log als `→ out of stock`.
+⚠️ **Valkuil die me bijna prod sloopte:** `row_to_item` leest per naam, maar vier queries
+hadden een **expliciete kolomlijst** zonder `sold_out` → `InvalidColumnName` bij élk
+item-verzoek. Nieuwe Item-velden: **alle vier de `... FROM items`-SELECTs mee aanpassen.**
+
+**(C) Cosmetisch:** Manage-kaarten 168 → **240px** (+ `max-width:100%`), en **alle** `.btn`-
+knoppen kregen de 3D-druk van de Buy-knop (rand eronder die wegvalt terwijl de knop 3px
+zakt; per variant een eigen donkerdere onderrand). **Klik-geluid volgt** — user bezorgt het
+sample.
+
+## 🅿️ GEPARKEERD — pauzesysteem met bevroren pas-timers (idee 2026-07-15)
+Spelers **individueel of allemaal samen kicken** voor bv. dringende maintenance, waarbij
+hun **dagpas-timers bevriezen** zolang de pauze duurt. Nu verliest een betalende tester
+speeltijd bij elke onderhouds-restart — precies waarom `[[tale-geen-restart-tijdens-test]]`
+een harde regel werd. Raakt market (`hytale_whitelist.expires` = absolute epoch, dus
+bevriezen vraagt een pauze-offset of het omrekenen naar resterende seconden), het panel
+(knop) en tale/Argus (kick + de PassTimer-HUD). **Nog niet gebouwd, niet beginnen zonder
+overleg over het datamodel.**
+
 ## 🚦 GO-LIVE-SCHAKELAAR (klaarzetten op user-commando "we zijn go")
 De **`gate`-middleware** (`web.rs`, ~r242) stuurt op dit moment **elke niet-admin** naar
 `/info` — enkel `/info`, `/img/*`, `/login`, `/auth/callback`, `/logout`, `/healthz` en

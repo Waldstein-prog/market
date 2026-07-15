@@ -216,6 +216,8 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/api/toggle", post(api_toggle))
         .route("/api/balance", get(api_balance))
         .route("/healthz", get(|| async { "ok" }))
+        // Dienst-tot-dienst, niet voor browsers: Caddy blokkeert /internal/* van buitenaf.
+        .route("/internal/pass/revoke", post(internal_revoke_pass))
         .with_state(state);
 
     // Poort: default 8700, overschrijfbaar met MARKET_PORT (bv. voor lokale tests naast
@@ -391,9 +393,17 @@ details.acc .mc{{height:1.1em;vertical-align:-.2em}}
 h1{{margin:.2rem 0 1rem;font-size:1.35rem}}
 .coins{{font-size:2.4rem;font-weight:700;color:{MEADOW};margin:.4rem 0}}
 .muted{{color:#9db095;font-size:.9rem}}
+/* Knoppen voelen als echte knoppen: een 'rand' eronder (box-shadow) die bij het
+   indrukken wegvalt terwijl de knop zakt. Zelfde beleving als de Buy-knop.
+   De schaduwkleur is per variant een donkerdere versie van de knop zelf.
+   (Klik-geluid volgt later — de user bezorgt het sample.) */
 a.btn,button.btn{{display:inline-block;margin-top:1rem;padding:.7rem 1.15rem;
   border:0;border-radius:12px;background:{MEADOW};color:#0e1510;font-weight:600;
-  text-decoration:none;cursor:pointer;font-size:1rem}}
+  text-decoration:none;cursor:pointer;font-size:1rem;
+  box-shadow:0 3px 0 #3a5a28;transition:transform .05s,box-shadow .05s,filter .1s}}
+a.btn:hover,button.btn:hover{{filter:brightness(1.06)}}
+a.btn:active,button.btn:active{{transform:translateY(3px);box-shadow:0 0 0 #3a5a28}}
+button.btn:disabled{{box-shadow:none;transform:none;filter:none}}
 a.link{{color:{MEADOW}}}
 .statrow{{display:flex;justify-content:space-between;align-items:center;
   padding:.7rem .1rem;border-top:1px solid #22301f}}
@@ -519,12 +529,20 @@ a.link{{color:{MEADOW}}}
 .slot .thumb2{{margin:.25rem auto .1rem;text-align:center;line-height:0}}
 .slot .thumb2 img{{max-width:62%;max-height:64px;object-fit:contain;border-radius:7px}}
 .gem-empty{{background:#22301f}}
-.btn.small{{margin-top:0;padding:.35rem .55rem;font-size:.82rem;border-radius:8px}}
-.btn.ghost{{background:#2c3d2a;color:#cfe0c8}}
-.btn.danger{{background:#7a2f28;color:#f3d9d4}}
+/* Kleine knop: ondiepere 'rand', anders oogt hij log. */
+.btn.small{{margin-top:0;padding:.35rem .55rem;font-size:.82rem;border-radius:8px;
+  box-shadow:0 2px 0 #3a5a28}}
+.btn.small:active{{transform:translateY(2px);box-shadow:0 0 0 #3a5a28}}
+/* Elke variant z'n eigen donkerdere onderrand, anders steekt er groen onder rood uit. */
+.btn.ghost{{background:#2c3d2a;color:#cfe0c8;box-shadow:0 2px 0 #1c2a1b}}
+.btn.ghost:active{{box-shadow:0 0 0 #1c2a1b}}
+.btn.danger{{background:#7a2f28;color:#f3d9d4;box-shadow:0 2px 0 #4d1d18}}
+.btn.danger:active{{box-shadow:0 0 0 #4d1d18}}
 .aitems{{display:flex;flex-wrap:wrap;gap:.7rem;align-items:flex-start;margin-top:.5rem}}
-.aitem{{position:relative;width:168px;background:#141d14;border:1px solid #2c3d2a;border-radius:12px;
-  padding:.6rem;display:flex;flex-direction:column;gap:.4rem}}
+/* 168px was te smal om de omschrijving/naam deftig te lezen. Breder, en de kaart mag
+   op smalle schermen krimpen i.p.v. buiten beeld te lopen. */
+.aitem{{position:relative;width:240px;max-width:100%;background:#141d14;border:1px solid #2c3d2a;
+  border-radius:12px;padding:.6rem;display:flex;flex-direction:column;gap:.4rem}}
 .savedflash{{position:absolute;top:.45rem;right:.45rem;z-index:2;background:#2f7a3a;
   color:#eafff0;font-size:.66rem;font-weight:800;padding:.15rem .45rem;border-radius:6px;
   box-shadow:0 1px 4px rgba(0,0,0,.4);transition:opacity .6s}}
@@ -547,6 +565,10 @@ a.link{{color:{MEADOW}}}
 .aitem .fld{{display:flex;flex-direction:column;gap:.12rem;text-align:left;
   font-size:.62rem;color:#9db095;font-weight:700}}
 .aitem .hint{{font-weight:400;color:#6b7d63}}
+/* Out-of-stock-vinkje op de item-kaart: op één regel, klikbaar label. */
+.aitem .chk{{display:flex;align-items:center;gap:.4rem;font-size:.74rem;color:#cfe0c8;
+  cursor:pointer;text-align:left;flex-wrap:wrap}}
+.aitem .chk input{{accent-color:{MEADOW};width:.9rem;height:.9rem;flex:none;cursor:pointer}}
 .aitem .rdonly{{font-weight:600;color:#cfe0c8;font-size:.74rem;padding:.3rem .4rem;
   border:1px dashed #2c3d2a;border-radius:7px;background:#0e1510}}
 /* Drag-&-drop-feedback op een afbeeldingskader. */
@@ -1272,7 +1294,11 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool) -> Str
     // verzamel-items én voor de permanente Hytale-pas zodra je permanente toegang hebt.
     let bought = (owned && it.category == "inventory")
         || (it.category == "boost" && it.duration == 0 && has_perma);
-    let action = if bought {
+    // Uitverkocht: item blijft staan (je ziet wát er komt), maar de knop is dood.
+    // De échte rem zit in `buy()` — een grijze knop houdt niemand tegen die POST.
+    let action = if it.sold_out && !bought {
+        "<button class=\"buy\" type=\"button\" disabled>Out of Stock</button>".to_string()
+    } else if bought {
         String::new()
     } else {
         // Eerste pas-aankoop: vraag de Hytale-naam mee in het koopformulier.
@@ -1573,6 +1599,57 @@ async fn logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
 
 // --- /admin : Fase-I rol-toggle (ongewijzigd) ---------------------------
 
+#[derive(Deserialize)]
+struct RevokeBody {
+    /// De in-game Hytale-naam; het panel kent geen Discord-ID's.
+    name: String,
+}
+
+/// **Dienst-tot-dienst**: het Hytale-panel laat market een pas intrekken. Het panel draait
+/// als user `hytale` en kan `coins.db` (user `market`) enkel lézen — vandaar dat het ons
+/// vraagt i.p.v. zelf te schrijven. Zo blijft market de enige schrijver van z'n eigen DB.
+///
+/// Beveiliging in twee lagen: Caddy blokkeert `/internal/*` van buitenaf (enkel lokale
+/// diensten komen aan 127.0.0.1:8700), en dit endpoint eist een gedeeld geheim. Dat geheim
+/// staat in `secrets.json` (mode 600), **niet** in de systemd-unit — die zit in git.
+/// Geen geheim geconfigureerd ⇒ de route weigert alles.
+async fn internal_revoke_pass(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(b): Json<RevokeBody>,
+) -> JsonResp {
+    let want = st.cfg.internal_secret.as_bytes();
+    let got = headers
+        .get("x-internal-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .as_bytes();
+    // Constante tijd + lengte-check: een timing-verschil zou het geheim laten raden.
+    let ok = !want.is_empty()
+        && want.len() == got.len()
+        && want.iter().zip(got).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
+    if !ok {
+        return (StatusCode::FORBIDDEN, Json(json!({"ok": false, "error": "forbidden"})));
+    }
+
+    let name = b.name.trim();
+    if !valid_hytale_name(name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "bad name"})));
+    }
+    let hits = db::revoke_pass_by_name(&st.pool, name);
+    for (uid, uname) in &hits {
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "pass_revoke")
+                .actor(uid, uname)
+                .detail(format!("pas ingetrokken via het panel — {name} (geen coins terug)")),
+        );
+    }
+    tracing::info!("interne revoke: {name} → {} grant(s) ingetrokken", hits.len());
+    (StatusCode::OK, Json(json!({"ok": true, "revoked": hits.len()})))
+}
+
 /// De oorspronkelijke rol-toggle-UI (PoC). Blijft bestaan naast de echte Manage-sectie,
 /// maar is **admin-only**: ze bedient `/api/toggle`, dat rollen op de échte guild zet.
 async fn admin(State(st): State<AppState>, headers: HeaderMap) -> Response {
@@ -1734,6 +1811,15 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         return Redirect::to(&format!("/market?err={}", pct("This item no longer exists.")))
             .into_response();
     };
+    // Uitverkocht: hier weigeren, niet enkel de knop grijzen. Die knop bestaat alleen in
+    // de browser; deze POST kan iedereen zelf sturen.
+    if item.sold_out {
+        return Redirect::to(&format!(
+            "/market?err={}",
+            pct(&format!("{} is out of stock.", item.name))
+        ))
+        .into_response();
+    }
 
     // --- Passen: koop = direct whitelisten -------------------------------
     if item.category == "boost" {
@@ -1984,6 +2070,7 @@ fn human_duration(secs: i64) -> String {
 fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> String {
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
+    let so = if it.sold_out { " checked" } else { "" };
 
     // Duur. De **dagpas** (boost mét looptijd) krijgt een instelbaar minuten-veld: dát
     // getal bepaalt sinds 2026-07-15 écht hoe lang de pas geldig is (`buy()` leest
@@ -2101,6 +2188,8 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
              <option value=\"booster\"{cboo}>Booster (lucky item)</option>\
              <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
            {dur_field}\
+           <label class=\"chk\"><input type=\"checkbox\" name=\"sold_out\" value=\"1\"{so}>\
+             Out of stock <span class=\"hint\">(zichtbaar, maar niet koopbaar)</span></label>\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
@@ -2877,6 +2966,10 @@ struct ItemUpdate {
     role_id: String,
     #[serde(default)]
     duration_min: i64,
+    /// Checkbox: aangevinkt ⇒ aanwezig in de POST, anders helemaal afwezig (zo werkt een
+    /// HTML-checkbox). Aanwezigheid = uitverkocht.
+    #[serde(default)]
+    sold_out: Option<String>,
     #[serde(default)]
     category: String,
     #[serde(default)]
@@ -2966,6 +3059,7 @@ async fn admin_item_update(
                 duration = duration.max(60);
             }
         }
+        let sold_out = f.sold_out.is_some();
         db::update_item(
             &st.pool,
             f.id,
@@ -2975,6 +3069,7 @@ async fn admin_item_update(
             duration,
             f.category.trim(),
             f.description.trim(),
+            sold_out,
         );
         // Enkel de velden die écht veranderden in het logboek; niets gewijzigd = geen regel.
         if let Some(b) = before {
@@ -2988,6 +3083,11 @@ async fn admin_item_update(
             // Duur stuurt sinds 2026-07-15 de échte pas-lengte → wijzigingen horen in de log.
             if b.duration != duration {
                 changes.push(format!("duration {} min → {} min", b.duration / 60, duration / 60));
+            }
+            if b.sold_out != sold_out {
+                changes.push(
+                    if sold_out { "→ out of stock" } else { "→ back in stock" }.to_string(),
+                );
             }
             if !changes.is_empty() {
                 db::log_event(

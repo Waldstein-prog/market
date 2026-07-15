@@ -145,6 +145,9 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "items", "category", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "description", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "items", "image2", "TEXT NOT NULL DEFAULT ''");
+    // Uitverkocht: item blijft zichtbaar in de shop, maar de Buy-knop wordt grijs
+    // ("Out of Stock"). Default 0 = gewoon te koop.
+    ensure_column(&conn, "items", "sold_out", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "inventory", "item_id", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
     // Refund-vlag op shop-aankopen in het logboek: 0 = nog terug te draaien, 1 = al gerefund.
@@ -1109,6 +1112,8 @@ pub struct Item {
     pub description: String,
     pub zone: String,           // 'shelf' | 'lucky'
     pub shelf_id: Option<i64>,  // NULL voor lucky
+    /// Uitverkocht: nog zichtbaar, maar niet koopbaar (grijze "Out of Stock"-knop).
+    pub sold_out: bool,
 }
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
@@ -1125,6 +1130,7 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         description: r.get("description")?,
         zone: r.get("zone")?,
         shelf_id: r.get("shelf_id")?,
+        sold_out: r.get::<_, i64>("sold_out")? != 0,
     })
 }
 
@@ -1145,7 +1151,7 @@ pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items
              WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
         )
         .expect("prepare shelf_items");
@@ -1158,7 +1164,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items
              WHERE zone = 'lucky' ORDER BY position, id",
         )
         .expect("prepare lucky_items");
@@ -1170,7 +1176,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
 pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items WHERE id = ?1",
+        "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items WHERE id = ?1",
         params![id],
         row_to_item,
     )
@@ -1237,12 +1243,13 @@ pub fn update_item(
     duration: i64,
     category: &str,
     description: &str,
+    sold_out: bool,
 ) {
     let conn = pool.get().expect("db");
     conn.execute(
         "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5,
-             category = ?6, description = ?7 WHERE id = ?1",
-        params![id, name, price, role_id, duration, category, description],
+             category = ?6, description = ?7, sold_out = ?8 WHERE id = ?1",
+        params![id, name, price, role_id, duration, category, description, sold_out as i64],
     )
     .expect("update item");
 }
@@ -1612,6 +1619,34 @@ pub fn activate_horseshoe(pool: &DbPool, uid: &str, item_id: i64) -> Result<bool
 }
 
 /// Zet de permanente-toegangsvlag (na gebruik van de permanente pas).
+/// Trek de pas van een **Hytale-naam** volledig in: de grant verdwijnt en permanente
+/// toegang gaat eraf. Géén coins terug — dit is een moderatie-actie (de refund op de
+/// logpagina is de vriendelijke variant). Returnt de getroffen (user_id, naam)-paren,
+/// zodat de aanroeper kan loggen wie het trof.
+///
+/// Op naam i.p.v. user_id, want de aanroeper is het panel: dat kent enkel de in-game
+/// naam. Naam-vergelijking is hoofdletter-ongevoelig — Hytale-namen zijn dat ook.
+pub fn revoke_pass_by_name(pool: &DbPool, hytale_name: &str) -> Vec<(String, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT w.user_id, COALESCE(c.username, w.user_id)
+               FROM hytale_whitelist w LEFT JOIN coins c ON c.user_id = w.user_id
+              WHERE lower(w.hytale_name) = lower(?1)",
+        )
+        .expect("prepare revoke lookup");
+    let hits: Vec<(String, String)> = stmt
+        .query_map(params![hytale_name], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query revoke lookup")
+        .filter_map(Result::ok)
+        .collect();
+    for (uid, _) in &hits {
+        conn.execute("DELETE FROM hytale_whitelist WHERE user_id = ?1", params![uid]).ok();
+        conn.execute("UPDATE coins SET perma_access = 0 WHERE user_id = ?1", params![uid]).ok();
+    }
+    hits
+}
+
 pub fn set_perma_access(pool: &DbPool, uid: &str, username: &str) {
     let conn = pool.get().expect("db");
     conn.execute(
@@ -1991,7 +2026,7 @@ pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items
              WHERE category = ?1 ORDER BY position, id",
         )
         .expect("prepare gems_by_category");

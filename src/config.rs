@@ -25,6 +25,12 @@ pub struct Config {
     /// "dev" of "prod" — bepaalt o.a. de standaard reward-kost (dev 0 / prod 1500).
     #[serde(default)]
     pub environment: String,
+    /// Gedeeld geheim voor `/internal/*` — de dienst-tot-dienst-koppeling met het
+    /// Hytale-panel (dat kan market's DB niet zelf schrijven en vraagt het ons).
+    /// **Hoort in secrets.json, niet in de systemd-unit** (die staat in git).
+    /// Leeg ⇒ de interne routes weigeren alles.
+    #[serde(default)]
+    pub internal_secret: String,
     // --- Twitch-luik: channel-points-redeem → Hytale-whitelist ---
     #[serde(default)]
     pub twitch_enabled: bool,
@@ -70,6 +76,7 @@ pub fn load() -> Config {
     env_override(&mut cfg.client_secret, "DISCORD_CLIENT_SECRET");
     env_override(&mut cfg.base_url, "MARKET_BASE_URL");
     env_override(&mut cfg.environment, "MARKET_ENV");
+    env_override(&mut cfg.internal_secret, "MARKET_INTERNAL_SECRET");
     env_override(&mut cfg.twitch_app_id, "TWITCH_APP_ID");
     env_override(&mut cfg.twitch_app_secret, "TWITCH_APP_SECRET");
     env_override(&mut cfg.twitch_reward_title, "TWITCH_REWARD_TITLE");

@@ -13,6 +13,12 @@
 #     magicmeadow.org { root * /var/www/magicmeadow ; file_server }
 
 magicmeadow.org {
+    # /internal/* = dienst-tot-dienst (het panel vraagt market een pas in te trekken).
+    # Hoort niet op het publieke internet: enkel lokale diensten mogen aan 127.0.0.1:8700.
+    # Market eist daarbovenop nog een gedeeld geheim — dit is de buitenste laag.
+    handle /internal/* {
+        respond "not found" 404
+    }
     # Het panel spreekt zelf TLS met een self-signed cert; naar buiten toe is dit
     # gewoon magicmeadow.org's echte cert. Het panel weet van het /panel-prefix
     # via PANEL_BASE (zie tale/panel/hytale-panel.service).
