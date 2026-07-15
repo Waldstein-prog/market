@@ -14,6 +14,42 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-15f) — "One at a time" + chat-brug naar prod
+
+**(A) Toelaten met de druppelaar.** User wou tijdens de testfase geen limietsysteem maar wel
+beletten dat één iemand meerdere passen koopt (de pas kost 1 coin). Oplossing: nieuw vinkje
+**"One at a time"** per item (`items.auto_sold_out`) — élke aankoop zet `sold_out` meteen
+weer aan. De admin vinkt *Out of stock* af om precies één koper binnen te laten, waarna het
+vanzelf sluit. **Staat AAN voor de dagpas** (id 21). De rem zit server-side in `buy()` (op
+béíde koop-paden, pas én gewoon item), dus twee gelijktijdige klikkers glippen er niet door.
+Elke automatische sluiting logt als `admin/auto_sold_out` met wie het slot opgebruikte.
+Getest met twee echte leden: koop → dicht → 2e geweigerd → admin geeft vrij → koop → dicht.
+⚠️ Dit begrenst het **aantal aankopen**, niet de opgespaarde tijd: dezelfde persoon kan bij
+een volgende vrijgave nog eens kopen en stapelt dan naar 48u. Zie de TODO hieronder.
+
+**(B) 🅿️ TODO — echte pas-limieten** (user: "todo voor later"). Twee grendels, apart te
+bouwen: **(1) per speler** een plafond op *opgespaarde tijd* (niet op aantal aankopen — wat
+telt is hoeveel toegang je tegelijk in handen hebt; `grant_day_whitelist` stapelt nu
+ongelimiteerd). Veld op het item, naast `Access (minutes)`. **(2) community-cap**: tel geldige
+passen (`expires > now` of NULL) en weiger bij vol ("server is full (5/5)"). Dat is
+server-breed, dus hoort in een `settings`-tabel + admin-UI — meteen het eerste stuk van
+[[params-to-ui]]. Open beslissingen: tellen permanente passen mee (voorstel: ja, en ze
+schaars houden), en Faybelle valt buiten de telling (staat via `protected_names` op de
+whitelist, niet via een pas) — dat lijkt juist.
+
+**(C) Chat-brug staat nu op PROD.** `channel_id` in `/opt/hytale/bot/config.toml` ging van
+`1523242084440608838` (#hytale-chat, dev) → **`1520079113002422302` (#🌼meadowland, Magic
+Meadow)**. ⚠️ **Die config staat NIET in git** (bevat de bot-token) — enkel op de VPS;
+backup: `config.toml.bak-chatchannel`. De brug is **tweerichtings** en dat is bewust
+(user-keuze): wie in dat kanaal typt, praat mee in de game-chat.
+**Argus zat niet in de prod-guild** — user heeft hem uitgenodigd
+(`client_id=1522930621402316861`, permissions `536939520` = view/send/history/manage-webhooks;
+webhooks zijn nodig voor de per-speler Hytale-kopjes). `#🌼meadowland` is besloten
+(@everyone deny view; enkel Flowerborn+Betty), dus Argus kreeg een eigen kanaal-override voor
+*View Channel*. Alle vier de rechten geverifieerd. NB: de tale-bot draait verder nog op de
+**dev**-config (`environment=dev`, `guild_id=652452615879262220`) — enkel het chat-kanaal wijst
+naar prod.
+
 ## 💾 BACKUP van coins.db — LIVE sinds 2026-07-15
 Er was er **geen**: saldo's, aankopen, passen, shop-instellingen en het logboek leefden in
 één bestand op één VPS. Nu: systemd-timer **`market-backup.timer`** (dagelijks, `Persistent=true`

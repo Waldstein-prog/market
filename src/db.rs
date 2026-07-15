@@ -148,6 +148,10 @@ pub fn init_pool(path: &str) -> DbPool {
     // Uitverkocht: item blijft zichtbaar in de shop, maar de Buy-knop wordt grijs
     // ("Out of Stock"). Default 0 = gewoon te koop.
     ensure_column(&conn, "items", "sold_out", "INTEGER NOT NULL DEFAULT 0");
+    // "Eén per keer": na élke aankoop springt dit item zelf op uitverkocht. Een admin
+    // vinkt Out of stock weer af om de volgende koper binnen te laten. Zo laat je tijdens
+    // de testfase gradueel spelers toe zonder een limiet-systeem te moeten bouwen.
+    ensure_column(&conn, "items", "auto_sold_out", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "inventory", "item_id", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
     // Refund-vlag op shop-aankopen in het logboek: 0 = nog terug te draaien, 1 = al gerefund.
@@ -1114,6 +1118,8 @@ pub struct Item {
     pub shelf_id: Option<i64>,  // NULL voor lucky
     /// Uitverkocht: nog zichtbaar, maar niet koopbaar (grijze "Out of Stock"-knop).
     pub sold_out: bool,
+    /// "Eén per keer": elke aankoop zet `sold_out` meteen weer aan.
+    pub auto_sold_out: bool,
 }
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
@@ -1131,6 +1137,7 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         zone: r.get("zone")?,
         shelf_id: r.get("shelf_id")?,
         sold_out: r.get::<_, i64>("sold_out")? != 0,
+        auto_sold_out: r.get::<_, i64>("auto_sold_out")? != 0,
     })
 }
 
@@ -1151,7 +1158,7 @@ pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, auto_sold_out FROM items
              WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
         )
         .expect("prepare shelf_items");
@@ -1164,7 +1171,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, auto_sold_out FROM items
              WHERE zone = 'lucky' ORDER BY position, id",
         )
         .expect("prepare lucky_items");
@@ -1176,7 +1183,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
 pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items WHERE id = ?1",
+        "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, auto_sold_out FROM items WHERE id = ?1",
         params![id],
         row_to_item,
     )
@@ -1244,14 +1251,26 @@ pub fn update_item(
     category: &str,
     description: &str,
     sold_out: bool,
+    auto_sold_out: bool,
 ) {
     let conn = pool.get().expect("db");
     conn.execute(
         "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5,
-             category = ?6, description = ?7, sold_out = ?8 WHERE id = ?1",
-        params![id, name, price, role_id, duration, category, description, sold_out as i64],
+             category = ?6, description = ?7, sold_out = ?8, auto_sold_out = ?9 WHERE id = ?1",
+        params![
+            id, name, price, role_id, duration, category, description,
+            sold_out as i64, auto_sold_out as i64
+        ],
     )
     .expect("update item");
+}
+
+/// Zet één item op uitverkocht. Gebruikt door de "één per keer"-regel meteen ná een
+/// aankoop: de volgende koper botst op Out of Stock tot een admin het weer vrijgeeft.
+pub fn set_sold_out(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE items SET sold_out = 1 WHERE id = ?1", params![id])
+        .expect("set sold_out");
 }
 
 /// Zet de kleur van elk 'inventory'-item (gem) op de kleur van de gelijknamige Discord-rol.
@@ -2026,7 +2045,7 @@ pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out FROM items
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, auto_sold_out FROM items
              WHERE category = ?1 ORDER BY position, id",
         )
         .expect("prepare gems_by_category");

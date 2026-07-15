@@ -1813,6 +1813,25 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         return Redirect::to(&format!("/market?err={}", pct("This item no longer exists.")))
             .into_response();
     };
+    // "Eén per keer": meteen ná een geslaagde aankoop springt dit item weer op uitverkocht,
+    // zodat een admin bewust moet vrijgeven vóór de volgende koper erbij kan. Zo laat je
+    // tijdens de testfase gradueel spelers toe zonder al een limietsysteem te bouwen.
+    // (Beide koop-paden hieronder — pas én gewoon item — lopen hierlangs.)
+    let close_after = |st: &AppState| {
+        if item.auto_sold_out {
+            db::set_sold_out(&st.pool, item.id);
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "auto_sold_out")
+                    .reference(item.id as u64)
+                    .detail(format!(
+                        "{} → out of stock na aankoop door {name} (one at a time)",
+                        item.name
+                    )),
+            );
+        }
+    };
     // Uitverkocht: hier weigeren, niet enkel de knop grijzen. Die knop bestaat alleen in
     // de browser; deze POST kan iedereen zelf sturen.
     if item.sold_out {
@@ -1880,6 +1899,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                 .amount(item.price)
                 .detail(format!("{} → whitelisted as {hname}", item.name)),
         );
+        close_after(&st);
         return Redirect::to(&format!("/market?ok={}&from={}", pct(&msg), oldbal)).into_response();
     }
 
@@ -1897,6 +1917,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                     .amount(item.price)
                     .detail(item.name.clone()),
             );
+            close_after(&st);
             format!("/market?from={}", bal + item.price)
         }
         Err(e) => format!("/market?err={}", pct(&e)),
@@ -2073,6 +2094,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
     let so = if it.sold_out { " checked" } else { "" };
+    let aso = if it.auto_sold_out { " checked" } else { "" };
 
     // Duur. De **dagpas** (boost mét looptijd) krijgt een instelbaar minuten-veld: dát
     // getal bepaalt sinds 2026-07-15 écht hoe lang de pas geldig is (`buy()` leest
@@ -2192,6 +2214,8 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
            {dur_field}\
            <label class=\"chk\"><input type=\"checkbox\" name=\"sold_out\" value=\"1\"{so}>\
              Out of stock <span class=\"hint\">(zichtbaar, maar niet koopbaar)</span></label>\
+           <label class=\"chk\"><input type=\"checkbox\" name=\"auto_sold_out\" value=\"1\"{aso}>\
+             One at a time <span class=\"hint\">(elke aankoop zet Out of stock weer aan)</span></label>\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
@@ -2973,6 +2997,8 @@ struct ItemUpdate {
     #[serde(default)]
     sold_out: Option<String>,
     #[serde(default)]
+    auto_sold_out: Option<String>,
+    #[serde(default)]
     category: String,
     #[serde(default)]
     description: String,
@@ -3062,6 +3088,7 @@ async fn admin_item_update(
             }
         }
         let sold_out = f.sold_out.is_some();
+        let auto_sold_out = f.auto_sold_out.is_some();
         db::update_item(
             &st.pool,
             f.id,
@@ -3072,6 +3099,7 @@ async fn admin_item_update(
             f.category.trim(),
             f.description.trim(),
             sold_out,
+            auto_sold_out,
         );
         // Enkel de velden die écht veranderden in het logboek; niets gewijzigd = geen regel.
         if let Some(b) = before {
@@ -3089,6 +3117,12 @@ async fn admin_item_update(
             if b.sold_out != sold_out {
                 changes.push(
                     if sold_out { "→ out of stock" } else { "→ back in stock" }.to_string(),
+                );
+            }
+            if b.auto_sold_out != auto_sold_out {
+                changes.push(
+                    if auto_sold_out { "→ one at a time aan" } else { "→ one at a time uit" }
+                        .to_string(),
                 );
             }
             if !changes.is_empty() {
