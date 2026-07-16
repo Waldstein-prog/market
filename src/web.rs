@@ -3360,10 +3360,8 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
         )
     };
     let body = format!(
-        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Accounts \
-           <span class=\"hint\">— iedereen die ooit iets kocht ({} leden)</span></div>{table}",
+        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Accounts</div>{table}",
         admin_subtabs("accounts"),
-        accounts.len(),
     );
     Html(shell(
         "Accounts — Meadow Market",
