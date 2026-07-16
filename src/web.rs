@@ -194,6 +194,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/update", post(admin_item_update))
         .route("/admin/item/delete", post(admin_item_delete))
         .route("/admin/item/stock", post(admin_item_stock))
+        .route("/admin/accounts", get(admin_accounts))
         .route("/admin/item/move", post(admin_item_move))
         .route("/admin/item/shelf", post(admin_item_shelf))
         .route("/admin/item/image/clear", post(admin_item_image_clear))
@@ -405,6 +406,9 @@ details.acc .mc{{height:1.1em;vertical-align:-.2em}}
 h1{{margin:.2rem 0 1rem;font-size:1.35rem}}
 .coins{{font-size:2.4rem;font-weight:700;color:{MEADOW};margin:.4rem 0}}
 .muted{{color:#9db095;font-size:.9rem}}
+/* Ja/Nee-badges in de accounts-tabel: groen = actief, gedempt rood = niet. */
+.yes{{color:#8fb37a;font-weight:700}}
+.no{{color:#9a6b62}}
 /* Knoppen voelen als echte knoppen: een 'rand' eronder (box-shadow) die bij het
    indrukken wegvalt terwijl de knop zakt. Zelfde beleving als de Buy-knop.
    De schaduwkleur is per variant een donkerdere versie van de knop zelf.
@@ -722,9 +726,10 @@ fn admin_subtabs(active: &str) -> String {
         format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
     };
     format!(
-        "<div class=\"subtabs\">{}{}{}{}{}{}</div>",
+        "<div class=\"subtabs\">{}{}{}{}{}{}{}</div>",
         item("/admin/market", "market", "🛒 Shop"),
         item("/admin/shop", "shop", "🛍 Admin shop"),
+        item("/admin/accounts", "accounts", "👥 Accounts"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
         item("/admin/log", "log", "📜 Log"),
@@ -1161,8 +1166,7 @@ async fn market(
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
 
-    // Heb je zelf al een lopende pas? Dan is de dagpas voor jou dicht (één per persoon),
-    // ongeacht de voorraad die er voor anderen nog ligt.
+    // Lopende pas? Dan toont de dagpas als "Bought" tot de timer afloopt (één tegelijk).
     let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
     let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass);
 
@@ -1322,20 +1326,26 @@ fn item_thumb(it: &db::Item) -> String {
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
 fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pass: bool) -> String {
-    // Reeds gekocht → kaart grijs + groene ✓, geen Buy-knop meer. Geldt voor bezeten
-    // verzamel-items én voor de permanente Hytale-pas zodra je permanente toegang hebt.
+    // Lopende dagpas (boost mét looptijd + een actieve pas): zolang de timer loopt koop je
+    // geen tweede. Toon de kaart dan als "Bought" (grijs + ✓ + Bought-knop), niet als
+    // "Out of Stock" — er ís voorraad, jíj hebt er gewoon al een lopen.
+    let day_pass_active = it.category == "boost" && it.duration > 0 && has_pass;
+    // Reeds gekocht → kaart grijs + groene ✓, geen Buy-knop. Geldt voor bezeten
+    // verzamel-items, de permanente pas (bij permanente toegang) én de dagpas zolang die loopt.
     let bought = (owned && it.category == "inventory")
-        || (it.category == "boost" && it.duration == 0 && has_perma);
-    // Dicht voor déze bezoeker, om drie redenen:
-    //  * handmatig op Out of stock gezet;
-    //  * voorraad op 0 → voor iedereen dicht tot een admin aanvult;
-    //  * je hebt zelf al een lopende pas (één per persoon) → dicht voor jou, ook al ligt
-    //    er nog voorraad voor anderen.
+        || (it.category == "boost" && it.duration == 0 && has_perma)
+        || day_pass_active;
+    // Dicht voor iedereen, om twee redenen:
+    //  * handmatig op Out of stock gezet (sold_out);
+    //  * voorraad op 0 → dicht tot een admin aanvult.
     // Item blijft wél staan: je ziet wát er te koop is. De échte rem zit in buy()/purchase() —
     // een grijze knop houdt niemand tegen die zelf een POST stuurt.
-    let dagpas = it.category == "boost" && it.duration > 0;
-    let dicht = it.sold_out || it.stock == 0 || (dagpas && has_pass);
-    let action = if dicht && !bought {
+    let dicht = it.sold_out || it.stock == 0;
+    let action = if day_pass_active {
+        // Eigen "Bought"-knop (grijs, niet klikbaar) i.p.v. de lege owned-actie, zodat
+        // duidelijk is dat je pas loopt.
+        "<button class=\"buy owned\" type=\"button\" disabled>Bought</button>".to_string()
+    } else if dicht && !bought {
         "<button class=\"buy\" type=\"button\" disabled>Out of Stock</button>".to_string()
     } else if bought {
         String::new()
@@ -1381,8 +1391,11 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
         format!("<div class=\"sdesc\">{}</div>", esc(&it.description))
     };
     // Voorraad tonen zodra ze geteld wordt (-1 = onbeperkt → niets tonen): eerlijk naar de
-    // speler, die ziet meteen of het de moeite is om te wachten.
-    let stock = if it.stock < 0 {
+    // speler, die ziet meteen of het de moeite is om te wachten. Uitzondering: zette een
+    // admin het item handmatig op "Out of stock" (`sold_out`), dan verbergen we het
+    // resterende aantal — de knop zegt dan al Out of Stock en "1 left" ernaast zou
+    // tegenstrijdig zijn.
+    let stock = if it.sold_out || it.stock < 0 {
         String::new()
     } else if it.stock == 0 {
         "<div class=\"stock none\">out of stock</div>".to_string()
@@ -3283,6 +3296,82 @@ async fn admin_item_stock(
         );
     }
     Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
+}
+
+/// Compacte resterende-tijd voor de accounts-tabel: "2d 3h", "5h 23m", "42m" of "< 1m".
+fn fmt_dur(secs: i64) -> String {
+    if secs <= 0 {
+        return "verlopen".to_string();
+    }
+    let (d, h, m) = (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60);
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        "< 1m".to_string()
+    }
+}
+
+/// Manage → Accounts: alle leden die ooit iets kochten, met hun pas-status.
+/// Kolommen (voorlopig): lid, dagpas actief (+ resterende tijd), permanente pas.
+/// Later uit te breiden met meer info per account.
+async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let accounts = db::list_accounts(&st.pool, now_secs());
+    let rows: String = accounts
+        .iter()
+        .map(|a| {
+            let member = if a.hytale_name.is_empty() {
+                esc(&a.username)
+            } else {
+                format!("{} <span class=\"hint\">({})</span>", esc(&a.username), esc(&a.hytale_name))
+            };
+            let daypass = match a.day_pass_secs_left {
+                Some(secs) => format!(
+                    "<span class=\"yes\">Ja</span> <span class=\"hint\">— {} resterend</span>",
+                    fmt_dur(secs)
+                ),
+                None => "<span class=\"no\">Nee</span>".to_string(),
+            };
+            let perma = if a.perma {
+                "<span class=\"yes\">Ja</span>"
+            } else {
+                "<span class=\"no\">Nee</span>"
+            };
+            // `data-uid` alvast meegeven: haakje voor de latere extra info / per-account acties.
+            format!(
+                "<tr data-uid=\"{uid}\"><td>{member}</td><td>{daypass}</td><td>{perma}</td></tr>",
+                uid = esc(&a.user_id),
+            )
+        })
+        .collect();
+    let table = if accounts.is_empty() {
+        "<p class=\"muted\">Nog niemand heeft iets gekocht.</p>".to_string()
+    } else {
+        format!(
+            "<table class=\"ctable\"><thead><tr>\
+               <th>Lid</th><th>Dagpas actief</th><th>Permanente pas</th>\
+             </tr></thead><tbody>{rows}</tbody></table>"
+        )
+    };
+    let body = format!(
+        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Accounts \
+           <span class=\"hint\">— iedereen die ooit iets kocht ({} leden)</span></div>{table}",
+        admin_subtabs("accounts"),
+        accounts.len(),
+    );
+    Html(shell(
+        "Accounts — Meadow Market",
+        &chrome(&name, "admin", true, ""),
+        true,
+        &body,
+    ))
+    .into_response()
 }
 
 /// Geüploade afbeelding van een item wissen (terug naar kleur-thumb).

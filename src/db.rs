@@ -1451,10 +1451,9 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
         if perma != 0 {
             return Err("You already have permanent access.".to_string());
         }
-        // Eén pas per persoon: zolang je er een lopen hebt, koop je er geen tweede bij.
-        // Zonder deze regel stapelt `grant_day_whitelist` er gewoon 24u bovenop (een user
-        // stond zo op 47u). Voorlopig een vaste regel; een instelbaar plafond staat op de
-        // TODO. Merk op: dit gaat over jóúw pas, de voorraad hieronder over het aanbod.
+        // Eén pas tegelijk: zolang er een lopende pas is, koop je er geen tweede bij —
+        // pas als de timer afloopt kan het weer. De shop toont de dagpas ondertussen als
+        // "Bought". (`expires IS NULL` vangt ook de permanente grant af.)
         let lopend: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM hytale_whitelist
@@ -1838,6 +1837,62 @@ pub fn grant_perma_whitelist(pool: &DbPool, uid: &str, hytale_name: &str) {
         params![uid, hytale_name],
     )
     .expect("grant perma whitelist");
+}
+
+/// Eén rij in het accounts-overzicht (manage → Accounts): een lid dat ooit iets
+/// kocht, met zijn pas-status. Bewust minimaal — later uit te breiden met meer info.
+pub struct AccountRow {
+    pub user_id: String,
+    pub username: String,
+    pub hytale_name: String,
+    /// `Some(secs)` = lopende dagpas met resterende seconden; `None` = geen actieve dagpas.
+    pub day_pass_secs_left: Option<i64>,
+    /// Permanente toegang (`coins.perma_access`).
+    pub perma: bool,
+}
+
+/// Alle leden die ooit iets kochten (een inventory-item of een pas), met hun
+/// pas-status. Bron = `inventory` ∪ `hytale_whitelist`; naam uit `coins.username`.
+/// Gesorteerd alfabetisch op naam (NOCASE).
+pub fn list_accounts(pool: &DbPool, now: f64) -> Vec<AccountRow> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.user_id,
+                    COALESCE(c.username, b.user_id) AS username,
+                    COALESCE(w.hytale_name, '')     AS hytale_name,
+                    w.expires                       AS expires,
+                    COALESCE(c.perma_access, 0)     AS perma
+               FROM (SELECT user_id FROM inventory
+                     UNION
+                     SELECT user_id FROM hytale_whitelist) b
+               LEFT JOIN coins c            ON c.user_id = b.user_id
+               LEFT JOIN hytale_whitelist w ON w.user_id = b.user_id
+              ORDER BY username COLLATE NOCASE",
+        )
+        .expect("prepare list_accounts");
+    let rows = stmt
+        .query_map([], |r| {
+            let expires: Option<f64> = r.get(3)?;
+            let perma: i64 = r.get(4)?;
+            // Dagpas = een verval-datum in de toekomst. Perma (expires NULL) of een
+            // verlopen datum telt niet als lopende dagpas.
+            let day_pass_secs_left = match expires {
+                Some(e) if e > now => Some((e - now) as i64),
+                _ => None,
+            };
+            Ok(AccountRow {
+                user_id: r.get(0)?,
+                username: r.get(1)?,
+                hytale_name: r.get(2)?,
+                day_pass_secs_left,
+                perma: perma != 0,
+            })
+        })
+        .expect("query list_accounts")
+        .filter_map(|r| r.ok())
+        .collect();
+    rows
 }
 
 /// Ontgrendelde item-id's (bingokaart) van een lid.
