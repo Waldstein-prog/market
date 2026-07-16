@@ -186,6 +186,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/hytale/name", post(set_hytale_name_route))
         .route("/admin/market", get(admin_market))
         .route("/admin/shop", get(admin_shop))
+        .route("/admin/shop/preview", get(admin_shop_preview))
         .route("/admin/shop/reroll", post(admin_shop_reroll))
         .route("/admin/shelf/add", post(admin_shelf_add))
         .route("/admin/shelf/rename", post(admin_shelf_rename))
@@ -726,9 +727,10 @@ fn admin_subtabs(active: &str) -> String {
         format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
     };
     format!(
-        "<div class=\"subtabs\">{}{}{}{}{}{}{}</div>",
+        "<div class=\"subtabs\">{}{}{}{}{}{}{}{}</div>",
         item("/admin/market", "market", "🛒 Shop"),
-        item("/admin/shop", "shop", "🛍 Admin shop"),
+        item("/admin/shop", "shop", "🛍 Admin shop items"),
+        item("/admin/shop/preview", "shop_preview", "👁 Admin shop preview"),
         item("/admin/accounts", "accounts", "👥 Accounts"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
@@ -1273,8 +1275,61 @@ async fn admin_shop(
         .into_response()
 }
 
+/// **Admin shop preview**: het beoogde publieke shop-ontwerp — de dagrotatie (`SHOP_DAILY_N`
+/// willekeurige items, voor iedereen dezelfde, stabiel tot middernacht UTC) met de passen los
+/// eronder, precies zoals de shop eruitzag vóór hij voor de Hytale-test werd verborgen. Nu enkel
+/// hier, op een admin-pagina, ter goedkeuring — onafhankelijk van `SHOP_TEST_DAY_PASS_ONLY`.
+async fn admin_shop_preview(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<MarketQuery>,
+) -> Response {
+    let refresh = auto_refresh_js(AUTO_REFRESH_SHOP_MS);
+    let Some((uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let (coins, _m, _p, _te) = db::get_stats(&st.pool, &uid);
+    let notice = market_notice(&q);
+    let owned: std::collections::HashSet<i64> =
+        db::owned_item_ids(&st.pool, &uid).into_iter().collect();
+    let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
+    let has_perma = db::has_perma_access(&st.pool, &uid);
+    let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
+    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass);
+
+    let offers: String =
+        db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
+    // Reroll keert terug naar deze preview (niet naar /market zoals de publieke knop).
+    let reroll = "<form method=\"post\" action=\"/admin/shop/reroll?next=/admin/shop/preview\" \
+                   class=\"reroll-f\">\
+                   <button class=\"reroll\" title=\"Roll a new daily selection (admin)\">↻</button></form>";
+    let passes: String = db::boost_items(&st.pool).iter().map(slot).collect();
+    let shelves = format!(
+        "<h2 class=\"shelf-title\">✨ Today's picks{reroll}</h2>\
+         <div class=\"shelf shop\">{offers}</div>\
+         <h2 class=\"shelf-title\">🎟 Hytale access</h2>\
+         <div class=\"shelf shop\">{passes}</div>"
+    );
+
+    let from = q.from.unwrap_or(coins);
+    let body = format!(
+        "{subtabs}\
+         <div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
+           <span class=\"purse-n\" data-bal>{coins}</span></div>\
+         <h1 class=\"shoptitle\">🛒 Shop preview</h1>\
+         {notice}{shelves}{KEEP_SCROLL_JS}{refresh}",
+        subtabs = admin_subtabs("shop_preview"),
+    );
+    Html(shell("Shop preview — Meadow Market", &chrome(&name, "admin", true, ""), true, &body))
+        .into_response()
+}
+
 /// Admin-knopje naast de dagitems: gooi de selectie van vandaag weg en trek opnieuw.
-async fn admin_shop_reroll(State(st): State<AppState>, headers: HeaderMap) -> Response {
+async fn admin_shop_reroll(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<RerollQuery>,
+) -> Response {
     if let Some((admin_uid, admin)) = require_admin(&st, &headers) {
         db::clear_shop_day(&st.pool, shop_day());
         db::log_event(
@@ -1285,7 +1340,18 @@ async fn admin_shop_reroll(State(st): State<AppState>, headers: HeaderMap) -> Re
                 .detail(format!("nieuwe dagselectie getrokken · by {admin}")),
         );
     }
-    Redirect::to("/market").into_response()
+    // Terug naar de pagina die de reroll aanvroeg (preview blijft op preview); de publieke
+    // shop-knop stuurt geen `next` mee → default `/market` (ongewijzigd gedrag).
+    let dest = match q.next.as_deref() {
+        Some(p) if p.starts_with('/') && !p.starts_with("//") => p.to_string(),
+        _ => "/market".to_string(),
+    };
+    Redirect::to(&dest).into_response()
+}
+
+#[derive(Deserialize)]
+struct RerollQuery {
+    next: Option<String>,
 }
 
 /// Cache-buster op basis van de bestand-mtime: een vervangen afbeelding krijgt zo een nieuwe
