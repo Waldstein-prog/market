@@ -14,6 +14,37 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-17) — gem-teksten/prijzen herzet + Admin shop preview-tab
+
+> **Werkregel bevestigd deze sessie** (memory [[market-session-only-market]]): in een **market**-sessie
+> werk je **UITSLUITEND** in `lab/market`. Iemand anders werkt tegelijk in **tale** — daarom botste het.
+> Bij "resume" ging ik eerst fout de tale-handover "volgende taak" (memories-crafting) in en bouwde daar
+> een grote ingreep → op vraag **volledig teruggedraaid** (`git restore` + untracked weg, niets gedeployed,
+> server ongemoeid). Negeer tale-"volgende taak"-noten vanuit een market-sessie.
+
+**(A) Gem-omschrijvingen + prijzen herzet — RECHTSTREEKS IN DE PROD-DB, ⚠️ NIET IN GIT.**
+De 12 gems (categorie `inventory`) hadden onnozele teksten ("Get the Amber role" e.d.). Vervangen door
+de **letterlijk door de user aangeleverde** omschrijvingen + nieuwe prijzen, in één transactie op
+`/opt/market/coins.db` (via `sudo -u market python3`, want **geen `sqlite3` op de VPS**; de shop leest items
+live → geen restart nodig). **Backup vooraf:** `/opt/backups/market/coins-pre-gemdesc-20260716-232706.db`
+(sqlite online-backup). Eindprijzen: Heliodor 1000, Sapphire 1500, Ruby 2000, Aquamarine 2500, Cinnabar
+3500, Iolite 4000, Lapis Lazuli 5000, Topaz 5000, Realgar 6000, Citrine 7500, Amber 10000, Crocoite 11000.
+⚠️ Dit is **DATA, geen code** — staat dus nergens in git; de lokale `./coins.db` verschilt van prod. De
+"very rare gemstone (11000)"-regel zonder naam is (na bevestiging user) aan **Crocoite** gekoppeld — de
+enige overblijvende gem. Werkwijze: eerst analyse-tabel tonen (gem/tekst/prijs), pas schrijven na akkoord.
+
+**(B) "Admin shop" → "Admin shop items" + nieuwe tab "👁 Admin shop preview".** `src/web.rs`:
+- `admin_subtabs`: label hernoemd; nieuwe subtab `("/admin/shop/preview", "shop_preview", "👁 Admin shop preview")`.
+- Nieuwe route `GET /admin/shop/preview` → **`admin_shop_preview`**: rendert het **beoogde publieke ontwerp**
+  (het `else`-tak-beeld van `market()`: **✨ Today's picks** = `SHOP_DAILY_N` willekeurige dagitems +
+  **🎟 Hytale access** = passen), **onafhankelijk van `SHOP_TEST_DAY_PASS_ONLY`**. Zo kan de user het shop-
+  design goedkeuren zonder het publiek te maken (de echte `/market` blijft in test-modus enkel de dagpas tonen).
+- Reroll (`↻`) op de preview stuurt `?next=/admin/shop/preview` mee; **`admin_shop_reroll`** kreeg een
+  `RerollQuery{next}` + veilige redirect (default blijft `/market`, dus de publieke knop ongewijzigd).
+- **Gedeployed** (`./deploy/deploy.sh` → systemd `market` active) + route geverifieerd (303, geen 404).
+  ⚠️ **GIT-DEBT: `src/web.rs` is nog NIET gecommit** — de prod-binary draait op ongecommitte code. Committen
+  + subtree-pushen (`market-gh main`) is het eerste to-do. Enkel `web.rs` geraakt.
+
 ## ⏭️ Sessie (2026-07-16) — Accounts-tab + dagpas als "Bought"
 
 Alles **live op prod** (`magicmeadow.org`, systemd `market`) en gepusht.
