@@ -14,6 +14,42 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-16) — Accounts-tab + dagpas als "Bought"
+
+Alles **live op prod** (`magicmeadow.org`, systemd `market`) en gepusht.
+Commits: `d70c4a8` (feature) + `6f78435` (header-opschoning). Deploy via
+`./deploy/deploy.sh` (bouwt release lokaal, stopt/herstart de service — korte
+onderbreking voor spelers). Enkel `src/db.rs` + `src/web.rs` geraakt.
+
+**(A) Manage → 👥 Accounts-tab.** Nieuwe subtab (tussen *Admin shop* en *Coins*),
+route `/admin/accounts` → `admin_accounts` → `db::list_accounts(pool, now)`. Tabel
+van **iedereen die ooit iets kocht**; kolommen: **Lid** (username + Hytale-naam),
+**Dagpas actief** (Nee / Ja + resterende tijd via `fmt_dur`), **Permanente pas**
+(Ja/Nee uit `coins.perma_access`). Bron = `inventory ∪ hytale_whitelist`, naam uit
+`coins.username`. Elke `<tr>` draagt `data-uid` als haakje voor de latere extra
+info / per-account acties (user: "later nog extra info, begin hiermee"). `.yes`/`.no`-
+CSS toegevoegd. Header-subtitel ("iedereen die ooit iets kocht (N leden)") op vraag
+weer **weggehaald** — de subtab labelt het al, site is intuïtief.
+⚠️ "Ooit gekocht" = wie **nú** een rij heeft in inventory/whitelist; een lid dat via
+"Reset all test purchases" gewist werd valt uit de lijst. Voor een res-bestendige
+historiek is een aparte aankoop-log nodig (niet gebouwd).
+
+**(B) Dagpas toont "Bought" zolang je pas loopt** (vervangt het verwarrende
+"Out of Stock" van vorige sessie). Heeft de speler een **actieve** pas
+(`db::get_whitelist(..).is_some()`, filtert verlopen al weg), dan is de dagpas-kaart
+`bought` → grijs + ✓ + een niet-klikbare **"Bought"**-knop (`.buy.owned`). Herkopen
+tijdens de looptijd blijft geblokkeerd in `db::purchase` (`"You already have an
+active pass."`, telt `expires IS NULL OR expires > now` → vangt ook perma). Loopt de
+timer af → weer koopbaar; `grant_day_whitelist` stapelt de duur bovenop de rest.
+NB: dit ging heen en weer deze sessie — user wou eerst herkopen tóélaten, daarna
+toch blokkeren maar getoond als "Bought" i.p.v. "Out of Stock". Dít is de eindstand.
+
+**(C) Voorraadtelling verbergen bij admin-sold_out.** In `shop_slot`:
+`if it.sold_out || it.stock < 0 → geen telling`. Zette een admin het item handmatig
+op *Out of stock*, dan verdwijnt de "N left" — knop en telling spreken elkaar niet
+meer tegen. (Een eerder gebouwde per-item "reset day passes"-knop is **verwijderd**:
+overbodig zodra de pas-status het gedrag stuurt.)
+
 ## ⏭️ Sessie (2026-07-15g) — voorraad + 1 per persoon, embed-knop, poorten dicht
 
 **(A) Voorraadsysteem vervangt "One at a time"** (die leefde één sessie; user: "dit werkt niet
