@@ -27,8 +27,9 @@ Nu **gelijkmatig +0/+1/+2/+3** (gewicht 1 elk), **+4** half zo waarschijnlijk (0
 tiende (0,1). Som 4,6 → kansen 21,7% ×4 · 10,9% · 2,2% (1M-trekkingen gesimuleerd, klopt).
 ⚠️ **ECONOMIE-IMPACT**: gemiddeld **1,85 coins/bericht** i.p.v. 1,21 = **+53% instroom**. De
 shopprijzen (gems 1000–11000) zijn nog op de oude instroom geijkt — mogelijk bijsturen.
-**+0 is nieuw**: de cooldown loopt wél (anders blijf je rollen), maar er gaat **geen "+0" naar
-#fortuna-log** — voor de speler is het stilte.
+**+0 is nieuw**: de cooldown loopt wél (anders blijf je rollen). ~~Er gaat geen "+0" naar
+#fortuna-log — voor de speler is het stilte.~~ → **Herzien op 2026-07-17c** (user): die stilte las
+als ruis/bug. Een +0 gaat nu **gewoon mee in de log**, net als elk ander bedrag.
 
 **(B) Architectuur.** Drie tabellen (stonden al ongecommit in `db.rs` van de vorige sessie):
 - `settings (key, value)` — de 14 losse parameters, waarde als TEXT. **De unit zit in de KEY**

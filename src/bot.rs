@@ -182,13 +182,9 @@ async fn handle_message(
         let amount = coin_amount(&data.pool);
         let total = db::award(&data.pool, &uid, &name, amount, now);
         tracing::info!("{name}: +{amount} coins (totaal {total})");
-        // Een award van 0 is een geldige uitkomst (rij `0` in coin_weights): de
-        // cooldown loopt wél — anders bleef je doorrollen tot je iets wint — maar
-        // "+0" is geen gebeurtenis, dus het blijft uit #fortuna-log. Voor de speler
-        // is het gewoon stilte.
-        if amount > 0 {
-            log_earn(&ctx.http, &name, amount, total).await;
-        }
+        // Een award van 0 is een geldige uitkomst (rij `0` in coin_weights) en wordt
+        // gelogd als elke andere: stilte las als een bug, niet als pech.
+        log_earn(&ctx.http, &name, amount, total).await;
         // Level-up? → 1% van het saldo cadeau + privé-melding (DM) aan het lid.
         let new_level = db::level_of(old_earned + amount);
         if new_level > db::level_of(old_earned) {
@@ -220,7 +216,7 @@ async fn handle_message(
                     .await;
             }
         }
-        if COIN_FEEDBACK && amount > 0 {
+        if COIN_FEEDBACK {
             msg.reply(ctx, format!("{COIN_EMOJI} +{amount} coins! Total: **{total}**"))
                 .await?;
         }
