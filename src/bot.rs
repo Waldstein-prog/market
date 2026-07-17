@@ -433,7 +433,7 @@ async fn respond_ephemeral(
 fn levelup_embed(uid: &str, level: i64) -> serenity::CreateEmbed {
     let variant = LEVELUP_VARIANTS[rand::thread_rng().gen_range(0..LEVELUP_VARIANTS.len())];
     serenity::CreateEmbed::new()
-        .title("LEVEL UP!")
+        .title("🎉 LEVEL UP! 🎉")
         .description(format!("<@{uid}>, you are now level **{level}**, {variant}"))
         .colour(0xF1_C4_0F)
 }
