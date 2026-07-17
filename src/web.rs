@@ -1089,10 +1089,9 @@ fn inventory_home(
         nm2 = esc(name),
     );
 
-    // Boosts — Hytale-whitelist: enkel de status + je (persistente) Hytale-naam.
+    // Boosts — Hytale-whitelist: enkel de status + de booster/pass-verzamelvakjes.
     // Kopen/verlengen gebeurt in de Shop en whitelistet meteen — geen Use meer.
     let boosts_panel = {
-        let hname = db::get_hytale_name(pool, uid);
 
         // Whitelist-status: permanent, lopende afteller, of niets.
         let status = match db::get_whitelist(pool, uid, now_secs()) {
@@ -1115,19 +1114,8 @@ fn inventory_home(
             None => String::new(),
         };
 
-        // De Hytale-naam wordt bij de eerste aankoop gezet en is nadien VAST: een lid kan
-        // hem niet meer wijzigen (anders zou je je pas kunnen doorgeven door een andere
-        // naam te whitelisten). Daarom enkel tonen — géén update-formulier meer.
-        let name_block = if hname.is_empty() {
-            "<p class=\"muted\">No Hytale pass yet.</p>".to_string()
-        } else {
-            format!(
-                "<div class=\"hname-static\" \
-                   style=\"display:flex;gap:.4rem;align-items:center;margin:.2rem 0 1rem;flex-wrap:wrap\">\
-                   <span class=\"k\">Hytale name</span> <b>{val}</b></div>",
-                val = esc(&hname),
-            )
-        };
+        // Geen naam- of "no pass"-tekst meer: spelers kennen hun eigen naam wel, en de
+        // whitelist-status hierboven zegt al of ze toegang hebben.
 
         // Boosters (Lucky Horseshoe): permanent verzamel-item, getoond als grey-out-slot
         // zoals de gems — vergrendeld "???" tot je het koopt, daarna onthuld. Géén Use:
@@ -1150,7 +1138,7 @@ fn inventory_home(
         } else {
             format!("<h2 class=\"shelf-title\">🍀 Boosters</h2><div class=\"shelf\">{cards}</div>")
         };
-        format!("{status}{name_block}{shelf}")
+        format!("{status}{shelf}")
     };
 
     let cls = |t: &str| if t == active { " on" } else { "" };
