@@ -14,6 +14,30 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-17d) — gem-swap self-healing + Hytale-naam éénmalig
+
+**Beide LIVE op prod + gecommit** (`e5413aa`, `e27528b`; deploys 21:03 + 21:17). Nog te pushen
+via `git subtree push --prefix=market market-gh main`.
+
+**(A) Gem-Use verwijderde de vorige kleurrol niet.** `use_gem` trok enkel de gem in die in
+`coins.equipped_gem` stond; bij een lege/stale tracking bleef een oude kleurrol (bv. Ruby) op het
+lid staan en toonde Discord díe kleur (hoogste gekleurde rol wint) i.p.v. de nieuwe. **Fix**: de
+bot leest nu de **échte rollen op het lid** (`Discord::all_roles` + `member_role_ids`) en haalt
+**élke** kleur-gem-rol behalve de nieuwe weg — self-healing, ook voor oude test-/handmatige
+toekenningen. Niet-gem-rollen (Flowerborn, Hytaler) blijven. Het gekochte item blijft in de
+inventory. Selectie zit in de pure `other_gem_role_ids` (web.rs) met dry-run-tests
+(`gem_swap_dryrun`) + `gem_color_dryrun` (db.rs) — draaien mee in `cargo test`. **Faybelle-test
+bevestigd werkend.** ⚠️ Als een revoke ooit faalt: bot-rol *Fortuna* moet **boven** de kleurrollen
+staan in de hiërarchie.
+
+**(B) Hytale-naam is nu éénmalig (anti-pas-doorgeven).** Een lid gaf zijn naam door → whitelist;
+kon die naam nadien **wijzigen** en zo z'n pas aan iemand anders doorgeven. Dichtgezet op drie
+plekken: (1) boosts-sectie toont de naam **read-only** i.p.v. een Update-formulier; (2) de
+`/hytale/name` update-route + handler + `HytaleNameForm` **verwijderd** (POST → 404, lokaal
+geverifieerd); (3) `purchase()` zet de meegestuurde naam **enkel als er nog géén is**
+(first-set-only, ook tegen een zelf-gemaakte POST bij een herkoop). Eerste keer instellen gebeurt
+onveranderd via het pas-**koopformulier**. Naam corrigeren (typfout) = enkel nog admin/DB.
+
 ## ⏭️ Sessie (2026-07-17c) — +0-award wordt gewoon gelogd (stilte was ruis)
 
 **LIVE op prod + gecommit + gepusht** (`0f2cda2`, deploy 11:51:28, subtree `abe3bc9..4b9ad56`).
