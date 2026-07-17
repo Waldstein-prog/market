@@ -171,6 +171,48 @@ impl Discord {
         Ok(out)
     }
 
+    /// Alle rollen van de eigen guild als (id, naam) — inclusief kleurloze rollen.
+    /// (`list_roles` slaat kleurloze over en geeft geen id; deze is voor rol-matching.)
+    pub async fn all_roles(&self) -> Result<Vec<(String, String)>, String> {
+        let url = format!("{API}/guilds/{}/roles", self.guild);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+        }
+        let arr: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        if let Some(roles) = arr.as_array() {
+            for r in roles {
+                let id = r["id"].as_str().unwrap_or_default().to_string();
+                let name = r["name"].as_str().unwrap_or_default().to_string();
+                if !id.is_empty() && !name.is_empty() {
+                    out.push((id, name));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// De rol-ID's die dit lid nu draagt (leeg als het geen lid is).
+    pub async fn member_role_ids(&self, user: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .get_member(user)
+            .await?
+            .and_then(|m| {
+                m["roles"].as_array().map(|a| {
+                    a.iter().filter_map(|r| r.as_str().map(String::from)).collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default())
+    }
+
     /// None = geen lid; Some(bool) = heeft de rol wel/niet.
     pub async fn has_role(&self, user: &str, role: &str) -> Result<Option<bool>, String> {
         match self.get_member(user).await? {

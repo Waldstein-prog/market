@@ -2096,9 +2096,30 @@ async fn set_hytale_name_route(
     Redirect::to(&format!("/?tab=boosts&msg={}", pct(&msg))).into_response()
 }
 
+/// Welke rol-ID's moeten weg bij het equipen van gem `keep`: elke rol die het lid
+/// nu draagt én de naam van een gem/kleuritem heeft, behalve de gem die je equipt.
+/// Puur (geen I/O) zodat de dry-run dit los kan testen.
+fn other_gem_role_ids(
+    all_roles: &[(String, String)], // (id, naam)
+    held: &std::collections::HashSet<String>,
+    gem_names: &[String],
+    keep: &str,
+) -> Vec<String> {
+    all_roles
+        .iter()
+        .filter(|(rid, rname)| {
+            held.contains(rid)
+                && !rname.eq_ignore_ascii_case(keep)
+                && gem_names.iter().any(|g| g.eq_ignore_ascii_case(rname))
+        })
+        .map(|(rid, _)| rid.clone())
+        .collect()
+}
+
 /// Een bezeten gem "gebruiken": zet je naamkleur (site) én ken de bijhorende Discord-rol
-/// toe (gem-naam = rolnaam, in `cfg.guild_id` = de dev-guild). De vorige gem-rol wordt
-/// eerst ingetrokken zodat er maar één gem-kleur tegelijk actief is.
+/// toe (gem-naam = rolnaam, in `cfg.guild_id`). **Elke andere** kleur-gem-rol die het lid
+/// al draagt wordt eerst weggehaald, zodat er maar één gem-kleur tegelijk actief is —
+/// self-healing (niet afhankelijk van `equipped_gem`). Het item zelf blijft in de inventory.
 async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
     let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
@@ -2113,11 +2134,25 @@ async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<B
         return Redirect::to("/?tab=gems").into_response();
     }
 
-    // Vorige gem-rol intrekken (indien een andere gem geëquipt was).
-    let prev = db::get_equipped_gem(&st.pool, &uid);
-    if !prev.is_empty() && !prev.eq_ignore_ascii_case(&item.name) {
-        if let Ok(Some(rid)) = st.dc.role_id_by_name(&prev).await {
-            let _ = st.dc.set_role(&uid, &rid, false).await;
+    // Alle andere kleur-gem-rollen die dit lid nu draagt intrekken. We kijken naar de
+    // échte rollen op het lid (niet naar equipped_gem), zodat ook rollen van vroegere
+    // tests/handmatige toekenningen mee opgeruimd worden. Faalt de rol-/lid-lookup, dan
+    // valt het terug op de oude enkelvoudige revoke via equipped_gem.
+    match (st.dc.all_roles().await, st.dc.member_role_ids(&uid).await) {
+        (Ok(roles), Ok(held)) => {
+            let held: std::collections::HashSet<String> = held.into_iter().collect();
+            let gem_names = db::inventory_item_names(&st.pool);
+            for rid in other_gem_role_ids(&roles, &held, &gem_names, &item.name) {
+                let _ = st.dc.set_role(&uid, &rid, false).await;
+            }
+        }
+        _ => {
+            let prev = db::get_equipped_gem(&st.pool, &uid);
+            if !prev.is_empty() && !prev.eq_ignore_ascii_case(&item.name) {
+                if let Ok(Some(rid)) = st.dc.role_id_by_name(&prev).await {
+                    let _ = st.dc.set_role(&uid, &rid, false).await;
+                }
+            }
         }
     }
 
@@ -4009,5 +4044,72 @@ fn content_type_for(name: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dry-run: gem-Use haalt élke andere kleur-gem-rol weg (self-healing swap).
+// Test de pure selectie other_gem_role_ids — de kern van de Ruby-blijft-staan-fix.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod gem_swap_dryrun {
+    use super::other_gem_role_ids;
+    use std::collections::HashSet;
+
+    fn roles() -> Vec<(String, String)> {
+        // (rol-id, naam) — mix van gem-rollen en niet-gem-rollen.
+        [
+            ("10", "Ruby"),
+            ("11", "Lapis Lazuli"),
+            ("12", "Sapphire"),
+            ("99", "Flowerborn"), // niet-gem-rol: mag NOOIT geraakt worden
+            ("98", "Hytaler"),    // idem
+        ]
+        .iter()
+        .map(|(i, n)| (i.to_string(), n.to_string()))
+        .collect()
+    }
+
+    fn gem_names() -> Vec<String> {
+        ["Ruby", "Lapis Lazuli", "Sapphire", "Amber", "Topaz"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn swap_strips_only_the_other_gem_role() {
+        // Lid draagt Ruby (oude kleur) + Flowerborn; equipt nu Lapis Lazuli.
+        let held: HashSet<String> = ["10", "99"].iter().map(|s| s.to_string()).collect();
+        let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "Lapis Lazuli");
+        assert_eq!(strip, vec!["10".to_string()], "enkel de Ruby-rol wordt weggehaald");
+    }
+
+    #[test]
+    fn strips_all_stale_gem_roles_but_keeps_the_new_one() {
+        // Vervuilde staat: lid draagt Ruby én Sapphire (twee oude kleuren) + Flowerborn.
+        // Equipt Lapis → beide oude gem-rollen weg, Flowerborn blijft, Lapis niet in de lijst.
+        let held: HashSet<String> =
+            ["10", "12", "99"].iter().map(|s| s.to_string()).collect();
+        let mut strip = other_gem_role_ids(&roles(), &held, &gem_names(), "Lapis Lazuli");
+        strip.sort();
+        assert_eq!(strip, vec!["10".to_string(), "12".to_string()]);
+        assert!(!strip.contains(&"99".to_string()), "niet-gem-rol Flowerborn blijft");
+    }
+
+    #[test]
+    fn re_equipping_same_gem_strips_nothing() {
+        // Lid draagt al Lapis en equipt Lapis opnieuw → niets weghalen.
+        let held: HashSet<String> = ["11"].iter().map(|s| s.to_string()).collect();
+        let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "Lapis Lazuli");
+        assert!(strip.is_empty(), "dezelfde gem opnieuw = geen enkele revoke");
+    }
+
+    #[test]
+    fn ignores_gem_roles_the_member_does_not_hold() {
+        // Case-ongevoelig, en rollen die het lid niet draagt blijven buiten schot.
+        let held: HashSet<String> = ["10"].iter().map(|s| s.to_string()).collect();
+        let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "sapphire");
+        assert_eq!(strip, vec!["10".to_string()], "Ruby weg; Sapphire niet gedragen → niet geraakt");
     }
 }

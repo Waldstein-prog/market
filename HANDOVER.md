@@ -859,12 +859,13 @@ Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten 
   Discord-rol** toe. Invullen via Manage Shop.
 - **Shop-graphics**: de shop toont nu álle schappen; gems/boosters zonder afbeelding renderen als
   gekleurde bol. Echte item-graphics maken vóór de shop **members-zichtbaar** wordt (site-gate weg).
-- **Prijzen/economie balanceren**: de gem-prijzen zijn op **2026-07-16** herzet (1000–11000, zie
-  sessie 2026-07-17 (A)); Lucky Horseshoe staat nog op 120. Hoort samen met de Day Pass-waarden
-  hierboven. ⚠️ **Nieuw sinds 2026-07-17b**: de coin-**instroom** ging van ~1,21 naar **~1,85
-  coins/bericht (+53%)** door de nieuwe verdeling, terwijl de prijzen op het oude tempo geijkt
-  zijn. Bijsturen kan nu **zonder deploy** via ⚙ Settings (gewicht +4/+5 omlaag, of msg-cooldown
-  omhoog).
+- ~~**Prijzen/economie balanceren**~~ → **AFGEHANDELD op 2026-07-17** (user): het ⚙ Settings-panel
+  werkt en we sturen live bij indien nodig. De coin-instroom ging weliswaar +53% t.o.v. de oude
+  prijs-ijking, maar dat is nu een **live tuning-kwestie** (gewicht +4/+5 of msg-cooldown via
+  ⚙ Settings), geen openstaand bouwwerk meer. Gem-prijzen 1000–11000 (2026-07-16), Lucky Horseshoe 120.
+- **Lucky Horseshoe — waarschijnlijkheid instellen**: de kans/sterkte van het horseshoe-effect
+  (`chest_luck`, verdubbelt de chest-lot-kans) afstembaar/juist zetten. *(todo 2026-07-17)*
+- **Lucky Horseshoe — testen**: het effect end-to-end verifiëren (koop → Use → chest). *(todo 2026-07-17)*
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.

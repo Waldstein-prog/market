@@ -1975,6 +1975,20 @@ pub fn owned_item_ids(pool: &DbPool, uid: &str) -> Vec<i64> {
     rows.filter_map(Result::ok).collect()
 }
 
+/// Namen van alle gem-/kleuritems (category 'inventory'). Elk komt overeen met een
+/// gelijknamige Discord-kleurrol; gebruikt om bij een gem-Use alle ándere kleurrollen
+/// van het lid weg te halen (max één actieve gem-kleur).
+pub fn inventory_item_names(pool: &DbPool) -> Vec<String> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT name FROM items WHERE category = 'inventory'")
+        .expect("prep inventory_item_names");
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("query inventory_item_names");
+    rows.filter_map(Result::ok).collect()
+}
+
 /// De naam van de momenteel "gebruikte" gem (voor de bijhorende Discord-rol). Leeg = geen.
 pub fn get_equipped_gem(pool: &DbPool, uid: &str) -> String {
     let conn = pool.get().expect("db");
@@ -2550,4 +2564,80 @@ pub fn chest_tier_update(pool: &DbPool, id: i64, weight: f64, lo: i64, hi: i64) 
 pub fn chest_tier_delete(pool: &DbPool, id: i64) {
     let conn = pool.get().expect("db");
     conn.execute("DELETE FROM chest_tiers WHERE id = ?1", params![id]).expect("del chest_tier");
+}
+
+// ---------------------------------------------------------------------------
+// Dry-run: gem → naamkleur (DB-kant). Speelt exact na wat use_gem/unequip_gem
+// aan de databank doen (set_name_color + set_equipped_gem), plus de "Equipped"-
+// match uit de render (color.eq_ignore_ascii_case(&name_color)). De Discord-rol
+// zit hier bewust NIET in — die heeft een echte guild nodig ("echt testen").
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod gem_color_dryrun {
+    use super::*;
+
+    /// Verse, volledig gemigreerde DB op een uniek temp-bestand.
+    fn fresh_db() -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir()
+            .join(format!("market-gemtest-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let pool = init_pool(p.to_str().unwrap());
+        (pool, p)
+    }
+
+    /// De equip-badge-regel uit web.rs, hier los getest.
+    fn is_equipped(item_color: &str, name_color: &str) -> bool {
+        !item_color.is_empty() && item_color.eq_ignore_ascii_case(name_color)
+    }
+
+    #[test]
+    fn gem_use_sets_and_swaps_and_clears_name_color() {
+        let (pool, path) = fresh_db();
+        let uid = "111";
+        let name = "TestPlayer";
+
+        // 0) Startsituatie: geen kleur, geen gem → swatch valt terug op default.
+        assert_eq!(get_name_color(&pool, uid), "", "start: geen naamkleur");
+        assert_eq!(get_equipped_gem(&pool, uid), "", "start: geen gem geëquipt");
+
+        // 1) Use Rose Quartz  (simuleert de DB-writes van use_gem).
+        let rose = "#E91E63";
+        set_name_color(&pool, uid, name, rose);
+        set_equipped_gem(&pool, uid, "Rose Quartz");
+        assert_eq!(get_name_color(&pool, uid), rose, "kleur gezet");
+        assert_eq!(get_equipped_gem(&pool, uid), "Rose Quartz", "gem geëquipt");
+
+        // Render-kant: badge matcht ongeacht hoofdletters van de item-kleur.
+        assert!(is_equipped("#e91e63", &get_name_color(&pool, uid)),
+                "Rose Quartz toont als Equipped");
+        assert!(!is_equipped("#3F51B5", &get_name_color(&pool, uid)),
+                "een andere gem toont NIET als Equipped");
+
+        // 2) Wissel naar Sapphire → oude gem laat los, nieuwe kleur staat.
+        let sapphire = "#3F51B5";
+        set_name_color(&pool, uid, name, sapphire);
+        set_equipped_gem(&pool, uid, "Sapphire");
+        assert_eq!(get_name_color(&pool, uid), sapphire, "kleur gewisseld");
+        assert_eq!(get_equipped_gem(&pool, uid), "Sapphire");
+        assert!(!is_equipped("#e91e63", &get_name_color(&pool, uid)),
+                "Rose Quartz niet langer Equipped na wissel");
+        assert!(is_equipped("#3f51b5", &get_name_color(&pool, uid)),
+                "Sapphire nu Equipped");
+
+        // 3) Unequip → beide velden leeg, swatch terug naar default.
+        set_name_color(&pool, uid, name, "");
+        set_equipped_gem(&pool, uid, "");
+        assert_eq!(get_name_color(&pool, uid), "", "kleur gewist na unequip");
+        assert_eq!(get_equipped_gem(&pool, uid), "", "gem losgelaten na unequip");
+        assert!(!is_equipped("#3f51b5", &get_name_color(&pool, uid)),
+                "geen enkele gem meer Equipped");
+
+        // username mag onderweg niet stukgaan (upsert bewaart 'm).
+        let uname: String = pool.get().unwrap()
+            .query_row("SELECT username FROM coins WHERE user_id=?1",
+                       params![uid], |r| r.get(0)).unwrap();
+        assert_eq!(uname, name, "username blijft behouden");
+
+        let _ = std::fs::remove_file(path);
+    }
 }
