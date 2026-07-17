@@ -14,6 +14,36 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-17e) — Lucky Horseshoe = permanent verzamel-item
+
+**LIVE op prod + gecommit** (`2aa2005`, deploy 21:47). Nog te pushen via
+`git subtree push --prefix=market market-gh main`.
+
+**Herontwerp (user):** de horseshoe was een verbruikbare booster (Use → dubbele kans bij de
+*volgende* chest → op). Nu een **PERMANENT verzamel-item**: koop 1×, daarna **altijd** dubbele
+kans op de treasure chest. Getoond als **grey-out-slot op de Boosts-tab** zoals de gems
+(vergrendeld "???" → onthuld na koop). **Geen Use-knop.**
+
+- **Effect = eigendom.** `db::chest_weight` leest nu `owns_horseshoe` (inventory ⋈ items
+  category='booster') i.p.v. de verbruikbare `chest_luck`-vlag → weight 2. Enkel **Fortuna's
+  Favour** (de enige chest); een later ander chest-type dat dit niet wil, roept `chest_weight`
+  gewoon niet aan. `bot.rs` verbruikt niets meer na een chest.
+- **Koop 1×.** `purchase()` behandelt 'booster' als 'inventory' (max één). Prijs **7777**
+  (seed-default + prod-item id 58 gezet). Shop toont een gekochte booster als **Owned**.
+- **Zeldzaam in de shop.** `shop_offers` is nu **gems-only** + een aparte booster-roll: de
+  horseshoe pakt met kans **1/N per dag** één slot. `N` = nieuwe setting
+  **`horseshoe_shop_odds_days`** (default **14**, groep **Shop** in ⚙ Settings) → live tunbaar.
+  ✅ Handelt de open todo's "waarschijnlijkheid instellen" **en** "testen" af.
+- **Opgeruimd:** `/use/booster`-route + handler, `has_chest_luck`/`clear_chest_luck`/
+  `activate_horseshoe`/`owned_booster_items`, de active-banner. `chest_luck`-kolom blijft
+  (harmloos, refund/reset schrijven er nog een 0 in).
+- **Dry-run-tests** (`horseshoe_dryrun`): eigendom→dubbel gewicht, koop-1×, shop-loterij bij N=1.
+  7 tests groen. **Prod:** niemand bezat er al één (geen gratis perk), geen `chest_luck` actief.
+
+⚠️ **Nog te bekijken:** de horseshoe is echte-koop-getest? (koop op prod voor 7777 → verschijnt
+ungreyed op Boosts-tab → chest-kans verdubbelt). En de daily-shop-rotatie van vandaag kan de
+horseshoe nog uit de oude uniforme trekking bevatten (id 58 zat in enkele gecachete dagen).
+
 ## ⏭️ Sessie (2026-07-17d) — gem-swap self-healing + Hytale-naam éénmalig
 
 **Beide LIVE op prod + gecommit** (`e5413aa`, `e27528b`; deploys 21:03 + 21:17). Nog te pushen
@@ -887,9 +917,10 @@ Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten 
   werkt en we sturen live bij indien nodig. De coin-instroom ging weliswaar +53% t.o.v. de oude
   prijs-ijking, maar dat is nu een **live tuning-kwestie** (gewicht +4/+5 of msg-cooldown via
   ⚙ Settings), geen openstaand bouwwerk meer. Gem-prijzen 1000–11000 (2026-07-16), Lucky Horseshoe 120.
-- **Lucky Horseshoe — waarschijnlijkheid instellen**: de kans/sterkte van het horseshoe-effect
-  (`chest_luck`, verdubbelt de chest-lot-kans) afstembaar/juist zetten. *(todo 2026-07-17)*
-- **Lucky Horseshoe — testen**: het effect end-to-end verifiëren (koop → Use → chest). *(todo 2026-07-17)*
+- ~~**Lucky Horseshoe — waarschijnlijkheid instellen**~~ → **KLAAR 2026-07-17e**: `horseshoe_shop_odds_days`
+  (⚙ Settings → Shop, default 14) regelt hoe zeldzaam hij in de dagshop verschijnt (1/N per dag).
+- ~~**Lucky Horseshoe — testen**~~ → dry-run-tests groen (`horseshoe_dryrun`); **echte-koop op prod
+  nog te doen** (koop 7777 → ungreyed op Boosts-tab → chest-kans ×2). Zie sessie 2026-07-17e.
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
