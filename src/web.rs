@@ -183,7 +183,6 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/buy", post(buy))
         .route("/use/gem", post(use_gem))
         .route("/use/gem/unequip", post(unequip_gem))
-        .route("/use/booster", post(use_booster))
         .route("/admin/market", get(admin_market))
         .route("/admin/shop", get(admin_shop))
         .route("/admin/shop/preview", get(admin_shop_preview))
@@ -938,8 +937,24 @@ fn gem_slot(it: &db::Item, owned: bool, equipped: bool) -> String {
     )
 }
 
-/// Eén boost-vakje (Hytale-ticket): greyed als niet in bezit, anders afbeelding
-/// + naam + uitleg + Use.
+/// Eén booster-vakje (Lucky Horseshoe): vergrendeld "???" tot je het koopt, daarna
+/// onthuld (afbeelding + naam + uitleg). Géén knop — bezit = permanent dubbele chest-kans.
+fn booster_slot(it: &db::Item, owned: bool) -> String {
+    if !owned {
+        return "<div class=\"slot locked\"><div class=\"thumb\">\
+                <span class=\"qmark\">?</span></div>\
+                <div class=\"name muted\">???</div></div>"
+            .to_string();
+    }
+    format!(
+        "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
+         <div class=\"name\">{name}</div><div class=\"gdesc\">{desc}</div></div>",
+        thumb = thumb_html(&it.image, &it.color),
+        name = esc(&it.name),
+        desc = esc(&it.description),
+    )
+}
+
 /// Inventory-home met sub-tabs Coins / Gems / Boosts.
 fn inventory_home(
     pool: &db::DbPool,
@@ -1102,55 +1117,22 @@ fn inventory_home(
             )
         };
 
-        // Boosters (bv. Lucky Horseshoe): bezeten exemplaren met een werkende Use-knop.
-        // Gebruiken = één hoefijzer opbranden + dubbele lot-kans bij de eerstvolgende
-        // treasure chest. Zolang die boost klaarstaat, grijst de knop uit (geen tweede
-        // hoefijzer verspillen) en toont de kaart een "Active"-badge.
-        let boosters = db::owned_booster_items(pool, uid);
-        let luck_active = db::has_chest_luck(pool, uid);
-        // Banner LOS van bezit: ook wie z'n laatste hoefijzer al opbrandde ziet dat de
-        // boost klaarstaat voor de volgende chest (anders verdwijnt met het item ook elk
-        // spoor van de actieve boost).
-        let luck_banner = if luck_active {
-            "<div class=\"booster-banner\">🍀 A Lucky Horseshoe is active — your odds in the \
-             next treasure chest are doubled.</div>"
-                .to_string()
-        } else {
-            String::new()
-        };
+        // Boosters (Lucky Horseshoe): permanent verzamel-item, getoond als grey-out-slot
+        // zoals de gems — vergrendeld "???" tot je het koopt, daarna onthuld. Géén Use:
+        // bezit = altijd dubbele kans bij de treasure chest (Fortuna's Favour).
+        let booster_owned: std::collections::HashSet<i64> =
+            db::owned_item_ids(pool, uid).into_iter().collect();
+        let boosters = db::all_booster_items(pool);
         let shelf = if boosters.is_empty() {
             String::new()
         } else {
             let cards: String = boosters
                 .iter()
-                .map(|(id, bname, image, color, count)| {
-                    let qty = if *count > 1 {
-                        format!(" <span style=\"color:#9db095\">×{count}</span>")
-                    } else {
-                        String::new()
-                    };
-                    let action = if luck_active {
-                        "<div class=\"booster-active\">🍀 Active — next chest</div>\
-                         <button class=\"buy\" type=\"button\" disabled title=\"A Lucky Horseshoe is already active for your next chest\">Use</button>".to_string()
-                    } else {
-                        format!(
-                            "<form method=\"post\" action=\"/use/booster\" class=\"buyform\">\
-                               <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
-                               <button class=\"buy\" type=\"submit\" title=\"Double your odds in the next treasure chest\">Use</button>\
-                             </form>"
-                        )
-                    };
-                    format!(
-                        "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
-                         <div class=\"name\">{nm}{qty}</div>{action}</div>",
-                        thumb = thumb_html(image, color),
-                        nm = esc(bname),
-                    )
-                })
+                .map(|it| booster_slot(it, booster_owned.contains(&it.id)))
                 .collect();
             format!("<h2 class=\"shelf-title\">🍀 Boosters</h2><div class=\"shelf\">{cards}</div>")
         };
-        format!("{status}{name_block}{luck_banner}{shelf}")
+        format!("{status}{name_block}{shelf}")
     };
 
     let cls = |t: &str| if t == active { " on" } else { "" };
@@ -1213,7 +1195,15 @@ async fn market(
         )
     } else {
         let offers: String =
-            db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
+            db::shop_offers(
+                &st.pool,
+                shop_day(),
+                SHOP_DAILY_N,
+                settings::i64_of(&st.pool, "horseshoe_shop_odds_days"),
+            )
+            .iter()
+            .map(slot)
+            .collect();
         // Admins mogen opnieuw laten trekken zonder een dag te wachten (test-knopje).
         let reroll = if admin {
             "<form method=\"post\" action=\"/admin/shop/reroll\" class=\"reroll-f\">\
@@ -1324,7 +1314,15 @@ async fn admin_shop_preview(
     let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass);
 
     let offers: String =
-        db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
+        db::shop_offers(
+            &st.pool,
+            shop_day(),
+            SHOP_DAILY_N,
+            settings::i64_of(&st.pool, "horseshoe_shop_odds_days"),
+        )
+        .iter()
+        .map(slot)
+        .collect();
     // Reroll keert terug naar deze preview (niet naar /market zoals de publieke knop).
     let reroll = "<form method=\"post\" action=\"/admin/shop/reroll?next=/admin/shop/preview\" \
                    class=\"reroll-f\">\
@@ -1424,7 +1422,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
     let day_pass_active = it.category == "boost" && it.duration > 0 && has_pass;
     // Reeds gekocht → kaart grijs + groene ✓, geen Buy-knop. Geldt voor bezeten
     // verzamel-items, de permanente pas (bij permanente toegang) én de dagpas zolang die loopt.
-    let bought = (owned && it.category == "inventory")
+    let bought = (owned && (it.category == "inventory" || it.category == "booster"))
         || (it.category == "boost" && it.duration == 0 && has_perma)
         || day_pass_active;
     // Dicht voor iedereen, om twee redenen:
@@ -2198,39 +2196,6 @@ async fn unequip_gem(
         Err(e) => format!("⚠️ Discord lookup failed: {e}"),
     };
     Redirect::to(&format!("/?tab=gems&msg={}", pct(&msg))).into_response()
-}
-
-/// Gebruik een booster (Lucky Horseshoe): verbruik één exemplaar en zet de
-/// chest-luck-boost aan (dubbele lot-kans bij de eerstvolgende treasure chest).
-async fn use_booster(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyForm>) -> Response {
-    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
-        return Redirect::to("/").into_response();
-    };
-    let Some(item) = db::get_item(&st.pool, f.item_id) else {
-        return Redirect::to("/?tab=boosts").into_response();
-    };
-    if item.category != "booster" {
-        return Redirect::to("/?tab=boosts").into_response();
-    }
-    let msg = match db::activate_horseshoe(&st.pool, &uid, f.item_id) {
-        Ok(true) => {
-            // Logboek: booster verbruikt (chest-luck aan voor de volgende chest).
-            db::log_event(
-                &st.pool,
-                now_secs(),
-                &db::LogEntry::new("booster", "use")
-                    .actor(&uid, &name)
-                    .detail(item.name.clone()),
-            );
-            format!(
-                "🍀 {} used — your odds in the next treasure chest are doubled!",
-                item.name
-            )
-        }
-        Ok(false) => "🍀 You already have a Lucky Horseshoe active for your next chest.".to_string(),
-        Err(e) => format!("⚠️ {e}"),
-    };
-    Redirect::to(&format!("/?tab=boosts&msg={}", pct(&msg))).into_response()
 }
 
 /// Human-friendly duration ("1 day", "24 h", "30 min").

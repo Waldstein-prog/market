@@ -38,6 +38,7 @@ pub struct Spec {
 pub const COINS: &str = "Coins per bericht";
 pub const DAILY: &str = "Daily-beloning";
 pub const CHEST: &str = "Treasure chest";
+pub const SHOP: &str = "Shop";
 
 /// Elke instelbare parameter, in weergavevolgorde. De defaults zijn de waarden
 /// die vóór deze refactor als `const` in `bot.rs` stonden — een lege DB gedraagt
@@ -182,6 +183,16 @@ pub const SPECS: &[Spec] = &[
         min: 1.0,
         max: 100.0,
         help: "Minder klikkers dan dit → de chest despawnt en er wordt niets uitbetaald.",
+    },
+    Spec {
+        key: "horseshoe_shop_odds_days",
+        label: "Horseshoe shop-kans",
+        group: SHOP,
+        kind: Kind::Int,
+        default: 14.0,
+        min: 1.0,
+        max: 365.0,
+        help: "De Lucky Horseshoe verschijnt gemiddeld 1 keer per zoveel dagen in de dagshop (1-op-N-kans per dag). Hoger = zeldzamer.",
     },
 ];
 

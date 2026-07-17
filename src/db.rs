@@ -202,11 +202,12 @@ pub fn init_pool(path: &str) -> DbPool {
         [],
     )
     .ok();
-    // Lucky Horseshoe is ALTIJD een 'booster' (herkoopbaar, geen grey-out, hoort op de
-    // Boosters-tab, effect = chest-luck). Fix zowel de oude 'inventory'-migratie ALS een
-    // handmatige mis-configuratie naar 'boost' — die laatste is de Hytale-pás-categorie:
-    // met duration=0 zou kopen van een hoefijzer anders permanente Hytale-toegang geven!
-    // Enkel de categorie wordt gecorrigeerd; prijs/afbeelding uit Manage blijven behouden.
+    // Lucky Horseshoe is ALTIJD een 'booster'. Sinds 2026-07-17 is dat een PERMANENT
+    // verzamel-item (koop 1×, grey-out zoals de gems op de Boosters-tab); bezit = altijd
+    // dubbele chest-kans, geen Use en niets te verbruiken. Fix zowel de oude 'inventory'-
+    // migratie ALS een handmatige mis-configuratie naar 'boost' — die laatste is de Hytale-
+    // pás-categorie: met duration=0 zou kopen van een hoefijzer anders permanente Hytale-
+    // toegang geven! Enkel de categorie wordt gecorrigeerd; prijs/afbeelding blijven behouden.
     conn.execute(
         "UPDATE items SET category='booster' WHERE name='Lucky Horseshoe' AND category != 'booster'",
         [],
@@ -316,7 +317,7 @@ fn seed_horseshoe(pool: &DbPool) {
     let shelf_id = conn.last_insert_rowid();
     conn.execute(
         "INSERT INTO items (zone, shelf_id, name, price, color, category, description, position)
-         VALUES ('shelf', ?1, 'Lucky Horseshoe', 120, '#c9a227', 'booster',
+         VALUES ('shelf', ?1, 'Lucky Horseshoe', 7777, '#c9a227', 'booster',
                  'A lucky charm — boosts your fortune.', 0)",
         params![shelf_id],
     )
@@ -324,10 +325,11 @@ fn seed_horseshoe(pool: &DbPool) {
 }
 
 /// De dagelijkse shop-selectie: `n` items voor `day`, stabiel bewaard in
-/// daily_shop. Pool = alle koopbare niet-boost items (gems + boosters); de
-/// Hytale-passen vallen er bewust buiten, die staan altijd apart te koop.
-/// De selectie is voor iedereen dezelfde — dat maakt verzamelen spannender.
-pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
+/// daily_shop. Pool = de **gems** (category 'inventory'); de Hytale-passen vallen
+/// er bewust buiten (staan altijd apart te koop). De **Lucky Horseshoe** (booster)
+/// is zeldzaam: hij pakt met kans **1/`booster_odds_days`** één dagslot, anders is de
+/// shop gems-only. De selectie is voor iedereen dezelfde — dat maakt verzamelen spannender.
+pub fn shop_offers(pool: &DbPool, day: i64, n: i64, booster_odds_days: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut ids: Vec<i64> = {
         let mut stmt = conn
@@ -339,17 +341,46 @@ pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
             .collect()
     };
     if ids.is_empty() {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id FROM items
-                 WHERE category != 'boost' AND category != '' ORDER BY RANDOM() LIMIT ?1",
-            )
-            .expect("prepare pick");
-        ids = stmt
-            .query_map(params![n], |r| r.get::<_, i64>(0))
-            .expect("query pick")
-            .filter_map(Result::ok)
-            .collect();
+        // Rol één keer of de zeldzame booster vandaag een plek krijgt: 1/N-kans.
+        // `RANDOM() % N` blijft in (-N, N) → ABS overloopt nooit (anders dan ABS(RANDOM())).
+        let show_booster = booster_odds_days > 0
+            && conn
+                .query_row(
+                    "SELECT ABS(RANDOM() % ?1) = 0",
+                    params![booster_odds_days],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|v| v != 0)
+                .unwrap_or(false);
+        if show_booster {
+            if let Some(bid) = conn
+                .query_row(
+                    "SELECT id FROM items WHERE category = 'booster' ORDER BY RANDOM() LIMIT 1",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .unwrap_or(None)
+            {
+                ids.push(bid);
+            }
+        }
+        // Vul de resterende slots met willekeurige gems.
+        let need = (n - ids.len() as i64).max(0);
+        if need > 0 {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id FROM items
+                     WHERE category = 'inventory' ORDER BY RANDOM() LIMIT ?1",
+                )
+                .expect("prepare pick");
+            let gems: Vec<i64> = stmt
+                .query_map(params![need], |r| r.get::<_, i64>(0))
+                .expect("query pick")
+                .filter_map(Result::ok)
+                .collect();
+            ids.extend(gems);
+        }
         for id in &ids {
             conn.execute(
                 "INSERT OR IGNORE INTO daily_shop (day, item_id) VALUES (?1, ?2)",
@@ -1492,8 +1523,9 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
     let item = get_item(pool, item_id).ok_or("This item no longer exists.")?;
     let mut conn = pool.get().expect("db");
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    // Inventory-items zijn verzamelkaart-slots: maar één keer te bezitten.
-    if item.category == "inventory" {
+    // Inventory-items én de booster (Lucky Horseshoe) zijn verzamelkaart-slots: maar
+    // één keer te bezitten. De booster is permanent — bezit = altijd dubbele chest-kans.
+    if item.category == "inventory" || item.category == "booster" {
         let owned: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM inventory WHERE user_id = ?1 AND item_id = ?2",
@@ -1580,21 +1612,6 @@ pub fn consume_item(pool: &DbPool, uid: &str, item_id: i64) {
         params![uid, item_id],
     )
     .expect("consume item");
-}
-
-/// Staat er nu een chest-luck-boost (Lucky Horseshoe) klaar voor dit lid?
-pub fn has_chest_luck(pool: &DbPool, uid: &str) -> bool {
-    let conn = pool.get().expect("db");
-    conn.query_row(
-        "SELECT chest_luck FROM coins WHERE user_id = ?1",
-        params![uid],
-        |r| r.get::<_, i64>(0),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .unwrap_or(0)
-        > 0
 }
 
 /// Bewaar een lopende (nog niet gepopte) chest zodat de pop-timer een herstart
@@ -1685,66 +1702,47 @@ pub fn last_unresolved_chest(pool: &DbPool) -> Option<u64> {
     .and_then(|s| s.parse::<u64>().ok())
 }
 
-/// Het lot-gewicht van dit lid bij een treasure-chest-trekking: 2 met een actieve
-/// Lucky Horseshoe, anders 1.
+/// Bezit dit lid een permanente booster (Lucky Horseshoe)? Zo ja → altijd dubbele
+/// chest-kans. Eigendom = één rij in `inventory` voor een 'booster'-item (koop 1×).
+pub fn owns_horseshoe(pool: &DbPool, uid: &str) -> bool {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM inventory inv JOIN items i ON i.id = inv.item_id
+              WHERE inv.user_id = ?1 AND i.category = 'booster')",
+        params![uid],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+        > 0
+}
+
+/// Het lot-gewicht van dit lid bij een treasure-chest-trekking: **2** wie de Lucky
+/// Horseshoe bezit, anders 1. Geldt (voorlopig) voor de enige chest, Fortuna's Favour;
+/// een later ander chest-type dat deze weging niet wil, roept dit gewoon niet aan.
 pub fn chest_weight(pool: &DbPool, uid: &str) -> u32 {
-    if has_chest_luck(pool, uid) {
+    if owns_horseshoe(pool, uid) {
         2
     } else {
         1
     }
 }
 
-/// Verbruik de chest-luck-boost (na een uitbetalende chest). Idempotent.
-pub fn clear_chest_luck(pool: &DbPool, uid: &str) {
+/// Alle booster-items (category 'booster', bv. de Lucky Horseshoe), op positie —
+/// ongeacht bezit. Voedt de grey-out-slots op de Boosts-tab.
+pub fn all_booster_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
-    conn.execute(
-        "UPDATE coins SET chest_luck = 0 WHERE user_id = ?1",
-        params![uid],
-    )
-    .ok();
-}
-
-/// Gebruik een Lucky Horseshoe: verbruik één exemplaar uit de inventory en zet de
-/// chest-luck-boost aan. Atomisch. Retourneert:
-///   Ok(true)  = geactiveerd,
-///   Ok(false) = er stond al een boost klaar (niets verbruikt, geen verspilling),
-///   Err(_)    = geen exemplaar in bezit.
-pub fn activate_horseshoe(pool: &DbPool, uid: &str, item_id: i64) -> Result<bool, String> {
-    let mut conn = pool.get().expect("db");
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let already: i64 = tx
-        .query_row(
-            "SELECT chest_luck FROM coins WHERE user_id = ?1",
-            params![uid],
-            |r| r.get(0),
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, stock FROM items
+             WHERE category = 'booster' ORDER BY position, id",
         )
-        .optional()
-        .map_err(|e| e.to_string())?
-        .unwrap_or(0);
-    if already > 0 {
-        return Ok(false); // al actief — geen tweede hoefijzer opbranden
-    }
-    let row_id: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM inventory WHERE user_id = ?1 AND item_id = ?2 LIMIT 1",
-            params![uid, item_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    let Some(row_id) = row_id else {
-        return Err("You don't own a Lucky Horseshoe.".to_string());
-    };
-    tx.execute("DELETE FROM inventory WHERE id = ?1", params![row_id])
-        .map_err(|e| e.to_string())?;
-    tx.execute(
-        "UPDATE coins SET chest_luck = 1 WHERE user_id = ?1",
-        params![uid],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(true)
+        .expect("prepare all_booster_items");
+    let rows = stmt.query_map([], row_to_item).expect("query boosters");
+    rows.filter_map(Result::ok).collect()
 }
 
 /// Zet de permanente-toegangsvlag (na gebruik van de permanente pas).
@@ -2011,26 +2009,6 @@ pub fn set_equipped_gem(pool: &DbPool, uid: &str, gem: &str) {
         params![uid, gem],
     )
     .ok();
-}
-
-/// Bezeten booster-items (categorie 'booster', bv. Lucky Horseshoe) met het aantal.
-/// (item_id, naam, afbeelding, kleur, aantal). Enkel wat de user effectief bezit (aantal > 0).
-pub fn owned_booster_items(pool: &DbPool, uid: &str) -> Vec<(i64, String, String, String, i64)> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare(
-            "SELECT i.id, i.name, i.image, i.color, COUNT(inv.id) FROM items i
-               JOIN inventory inv ON inv.item_id = i.id AND inv.user_id = ?1
-              WHERE i.category = 'booster'
-              GROUP BY i.id HAVING COUNT(inv.id) > 0 ORDER BY i.name",
-        )
-        .expect("prep boosters");
-    stmt.query_map(params![uid], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-    })
-    .expect("q boosters")
-    .filter_map(Result::ok)
-    .collect()
 }
 
 /// Admin-testhulp: draai ALLE testaankopen terug. Stort de op elk gekocht item (gems +
@@ -2637,6 +2615,87 @@ mod gem_color_dryrun {
             .query_row("SELECT username FROM coins WHERE user_id=?1",
                        params![uid], |r| r.get(0)).unwrap();
         assert_eq!(uname, name, "username blijft behouden");
+
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dry-run: Lucky Horseshoe = permanent verzamel-item. Bezit → altijd dubbele
+// chest-kans; koop 1×; zeldzaam in de shop (1/N per dag, hier deterministisch
+// getest bij N=1 → altijd, en fill met gems).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod horseshoe_dryrun {
+    use super::*;
+
+    fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir()
+            .join(format!("market-hstest-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (init_pool(p.to_str().unwrap()), p)
+    }
+
+    fn horseshoe_id(pool: &DbPool) -> i64 {
+        pool.get()
+            .unwrap()
+            .query_row("SELECT id FROM items WHERE category='booster' LIMIT 1", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn ownership_drives_double_odds_and_buy_is_once() {
+        let (pool, path) = fresh("own");
+        let uid = "77";
+        let hid = horseshoe_id(&pool);
+
+        // Geen bezit → gewicht 1.
+        assert!(!owns_horseshoe(&pool, uid));
+        assert_eq!(chest_weight(&pool, uid), 1);
+
+        // Koop (seed-prijs = 7777, dus geef ruim saldo).
+        award(&pool, uid, "Tester", 20_000, 0.0);
+        purchase(&pool, uid, hid, 0.0).expect("eerste koop lukt");
+
+        // Bezit → permanent gewicht 2.
+        assert!(owns_horseshoe(&pool, uid));
+        assert_eq!(chest_weight(&pool, uid), 2);
+
+        // Max 1×: tweede koop faalt.
+        assert!(purchase(&pool, uid, hid, 0.0).is_err(), "booster is maar 1× te bezitten");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn shop_lottery_includes_booster_at_odds_one_and_fills_with_gems() {
+        let (pool, path) = fresh("lottery");
+        // Twee gems toevoegen zodat er iets is om mee aan te vullen.
+        {
+            let conn = pool.get().unwrap();
+            for nm in ["Ruby", "Sapphire"] {
+                conn.execute(
+                    "INSERT INTO items (zone, name, price, color, category, description, position)
+                     VALUES ('shelf', ?1, 100, '#fff', 'inventory', '', 0)",
+                    params![nm],
+                )
+                .unwrap();
+            }
+        }
+        let hid = horseshoe_id(&pool);
+
+        // odds_days = 1 → ABS(RANDOM()%1)=0 altijd → booster zit er zeker bij.
+        let offers = shop_offers(&pool, 1, 4, 1);
+        let ids: Vec<i64> = offers.iter().map(|it| it.id).collect();
+        assert!(ids.contains(&hid), "bij 1-op-1-kans staat de horseshoe in de shop");
+        assert!(offers.iter().any(|it| it.category == "inventory"), "rest aangevuld met gems");
+
+        // Dezelfde dag opnieuw = stabiel (cache), zelfde set (volgorde is niet gegarandeerd).
+        let mut a = ids.clone();
+        a.sort();
+        let mut again: Vec<i64> = shop_offers(&pool, 1, 4, 1).iter().map(|it| it.id).collect();
+        again.sort();
+        assert_eq!(a, again, "dagselectie is stabiel");
 
         let _ = std::fs::remove_file(path);
     }
