@@ -14,6 +14,23 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-17c) — +0-award wordt gewoon gelogd (stilte was ruis)
+
+**LIVE op prod + gecommit + gepusht** (`0f2cda2`, deploy 11:51:28, subtree `abe3bc9..4b9ad56`).
+Eén gerichte fix in `src/bot.rs`, geen nieuwe structuur.
+
+**Wat & waarom.** De **+0**-uitkomst uit `coin_weights` (nieuw sinds 2026-07-17b) werd stil
+onderdrukt: `if amount > 0 { log_earn(...) }`. Bedoeld als "geen gebeurtenis = stilte", maar in de
+praktijk **las die stilte als ruis/bug** i.p.v. als pech — user-beslissing: een +0 hoort er gewoon
+bij te staan. Gate weg → de log toont `Naam + **0** 🪙` in **#fortuna-log** + de balansregel in het
+meadowmarket-logkanaal, langs exact dezelfde weg als elk ander bedrag.
+
+**Meegenomen**: dezelfde `&& amount > 0` is ook van de **`COIN_FEEDBACK`**-reply gehaald, zodat die
+consistent is als hij ooit aangaat. `COIN_FEEDBACK` staat op `false` → **vandaag verandert dat niets**.
+
+**Ongewijzigd**: de cooldown loopt nog steeds door bij een nul-award (anders blijf je rollen tot er
+iets valt). De verdeling zelf is niet aangeraakt — bijsturen kan live via ⚙ Settings.
+
 ## ⏭️ Sessie (2026-07-17b) — ⚙ Settings-tab: economie live tunen zonder deploy
 
 **LIVE op prod + gecommit.** De economie-parameters die als `const` in `bot.rs` stonden, zijn nu
