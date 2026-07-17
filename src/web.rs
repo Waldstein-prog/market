@@ -946,9 +946,19 @@ fn booster_slot(it: &db::Item, owned: bool) -> String {
                 <div class=\"name muted\">???</div></div>"
             .to_string();
     }
+    // Tweede, kleinere afbeelding onder de titel (zoals in de shop-kaart).
+    let img2 = if it.image2.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"thumb2\"><img src=\"/uploads/{}?v={}\" alt=\"\"></div>",
+            esc(&it.image2),
+            img_ver(&it.image2)
+        )
+    };
     format!(
         "<div class=\"slot gemcard\"><div class=\"thumb\">{thumb}</div>\
-         <div class=\"name\">{name}</div><div class=\"gdesc\">{desc}</div></div>",
+         <div class=\"name\">{name}</div>{img2}<div class=\"gdesc\">{desc}</div></div>",
         thumb = thumb_html(&it.image, &it.color),
         name = esc(&it.name),
         desc = esc(&it.description),
@@ -1226,7 +1236,11 @@ async fn market(
         "<div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
            <span class=\"purse-n\" data-bal>{coins}</span></div>\
          <h1 class=\"shoptitle\">🛒 Shop</h1>{notice}{shelves}\
-         <script>(function(){{var p=document.querySelector('.purse-box');if(!p)return;\
+         <script>(function(){{\
+           try{{var u=new URL(location.href);if(u.searchParams.has('from')){{\
+             u.searchParams.delete('from');\
+             history.replaceState({{}},'',u.pathname+u.search+u.hash);}}}}catch(e){{}}\
+           var p=document.querySelector('.purse-box');if(!p)return;\
            var el=p.querySelector('.purse-n'),to=+el.textContent,from=+p.dataset.from;\
            if(from===to||isNaN(from))return;var s=performance.now(),d=800;\
            function step(t){{var k=Math.min(1,(t-s)/d);\
