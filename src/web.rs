@@ -1044,30 +1044,24 @@ fn inventory_home(
         )
     };
     // Verzamelkaart: elk (niet-pas) shop-item krijgt een kaart — grijs met "?" tot je het
-    // koopt, daarna onthuld (afbeelding + naam + uitleg). Zelfde schap-indeling als de shop.
-    let collection: String = db::list_shelves(pool)
+    // koopt, daarna onthuld (afbeelding + naam + uitleg). ALLE gems staan samen in één set
+    // ("Basic Gems"), zo compact mogelijk: `.shelf wrap` vult de rij en wrapt pas als hij vol
+    // is — geen vaste rij-per-schap meer. Volgorde = schap-volgorde (primary → secondary → …).
+    let slots: String = db::list_shelves(pool)
         .iter()
-        .map(|(sid, title)| {
-            let slots: String = db::shelf_items(pool, *sid)
-                .iter()
-                .filter(|it| it.category == "inventory")
-                .map(|it| {
-                    let own = owned.contains(&it.id);
-                    let eq =
-                        own && !it.color.is_empty() && it.color.eq_ignore_ascii_case(&name_color);
-                    gem_slot(it, own, eq)
-                })
-                .collect();
-            if slots.is_empty() {
-                return String::new();
-            }
-            format!(
-                "<h2 class=\"shelf-title\">{}</h2><div class=\"shelf wrap\">{}</div>",
-                esc(title),
-                slots
-            )
+        .flat_map(|(sid, _)| db::shelf_items(pool, *sid))
+        .filter(|it| it.category == "inventory")
+        .map(|it| {
+            let own = owned.contains(&it.id);
+            let eq = own && !it.color.is_empty() && it.color.eq_ignore_ascii_case(&name_color);
+            gem_slot(&it, own, eq)
         })
         .collect();
+    let collection = if slots.is_empty() {
+        String::new()
+    } else {
+        format!("<h2 class=\"shelf-title\">Basic Gems</h2><div class=\"shelf wrap\">{slots}</div>")
+    };
     // Admin-testhulp: verzamel-aankopen terugdraaien (coins terug). (Sync gem colors staat
     // op de Manage-pagina.)
     let admin_reset = if admin {
