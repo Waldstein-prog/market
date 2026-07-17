@@ -89,8 +89,7 @@ enige overblijvende gem. Werkwijze: eerst analyse-tabel tonen (gem/tekst/prijs),
 - Reroll (`↻`) op de preview stuurt `?next=/admin/shop/preview` mee; **`admin_shop_reroll`** kreeg een
   `RerollQuery{next}` + veilige redirect (default blijft `/market`, dus de publieke knop ongewijzigd).
 - **Gedeployed** (`./deploy/deploy.sh` → systemd `market` active) + route geverifieerd (303, geen 404).
-  ⚠️ **GIT-DEBT: `src/web.rs` is nog NIET gecommit** — de prod-binary draait op ongecommitte code. Committen
-  + subtree-pushen (`market-gh main`) is het eerste to-do. Enkel `web.rs` geraakt.
+  ~~GIT-DEBT: `src/web.rs` nog niet gecommit~~ → **ingehaald** op 2026-07-17 (commit `a0e7041`).
 
 ## ⏭️ Sessie (2026-07-16) — Accounts-tab + dagpas als "Bought"
 
@@ -842,8 +841,12 @@ Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten 
   Discord-rol** toe. Invullen via Manage Shop.
 - **Shop-graphics**: de shop toont nu álle schappen; gems/boosters zonder afbeelding renderen als
   gekleurde bol. Echte item-graphics maken vóór de shop **members-zichtbaar** wordt (site-gate weg).
-- **Prijzen/economie balanceren**: prod toont een rare mix (gems 40/80/**1000**, Lucky Horseshoe
-  120, **Realgar 0**). Hoort samen met de Day Pass-waarden hierboven.
+- **Prijzen/economie balanceren**: de gem-prijzen zijn op **2026-07-16** herzet (1000–11000, zie
+  sessie 2026-07-17 (A)); Lucky Horseshoe staat nog op 120. Hoort samen met de Day Pass-waarden
+  hierboven. ⚠️ **Nieuw sinds 2026-07-17b**: de coin-**instroom** ging van ~1,21 naar **~1,85
+  coins/bericht (+53%)** door de nieuwe verdeling, terwijl de prijzen op het oude tempo geijkt
+  zijn. Bijsturen kan nu **zonder deploy** via ⚙ Settings (gewicht +4/+5 omlaag, of msg-cooldown
+  omhoog).
 - **Gem-naamkleur**: naam van het lid in het **juiste font** tonen bij de achtergrond-instelling
   via een gem (swatch-preview). Cosmetische verfijning.
 - **Admin klik op naam** in /admin/coins → toon de **coin-pagina van díe specifieke user**.
@@ -922,6 +925,9 @@ op de bot-rol (Fortuna) — user zette dat aan.
 - **Verdienen enkel in kanalen op `coin_channels`** (DB, /admin/channels) i.p.v. één vaste kanaal-ID.
   Guild-gate weg (kanaal-ID is guild-uniek). **Lege lijst = nergens.**
 - **Gewogen kans per bericht: 80% → 1 · 19% → 2 · 1% → 3** (`COIN_WEIGHTS`).
+  ⚠️ **ACHTERHAALD sinds 2026-07-17**: de const bestaat niet meer, de verdeling staat in de
+  **`coin_weights`-tabel** (nu +0/+1/+2/+3 gelijk · +4 halve · +5 tiende) en is instelbaar via
+  **⚙ Settings**. Zie sessie 2026-07-17b bovenaan.
 - Elke verdienste → **#fortuna-log** (`Naam + **N** 🪙`) + saldo → **#meadowmarket-log** (via `log_earn`,
   ook voor daily + chest). Alle 🪙 vervangen door de **custom `Meadowcoins`-emoji**
   (`<:Meadowcoins:1526149523288883220>`); op de **site** als inline `<img>` (Discord-CDN, klasse `.mc`).
@@ -989,6 +995,9 @@ Hytale-pas-rolgrants + site-rolcheck — geen simpele flip); website publiek ope
     (`CHEST_TIERS`).
   - **`CHEST_TIERS_PROPOSAL`** = fijnkorreliger 10-tier voorstel (EV ~157), **enkel getoond** in
     de `!chest`-embed ter vergelijking — nog niet actief. Omschakelen = de twee arrays wisselen.
+  - ⚠️ **ACHTERHAALD**: het 10-tier-voorstel wérd de live verdeling op **2026-07-14**, en sinds
+    **2026-07-17** staan beide consts er niet meer — de verdeling zit in de **`chest_tiers`-tabel**
+    (instelbaar via ⚙ Settings; de 10 tiers zijn ongewijzigd overgenomen als seed).
 - **`!chest`-commando** — embed met **Current (live)** + **Proposal (finer-grained)** verdeling.
   **Enkel op de dev-guild** via poise-`check` `dev_guild_only` (snowflake `DEV_GUILD_ID =
   652452615879262220`); op een prod-guild volledig inert (geen embed, geen actie).
@@ -1148,7 +1157,12 @@ Leaderboard · ⚙ Manage (admin) · Log out`.
 - **⚙ Manage (`/admin/market`, enkel Waldstein `391337551543271433` + FayBelle
   `233179495094419456`)** — schappen +/hernoem/verwijder, item-slots (＋), lucky items (＋),
   per item **naam · prijs · omschrijving · categorie · rol-ID · duur (min) · afbeelding
-  uploaden** · verwijderen.
+  uploaden** · verwijderen. Subtabs (`admin_subtabs`, in volgorde): **🛒 Shop · 🛍 Admin shop
+  items · 👁 Admin shop preview · 👥 Accounts · 🪙 Coins · 📋 Channels · ⚙ Settings · 📜 Log ·
+  🖥 Server**.
+- **⚙ Settings (`/admin/settings`)** — de economie-parameters + **beide weegsystemen**
+  (coins-per-bericht, chest-tiers). Bot én site lezen deze **live** → wijzigen werkt meteen,
+  zonder deploy of herstart. Velden komen uit `settings::SPECS`. Zie sessie **2026-07-17b**.
 
 ## Model & regels
 - **Kopen** (`/buy`) = **ontgrendelen** (saldo eraf, in `inventory`). Gems: max 1× (bingo).
