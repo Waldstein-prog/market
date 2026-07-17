@@ -920,11 +920,20 @@ Puur front-end/UX-werk in `web.rs` (self-contained binary; templates/CSS zitten 
 > Nagekeken tegen code + prod-DB op **2026-07-15**; wat af was is hier weggehaald (zie
 > "✅ Afgevinkt" onderaan deze lijst). Niets op deze lijst is nog dringend.
 
-- **⚠️ Prod-shopwaarden staan nog op TEST** *(hoogste prioriteit van deze lijst)*: op de **prod-DB**
-  heeft de **Hytale Day Pass** `duration = 60` **seconden** (!) en `price = 10`; de **Permanent
-  Pass** `price = 10`. Day Pass moet naar **86400s (24u)** + een echte prijs. **Niet acuut** — de
-  shop is gate-d (enkel admins raken in `/market`) — maar **moet rechtstaan vóór de gate opengaat**.
-  Zetbaar via **Manage Shop**.
+- **⚠️ Day Pass staat nog op TEST** *(hoogste prioriteit van deze lijst)*: op de **prod-DB** heeft
+  de **Meadowland Day Pass** (id 21) `duration = 7200`s (2u) en `price = 1`. Moet naar **86400s (24u)**
+  + een echte prijs. **Niet acuut** — de shop is gate-d (enkel admins raken in `/market`) — maar
+  **moet rechtstaan vóór de gate opengaat**. Zetbaar via **Manage Shop**.
+  ✅ **Permanent Pass** (id 22) prijs staat sinds **2026-07-17f** op **20000** (user).
+- **🚫 Dubbele pas voorkomen — Twitch-kant** *(user 2026-07-17f)*: een lid mag géén dag- of
+  permanente pas kunnen kopen als het er al één heeft. **Via de site is dat geregeld** (`db::purchase`:
+  perma blokkeert een tweede perma én een dagpas; een lopende dagpas blokkeert een tweede). **Maar
+  Twitch omzeilt dit**: `twitch.rs::on_redeem` roept rechtstreeks `db::grant_day_whitelist` aan
+  (geen `purchase`, geen pas-check) én draait onder een **aparte Twitch-pseudo-id**, los van de
+  Discord-uid — dus een Twitch-redeem stapelt tijd bovenop, ook als het lid al (permanent) toegang
+  heeft. Nog te doen: in de Twitch-flow een bestaande (site-)pas herkennen en dan weigeren/refunden.
+  ⚠️ Complicatie: Twitch-identiteit ≠ Discord-identiteit; koppelen kan wellicht via de **Hytale-naam**
+  (die staat in beide grants).
 - **Permanent Pass `role_id` is leeg** op prod → `Use` zet enkel `perma_access`, kent **geen
   Discord-rol** toe. Invullen via Manage Shop.
 - **Shop-graphics**: de shop toont nu álle schappen; gems/boosters zonder afbeelding renderen als
