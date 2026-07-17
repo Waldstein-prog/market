@@ -184,7 +184,6 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/use/gem", post(use_gem))
         .route("/use/gem/unequip", post(unequip_gem))
         .route("/use/booster", post(use_booster))
-        .route("/hytale/name", post(set_hytale_name_route))
         .route("/admin/market", get(admin_market))
         .route("/admin/shop", get(admin_shop))
         .route("/admin/shop/preview", get(admin_shop_preview))
@@ -1089,18 +1088,16 @@ fn inventory_home(
             None => String::new(),
         };
 
-        // De Hytale-naam wordt bij de eerste aankoop gezet en is nadien persistent.
-        // Hier enkel tonen + een discrete correctie-optie (bv. bij een typfout).
+        // De Hytale-naam wordt bij de eerste aankoop gezet en is nadien VAST: een lid kan
+        // hem niet meer wijzigen (anders zou je je pas kunnen doorgeven door een andere
+        // naam te whitelisten). Daarom enkel tonen — géén update-formulier meer.
         let name_block = if hname.is_empty() {
             "<p class=\"muted\">No Hytale pass yet.</p>".to_string()
         } else {
             format!(
-                "<form method=\"post\" action=\"/hytale/name\" class=\"hname-form\" \
+                "<div class=\"hname-static\" \
                    style=\"display:flex;gap:.4rem;align-items:center;margin:.2rem 0 1rem;flex-wrap:wrap\">\
-                   <label class=\"k\">Hytale name</label>\
-                   <input name=\"hytale_name\" value=\"{val}\" maxlength=\"32\" \
-                     pattern=\"[A-Za-z0-9_]{{1,32}}\" style=\"flex:1;min-width:8rem\">\
-                   <button class=\"btn small\" type=\"submit\">Update</button></form>",
+                   <span class=\"k\">Hytale name</span> <b>{val}</b></div>",
                 val = esc(&hname),
             )
         };
@@ -1944,11 +1941,6 @@ struct BuyForm {
 }
 
 #[derive(Deserialize)]
-struct HytaleNameForm {
-    hytale_name: String,
-}
-
-#[derive(Deserialize)]
 struct MarketQuery {
     ok: Option<String>,
     err: Option<String>,
@@ -1991,11 +1983,16 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
 
     // --- Passen: koop = direct whitelisten -------------------------------
     if item.category == "boost" {
-        // Eerste aankoop: sla de meegestuurde Hytale-naam op (nadien persistent).
-        if let Some(raw) = f.hytale_name.as_deref() {
-            let n = raw.trim();
-            if valid_hytale_name(n) {
-                db::set_hytale_name(&st.pool, &uid, &name, n);
+        // Eerste aankoop: sla de meegestuurde Hytale-naam op. ÉÉNMALIG — is er al een
+        // naam, dan wordt een meegestuurde waarde genegeerd (ook bij een zelf-gemaakte
+        // POST). Een lid mag zijn naam niet meer wijzigen, anders kan hij zijn pas
+        // doorgeven door een andere naam te whitelisten.
+        if db::get_hytale_name(&st.pool, &uid).is_empty() {
+            if let Some(raw) = f.hytale_name.as_deref() {
+                let n = raw.trim();
+                if valid_hytale_name(n) {
+                    db::set_hytale_name(&st.pool, &uid, &name, n);
+                }
             }
         }
         let hname = db::get_hytale_name(&st.pool, &uid);
@@ -2075,25 +2072,6 @@ pub(crate) fn valid_hytale_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 32
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// De Hytale-naam van het lid instellen/wijzigen (voor de whitelist).
-async fn set_hytale_name_route(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Form(f): Form<HytaleNameForm>,
-) -> Response {
-    let Some((uid, name)) = require_flowerborn(&st, &headers).await else {
-        return Redirect::to("/").into_response();
-    };
-    let hname = f.hytale_name.trim();
-    let msg = if valid_hytale_name(hname) {
-        db::set_hytale_name(&st.pool, &uid, &name, hname);
-        format!("✅ Hytale name set to {hname}.")
-    } else {
-        "⚠️ Invalid Hytale name (use 1–32 letters, digits or underscore).".to_string()
-    };
-    Redirect::to(&format!("/?tab=boosts&msg={}", pct(&msg))).into_response()
 }
 
 /// Welke rol-ID's moeten weg bij het equipen van gem `keep`: elke rol die het lid
