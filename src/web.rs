@@ -165,6 +165,31 @@ fn coins_channel(cfg: &Config) -> &'static str {
     }
 }
 
+/// Tekst van de publieke aankoopmelding. Gems krijgen het achtervoegsel "gem"; passen en
+/// boosters worden bij hun naam genoemd. `a`/`an` volgt de eerste letter van de naam.
+fn purchase_announce(name: &str, item: &db::Item) -> String {
+    let article = match item.name.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
+        _ => "a",
+    };
+    if item.category == "inventory" {
+        format!("**{name}** bought {article} **{}** gem.", item.name)
+    } else {
+        format!("**{name}** bought {article} **{}**.", item.name)
+    }
+}
+
+/// Post de aankoopmelding in #coins (async, mag de redirect niet ophouden en een
+/// Discord-hapering mag de aankoop niet breken).
+fn announce_purchase(st: &AppState, name: &str, item: &db::Item) {
+    let dc = st.dc.clone();
+    let chan = coins_channel(&st.cfg).to_string();
+    let msg = purchase_announce(name, item);
+    tokio::spawn(async move {
+        let _ = dc.send_channel_message(&chan, &msg).await;
+    });
+}
+
 pub async fn serve(cfg: Config, pool: DbPool) {
     let dc = Arc::new(Discord::new(cfg.bot_token.clone(), cfg.guild_id.clone()));
     let state = AppState {
@@ -2082,6 +2107,8 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                 .amount(item.price)
                 .detail(format!("{} → whitelisted as {hname}", item.name)),
         );
+        // Publieke aankoopmelding in #coins (pas).
+        announce_purchase(&st, &name, &item);
         return Redirect::to(&format!("/market?ok={}&from={}", pct(&msg), oldbal)).into_response();
     }
 
@@ -2099,18 +2126,8 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                     .amount(item.price)
                     .detail(item.name.clone()),
             );
-            // Publieke aankoopmelding in #coins (async, mag de redirect niet ophouden en
-            // een Discord-hapering mag de aankoop niet breken).
-            let dc = st.dc.clone();
-            let chan = coins_channel(&st.cfg).to_string();
-            let article = match item.name.chars().next().map(|c| c.to_ascii_lowercase()) {
-                Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
-                _ => "a",
-            };
-            let announce = format!("**{}** bought {} **{}** gem.", name, article, item.name);
-            tokio::spawn(async move {
-                let _ = dc.send_channel_message(&chan, &announce).await;
-            });
+            // Publieke aankoopmelding in #coins (gem of booster — de helper kiest de tekst).
+            announce_purchase(&st, &name, &item);
             format!("/market?from={}", bal + item.price)
         }
         Err(e) => format!("/market?err={}", pct(&e)),
