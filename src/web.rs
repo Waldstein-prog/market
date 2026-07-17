@@ -24,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::Config;
 use crate::db::{self, DbPool};
 use crate::discord_rest::Discord;
+use crate::settings;
 
 const SESSION_MAX_AGE: i64 = 90 * 24 * 3600; // ~90 dagen: voelt als "één keer inloggen"
 const MEADOW: &str = "#6b9b52";
@@ -213,6 +214,13 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/channels", get(admin_channels))
         .route("/admin/channels/add", post(admin_channels_add))
         .route("/admin/channels/remove", post(admin_channels_remove))
+        .route("/admin/settings", get(admin_settings))
+        .route("/admin/settings/save", post(admin_settings_save))
+        .route("/admin/settings/weight/set", post(admin_settings_weight_set))
+        .route("/admin/settings/weight/delete", post(admin_settings_weight_delete))
+        .route("/admin/settings/tier/add", post(admin_settings_tier_add))
+        .route("/admin/settings/tier/update", post(admin_settings_tier_update))
+        .route("/admin/settings/tier/delete", post(admin_settings_tier_delete))
         .route(
             "/admin/item/image",
             post(admin_item_image).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
@@ -653,6 +661,26 @@ a.link{{color:{MEADOW}}}
 .addbar{{display:flex;gap:.4rem;margin-top:1.6rem;max-width:26rem}}
 .addbar input{{flex:1;padding:.5rem;border:1px solid #2c3d2a;border-radius:9px;
   background:#0e1510;color:#e8f0e4;font:inherit}}
+/* ⚙ Settings */
+.sgroup{{border-top:1px solid #22301f;padding-top:.9rem;margin-top:1.4rem}}
+.sgroup h2{{font-size:1rem;margin:0 0 .8rem;color:#e8f0e4}}
+.sfield{{display:flex;align-items:baseline;gap:.7rem;padding:.5rem 0;
+  border-bottom:1px solid #1a241a;flex-wrap:wrap}}
+.sfield label{{flex:0 0 13rem;font-weight:600;color:#e8f0e4}}
+.sfield input[type=number]{{width:7rem;padding:.4rem .5rem;border:1px solid #2c3d2a;
+  border-radius:8px;background:#0e1510;color:#e8f0e4;font:inherit}}
+.sfield .unit{{color:#8fb37a;font-size:.85rem;min-width:3.2rem}}
+.sfield .shelp{{flex:1 1 100%;margin:.2rem 0 0 13.7rem;font-size:.8rem;color:#9db095}}
+.wtable{{width:100%;border-collapse:collapse;margin:.4rem 0 .8rem}}
+.wtable th{{text-align:left;font-size:.78rem;color:#9db095;font-weight:600;
+  padding:.3rem .5rem;border-bottom:1px solid #2c3d2a}}
+.wtable td{{padding:.3rem .5rem;border-bottom:1px solid #1a241a;vertical-align:middle}}
+.wtable input{{width:5.5rem;padding:.35rem .45rem;border:1px solid #2c3d2a;
+  border-radius:8px;background:#0e1510;color:#e8f0e4;font:inherit}}
+.wtable .pct{{font-weight:700;color:{MEADOW};white-space:nowrap}}
+.wtable .bar{{display:block;height:.4rem;border-radius:999px;background:{MEADOW};
+  min-width:2px;margin-top:.2rem;opacity:.75}}
+.wtable tfoot td{{color:#9db095;font-size:.8rem;padding-top:.5rem}}
 .lb{{list-style:none;margin:.5rem 0 0;padding:0}}
 .lb li{{display:flex;align-items:center;gap:.6rem;padding:.55rem .35rem;
   border-bottom:1px solid #1d281c}}
@@ -727,13 +755,14 @@ fn admin_subtabs(active: &str) -> String {
         format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
     };
     format!(
-        "<div class=\"subtabs\">{}{}{}{}{}{}{}{}</div>",
+        "<div class=\"subtabs\">{}{}{}{}{}{}{}{}{}</div>",
         item("/admin/market", "market", "🛒 Shop"),
         item("/admin/shop", "shop", "🛍 Admin shop items"),
         item("/admin/shop/preview", "shop_preview", "👁 Admin shop preview"),
         item("/admin/accounts", "accounts", "👥 Accounts"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
+        item("/admin/settings", "settings", "⚙ Settings"),
         item("/admin/log", "log", "📜 Log"),
         item("/panel", "server", "🖥 Server"),
     )
@@ -3089,6 +3118,312 @@ async fn admin_channels_remove(
         }
     }
     Redirect::to("/admin/channels").into_response()
+}
+
+// --- ⚙ Settings ---------------------------------------------------------
+// De economie-parameters die vroeger als `const` in bot.rs stonden. Alles wat
+// hier gezet wordt, wordt LIVE gelezen door de bot — geen deploy, geen herstart.
+// De veldenlijst zelf komt uit `settings::SPECS`, dus een nieuwe parameter
+// toevoegen = één Spec bijzetten; deze pagina tekent hem vanzelf.
+
+/// Kies de eenheid die achter het invoerveld komt, uit het achtervoegsel van de
+/// sleutel. Dat is meteen de reden dat de unit ín de sleutelnaam zit.
+fn unit_of(key: &str) -> &'static str {
+    if key.ends_with("_sec") {
+        "seconden"
+    } else if key.ends_with("_min") {
+        "minuten"
+    } else if key.ends_with("_hours") {
+        "uur"
+    } else if key.ends_with("_coins") {
+        "coins"
+    } else if key.ends_with("_days") {
+        "dagen"
+    } else {
+        ""
+    }
+}
+
+async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+
+    // De losse parameters, gegroepeerd zoals ze in SPECS staan.
+    let mut groups = String::new();
+    let mut current_group = "";
+    for sp in settings::SPECS {
+        if sp.group != current_group {
+            if !current_group.is_empty() {
+                groups.push_str("</div>");
+            }
+            groups.push_str(&format!(
+                "<div class=\"sgroup\"><h2>{}</h2>",
+                esc(sp.group)
+            ));
+            current_group = sp.group;
+        }
+        let val = settings::f64_of(&st.pool, sp.key);
+        let field = match sp.kind {
+            // Het verborgen `on_form`-veld is er omdat een uitgevinkt vakje in HTML
+            // niets meestuurt: zonder dit ziet de save-route geen verschil tussen
+            // "uitgezet" en "stond niet op dit formulier", en zou een partiële POST
+            // stil elk vinkje uitzetten.
+            settings::Kind::Bool => format!(
+                "<input type=\"hidden\" name=\"on_form\" value=\"{k}\">\
+                 <input type=\"checkbox\" id=\"{k}\" name=\"{k}\" value=\"1\"{on}>",
+                k = sp.key,
+                on = if val != 0.0 { " checked" } else { "" },
+            ),
+            settings::Kind::Int => format!(
+                "<input type=\"number\" id=\"{k}\" name=\"{k}\" value=\"{v}\" min=\"{min}\" max=\"{max}\" step=\"1\">",
+                k = sp.key,
+                v = val.round() as i64,
+                min = sp.min,
+                max = sp.max,
+            ),
+        };
+        groups.push_str(&format!(
+            "<div class=\"sfield\"><label for=\"{k}\">{label}</label>{field}\
+             <span class=\"unit\">{unit}</span>\
+             <div class=\"shelp\">{help}</div></div>",
+            k = sp.key,
+            label = esc(sp.label),
+            unit = unit_of(sp.key),
+            help = esc(sp.help),
+        ));
+    }
+    if !current_group.is_empty() {
+        groups.push_str("</div>");
+    }
+
+    // Weegsysteem 1 — coins per bericht.
+    let cw = db::coin_weights_all(&st.pool);
+    let cw_total: f64 = cw.iter().map(|(_, w)| w.max(0.0)).sum();
+    let cw_rows: String = cw
+        .iter()
+        .map(|(amount, w)| {
+            let pct = if cw_total > 0.0 { w / cw_total * 100.0 } else { 0.0 };
+            format!(
+                "<tr><td><b>+{amount}</b> coins</td>\
+                 <td><form method=\"post\" action=\"/admin/settings/weight/set\" class=\"iform\">\
+                   <input type=\"hidden\" name=\"amount\" value=\"{amount}\">\
+                   <input type=\"text\" name=\"weight\" value=\"{w}\" inputmode=\"decimal\">\
+                   <button class=\"btn\" type=\"submit\">✓</button></form></td>\
+                 <td class=\"pct\">{pct:.1}%<span class=\"bar\" style=\"width:{bar:.1}%\"></span></td>\
+                 <td><form method=\"post\" action=\"/admin/settings/weight/delete\" class=\"iform\">\
+                   <input type=\"hidden\" name=\"amount\" value=\"{amount}\">\
+                   <button class=\"chrm\" type=\"submit\" title=\"Verwijderen\">✕</button></form></td></tr>",
+                bar = pct.min(100.0),
+            )
+        })
+        .collect();
+
+    // Weegsysteem 2 — chest-prijsverdeling.
+    let ct = db::chest_tiers_all(&st.pool);
+    let ct_total: f64 = ct.iter().map(|(_, w, _, _)| w.max(0.0)).sum();
+    let ct_rows: String = ct
+        .iter()
+        .map(|(id, w, lo, hi)| {
+            let pct = if ct_total > 0.0 { w / ct_total * 100.0 } else { 0.0 };
+            format!(
+                "<tr><td colspan=\"2\">\
+                   <form method=\"post\" action=\"/admin/settings/tier/update\" class=\"iform prow\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                     <input type=\"text\" name=\"weight\" value=\"{w}\" inputmode=\"decimal\" title=\"Gewicht\">\
+                     <input type=\"number\" name=\"lo\" value=\"{lo}\" title=\"Min coins\">\
+                     <input type=\"number\" name=\"hi\" value=\"{hi}\" title=\"Max coins\">\
+                     <button class=\"btn\" type=\"submit\">✓</button></form></td>\
+                 <td class=\"pct\">{pct:.1}%<span class=\"bar\" style=\"width:{bar:.1}%\"></span></td>\
+                 <td><form method=\"post\" action=\"/admin/settings/tier/delete\" class=\"iform\">\
+                   <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                   <button class=\"chrm\" type=\"submit\" title=\"Verwijderen\">✕</button></form></td></tr>",
+                bar = pct.min(100.0),
+            )
+        })
+        .collect();
+
+    let body = format!(
+        "<h1>⚙ Settings</h1>\
+         <p class=\"shelp\" style=\"margin:0 0 .5rem\">Alles hier werkt <b>meteen</b> — de bot leest \
+          deze waarden live, dus er is geen herstart of deploy nodig.</p>\
+         <form method=\"post\" action=\"/admin/settings/save\">{groups}\
+           <div class=\"ctoolbar\" style=\"margin-top:1.2rem\">\
+             <button class=\"btn\" type=\"submit\">Opslaan</button></div></form>\
+         <div class=\"sgroup\"><h2>Coins per bericht — verdeling</h2>\
+          <p class=\"shelp\" style=\"margin:0 0 .6rem\">Gewichten zijn <b>relatief</b>: de som mag alles \
+           zijn. Een gewicht van 0,5 naast een 1 betekent gewoon 'half zoveel kans'. Het percentage \
+           rechts is berekend en klopt dus altijd.</p>\
+          <table class=\"wtable\"><thead><tr><th>Uitkomst</th><th>Gewicht</th><th>Kans</th><th></th></tr></thead>\
+          <tbody>{cw_rows}</tbody>\
+          <tfoot><tr><td colspan=\"4\">Som van de gewichten: <b>{cw_total}</b></td></tr></tfoot></table>\
+          <form method=\"post\" action=\"/admin/settings/weight/set\" class=\"addbar\">\
+            <input type=\"number\" name=\"amount\" placeholder=\"Coins (bv. 6)\" required>\
+            <input type=\"text\" name=\"weight\" placeholder=\"Gewicht (bv. 0,2)\" inputmode=\"decimal\" required>\
+            <button class=\"btn\" type=\"submit\">＋ Uitkomst</button></form></div>\
+         <div class=\"sgroup\"><h2>Treasure chest — prijsverdeling</h2>\
+          <p class=\"shelp\" style=\"margin:0 0 .6rem\">Per tier een gewicht en een coin-bereik \
+           (min–max). Er wordt eerst een tier getrokken, dan een bedrag binnen dat bereik.</p>\
+          <table class=\"wtable\"><thead><tr><th colspan=\"2\">Gewicht · min · max</th><th>Kans</th><th></th></tr></thead>\
+          <tbody>{ct_rows}</tbody>\
+          <tfoot><tr><td colspan=\"4\">Som van de gewichten: <b>{ct_total}</b></td></tr></tfoot></table>\
+          <form method=\"post\" action=\"/admin/settings/tier/add\" class=\"addbar\">\
+            <input type=\"text\" name=\"weight\" placeholder=\"Gewicht\" inputmode=\"decimal\" required>\
+            <input type=\"number\" name=\"lo\" placeholder=\"Min\" required>\
+            <input type=\"number\" name=\"hi\" placeholder=\"Max\" required>\
+            <button class=\"btn\" type=\"submit\">＋ Tier</button></form></div>\
+         {KEEP_SCROLL_JS}{SAVED_FLASH_JS}"
+    );
+    let body = format!("{}{}", admin_subtabs("settings"), body);
+    Html(shell(
+        "Settings — Meadow Market",
+        &chrome(&name, "admin", true, ""),
+        true,
+        &body,
+    ))
+    .into_response()
+}
+
+/// Alle losse parameters in één keer. Als paren-lijst i.p.v. een map, want het
+/// formulier stuurt `on_form` één keer per vinkje en een map zou daar maar één
+/// van overhouden. Een veld dat niet meekwam blijft ongemoeid — zo raakt een
+/// gedeeltelijk formulier nooit stil de rest van de economie.
+async fn admin_settings_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<Vec<(String, String)>>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let value_of = |key: &str| f.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        // Welke vinkjes stonden er op dit formulier? (Zie de `on_form`-comment
+        // bij het renderen: uitgevinkt = geen veld, dus dit is het enige verschil
+        // tussen "uitgezet" en "niet getoond".)
+        let on_form: Vec<&str> =
+            f.iter().filter(|(k, _)| k == "on_form").map(|(_, v)| v.as_str()).collect();
+        for sp in settings::SPECS {
+            let raw = match sp.kind {
+                settings::Kind::Bool => {
+                    if !on_form.contains(&sp.key) {
+                        continue; // vinkje stond niet op dit formulier
+                    }
+                    if value_of(sp.key).is_some() { "1" } else { "0" }.to_string()
+                }
+                settings::Kind::Int => match value_of(sp.key) {
+                    Some(v) => v,
+                    None => continue, // veld stond niet op het formulier
+                },
+            };
+            settings::set(&st.pool, sp.key, &raw);
+        }
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
+}
+
+#[derive(Deserialize)]
+struct WeightSet {
+    amount: i64,
+    weight: String,
+}
+
+#[derive(Deserialize)]
+struct WeightDelete {
+    amount: i64,
+}
+
+/// Voegt een uitkomst toe óf wijzigt er een (`amount` is de sleutel). Een gewicht
+/// van 0 of minder zou de rij stil onbereikbaar maken; dat weigeren we, want
+/// "weg" is wat de ✕-knop doet.
+async fn admin_settings_weight_set(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<WeightSet>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        if let Ok(w) = f.weight.trim().replace(',', ".").parse::<f64>() {
+            if w > 0.0 && w.is_finite() && f.amount >= 0 {
+                db::coin_weight_set(&st.pool, f.amount, w);
+            }
+        }
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
+}
+
+async fn admin_settings_weight_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<WeightDelete>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::coin_weight_delete(&st.pool, f.amount);
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
+}
+
+#[derive(Deserialize)]
+struct TierAdd {
+    weight: String,
+    lo: i64,
+    hi: i64,
+}
+
+#[derive(Deserialize)]
+struct TierUpdate {
+    id: i64,
+    weight: String,
+    lo: i64,
+    hi: i64,
+}
+
+#[derive(Deserialize)]
+struct TierDelete {
+    id: i64,
+}
+
+/// Valideer een tier-invoer: gewicht > 0 en een bereik dat niet omgekeerd staat.
+/// Bij twijfel wint de kleinste als ondergrens, zodat de trekking nooit paniekt.
+fn tier_fields(weight: &str, lo: i64, hi: i64) -> Option<(f64, i64, i64)> {
+    let w = weight.trim().replace(',', ".").parse::<f64>().ok()?;
+    if !w.is_finite() || w <= 0.0 || lo < 0 || hi < 0 {
+        return None;
+    }
+    Some((w, lo.min(hi), lo.max(hi)))
+}
+
+async fn admin_settings_tier_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<TierAdd>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        if let Some((w, lo, hi)) = tier_fields(&f.weight, f.lo, f.hi) {
+            db::chest_tier_add(&st.pool, w, lo, hi);
+        }
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
+}
+
+async fn admin_settings_tier_update(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<TierUpdate>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        if let Some((w, lo, hi)) = tier_fields(&f.weight, f.lo, f.hi) {
+            db::chest_tier_update(&st.pool, f.id, w, lo, hi);
+        }
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
+}
+
+async fn admin_settings_tier_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<TierDelete>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::chest_tier_delete(&st.pool, f.id);
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
 }
 
 #[derive(Deserialize)]

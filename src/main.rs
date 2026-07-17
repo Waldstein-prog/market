@@ -4,6 +4,7 @@ mod bot;
 mod config;
 mod db;
 mod discord_rest;
+mod settings;
 mod twitch;
 mod web;
 

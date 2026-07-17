@@ -14,6 +14,53 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-17b) — ⚙ Settings-tab: economie live tunen zonder deploy
+
+**LIVE op prod + gecommit.** De economie-parameters die als `const` in `bot.rs` stonden, zijn nu
+admin-instelbaar via **Manage → ⚙ Settings** (tussen Channels en Log). Bot én site lezen ze **LIVE**
+uit de DB (zoals `coin_channels`), dus aan een getal draaien werkt **meteen** — geen deploy, geen
+herstart. Scope was expliciet **economie-tuning**; feature-toggles, Discord-ID's en de level-curve
+zijn er bewust buiten gehouden (user-keuze).
+
+**(A) Nieuwe coin-verdeling per bericht (user-beslissing).** Was 80% → 1 · 19% → 2 · 1% → 3.
+Nu **gelijkmatig +0/+1/+2/+3** (gewicht 1 elk), **+4** half zo waarschijnlijk (0,5) en **+5** een
+tiende (0,1). Som 4,6 → kansen 21,7% ×4 · 10,9% · 2,2% (1M-trekkingen gesimuleerd, klopt).
+⚠️ **ECONOMIE-IMPACT**: gemiddeld **1,85 coins/bericht** i.p.v. 1,21 = **+53% instroom**. De
+shopprijzen (gems 1000–11000) zijn nog op de oude instroom geijkt — mogelijk bijsturen.
+**+0 is nieuw**: de cooldown loopt wél (anders blijf je rollen), maar er gaat **geen "+0" naar
+#fortuna-log** — voor de speler is het stilte.
+
+**(B) Architectuur.** Drie tabellen (stonden al ongecommit in `db.rs` van de vorige sessie):
+- `settings (key, value)` — de 14 losse parameters, waarde als TEXT. **De unit zit in de KEY**
+  (`_sec`/`_min`/`_hours`/`_coins`/`_days`) zodat een eenheidsfout zichtbaar is op de call-site.
+- `coin_weights (amount, weight)` — verdeling per bericht; `weight` is **REAL en RELATIEF**.
+- `chest_tiers (id, weight, lo, hi, position)` — chest-prijsverdeling, idem relatief.
+- **`src/settings.rs`** (nieuw) = `SPECS`-lijst met key/label/groep/type/default/min/max/help +
+  `f64_of`/`i64_of`/`usize_of`/`bool_of`/`set`. **De defaults zijn exact de oude const-waarden**,
+  dus een lege `settings`-tabel gedraagt zich als de bot van vóór de refactor (prod heeft 0 rijen).
+  Een parameter toevoegen = één `Spec` bijzetten; de GUI tekent hem vanzelf.
+- **Seed** (`db::seed_weights`): vult de twee weegtabellen enkel als ze **leeg** zijn — een rij
+  wegdoen blijft dus weg. Een tabel volledig leegmaken = "geef me de standaardverdeling terug".
+
+**(C) GUI** (`/admin/settings`): de losse velden per groep (Coins per bericht · Daily · Chest) in
+één form, plus **rij-editors** voor beide weegsystemen (toevoegen/wijzigen/✕) met een **berekend
+kans-percentage + balkje** — de admin typt relatieve gewichten, het percentage is afgeleid en klopt
+dus altijd. **Komma werkt als decimaalteken** (`0,5`). Geweigerd/gecorrigeerd: gewicht ≤ 0, een
+omgekeerd tier-bereik (lo/hi wisselen), waarden buiten de spec-grenzen (geklemd).
+⚠️ **Checkbox-val**: een uitgevinkt vakje stuurt in HTML géén veld → een partiële POST zou stil elk
+vinkje uitzetten. Opgelost met een verborgen **`on_form`**-veld per vinkje; de save-route leest het
+formulier als **paren-lijst** (`Form<Vec<(String,String)>>`), niet als map, want `on_form` komt
+meermaals voor. Getest: partiële POST laat `chest_enabled` met rust.
+
+**(D) `deploy/deploy.sh` — downtime van scp-duur naar <1s.** Volgorde was: stop → scp → start, dus
+de bot lag de hele overdracht plat. Nu: build + **scp + daemon-reload terwijl de oude bot draait**,
+daarna **stop → swap → start in één ssh-sessie** (geen round-trips van ~60ms in het dode venster).
+`install` op een draaiende binary kan niet (ETXTBSY) → vandaar de /tmp-stage en de swap ná de stop.
+Gemeten bij deze deploy: **Stopping en Started binnen dezelfde seconde** (11:04:38).
+
+**Backup vóór de deploy**: `/opt/backups/market/coins-pre-settings-20260717.db` (sqlite online-backup).
+**Chest-tiers**: bewust **ongewijzigd** overgenomen als seed (user: "blijven zoals ze zijn voorlopig").
+
 ## ⏭️ Sessie (2026-07-17) — gem-teksten/prijzen herzet + Admin shop preview-tab
 
 > **Werkregel bevestigd deze sessie** (memory [[market-session-only-market]]): in een **market**-sessie

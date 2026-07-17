@@ -12,11 +12,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::db::{self, DbPool};
+use crate::settings;
 
 // --- dev-instellingen (later aanpassen) ---------------------------------
-const COOLDOWN: f64 = 30.0; // seconden tussen twee toekenningen per lid
-// Gewogen kans per bericht: 80% → 1 coin, 19% → 2 coins, 1% → 3 coins. Som = 100.
-const COIN_WEIGHTS: [(u32, i64); 3] = [(80, 1), (19, 2), (1, 3)];
+// NB: de economie-parameters (cooldown, coin-gewichten, daily, chest) staan hier
+// NIET meer als const — die zijn admin-instelbaar geworden via Manage → ⚙ Settings
+// en worden LIVE uit de DB gelezen. Zie `settings.rs` voor de sleutels + defaults.
 const DEV_FEEDBACK: bool = false; // cooldown-terugkoppeling per bericht (dev-only; laat uit → geen ⏳-spam in #general)
 const COIN_FEEDBACK: bool = false; // toon de speler in #general zijn coin-award ("+N coins! Total: X")
 const COIN_CHANNEL_ID: u64 = 1229046340793663488; // #general: enkel hier coins per bericht (0 = overal). De chest-detectie volgt ditzelfde kanaal.
@@ -36,52 +37,29 @@ const HOURLY_TEST_MIN: i64 = 1; // test-drempel
 const COIN_EMOJI: &str = "<:Meadowcoins:1526188363110023308>"; // Magic Meadow-emoji; bot zit in prod → rendert op beide guilds
 const PREFIX: &str = "!"; // deze berichten leveren geen coins op (oude commando-syntax)
 // --- daily-beloning (embed-knop) ----------------------------------------
-const DAILY_COOLDOWN: f64 = 20.0 * 3600.0; // minstens 20u tussen twee claims
-const DAILY_STREAK_WINDOW: f64 = 30.0 * 3600.0; // binnen 30u opnieuw klikken → streak behouden (anders reset)
-// Streak-daily: dag 1 = random in [BASE_MIN, BASE_MAX]. Elke opeenvolgende dag
-// verhoogt de ondergrens met MIN_STEP en de bovengrens met MAX_STEP. Een dag
-// overslaan reset naar dag 1. Na dag STREAK_CAP stopt de verhoging.
-const DAILY_BASE_MIN: i64 = 10;
-const DAILY_BASE_MAX: i64 = 100;
-const DAILY_MIN_STEP: i64 = 1;
-const DAILY_MAX_STEP: i64 = 5;
-const DAILY_STREAK_CAP: i64 = 200;
+// Streak-daily: dag 1 = random in [daily_base_min_coins, daily_base_max_coins].
+// Elke opeenvolgende dag verhoogt de ondergrens met daily_min_step_coins en de
+// bovengrens met daily_max_step_coins. Een dag overslaan reset naar dag 1. Na
+// dag daily_streak_cap_days stopt de verhoging. Alle vijf instelbaar in Settings.
 const DAILY_CUSTOM_ID: &str = "daily_claim"; // moet matchen met de embed-knop
 const SITE_ACCESS_CUSTOM_ID: &str = "site_access"; // "site"-knop → under-construction (website nog niet open)
 // --- treasure chest -----------------------------------------------------
-// Chatten ≥ CHEST_DISTINCT_USERS verschillende mensen binnen CHEST_WINDOW in
+// Chatten ≥ chest_distinct_users verschillende mensen binnen chest_window_min in
 // hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
-// CHEST_POP_DELAY later popt hij en wint één random klikker CHEST_PRIZE coin(s).
-const CHEST_ENABLED: bool = true;
-const CHEST_DISTINCT_USERS: usize = 3; // aantal verschillende chatters binnen CHEST_WINDOW om te spawnen
-const CHEST_WINDOW: f64 = 10.0 * 60.0; // venster voor de "verschillende chatters"-telling
-const CHEST_POP_DELAY: u64 = 10 * 60; // seconden tussen verschijnen en poppen (natuurlijke/prod-spawn). Embedtekst leest dit dynamisch.
+// chest_pop_delay_min later popt hij en wint één random klikker de getrokken prijs.
+// Die vijf staan in Settings; wat hier overblijft is niet-economisch.
 const CHEST_SPAWN_CHANNEL_ID: u64 = 1296469405651435594; // natuurlijke chests spawnen ENKEL hier (Magic Meadow #general)
 const CHEST_TICK_SECS: u64 = 2; // interval waarmee de M:SS-timer in de embed wordt bijgewerkt (vloeiender)
-const CHEST_CHANNEL_COOLDOWN: f64 = 60.0 * 60.0; // rust per kanaal na een chest (anti-spam)
-const CHEST_MIN_JOINERS: usize = 2; // minstens zoveel deelnemers, anders despawnt de chest (niks weggegeven)
 const CHEST_SPAWN_ON_START: bool = false; // (was test) — nu vervangen door het !chest dev-commando
 const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
 // Artwork ingebakken in de binary (geen losse bestanden bij deploy nodig). Gehangen
 // als attachments aan het chest-bericht en via attachment:// in de embed getoond:
 // chest = grote image (onderaan), coin = thumbnail (rechtsboven).
 const CRYING_IMG: &[u8] = include_bytes!("../artwork/crying.png"); // getoond als de chest despawnt
-// Prijsverdeling: (gewicht in ‰ (per duizend), min, max coins). Som = CHEST_TIER_TOTAL.
-// CHEST_TIERS = de ACTUELE (live) verdeling die de trekking gebruikt: de
-// fijnkorrelige 10-tier-verdeling (sinds 2026-07-14 live; verving de grovere 5-tier).
-const CHEST_TIER_TOTAL: u32 = 1000; // som van de gewichten (‰)
-const CHEST_TIERS: [(u32, i64, i64); 10] = [
-    (400, 50, 80),    // 40%
-    (220, 80, 120),   // 22%
-    (140, 120, 180),  // 14%
-    (90, 180, 260),   // 9%
-    (60, 260, 360),   // 6%
-    (40, 360, 480),   // 4%
-    (25, 480, 620),   // 2.5%
-    (15, 620, 760),   // 1.5%
-    (7, 760, 880),    // 0.7%
-    (3, 880, 1000),   // 0.3%
-];
+// De chest-prijsverdeling staat in de tabel `chest_tiers` (Manage → ⚙ Settings):
+// per tier een RELATIEF gewicht + een coin-bereik. De som hoeft nergens op uit te
+// komen — `chest_prize` deelt door het totaal. De 10-tier-verdeling die hier als
+// const stond (live sinds 2026-07-14) is nu de seed van die tabel.
 // Dev-guild (WaldsteinDevZone): het !chest-overzichtscommando werkt ENKEL hier en
 // nooit op een latere prod-guild (harde snowflake-check, niet config-afhankelijk).
 const DEV_GUILD_ID: u64 = 652452615879262220;
@@ -128,16 +106,32 @@ fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
-/// Gewogen coin-award per bericht volgens COIN_WEIGHTS (80/19/1 %).
-fn coin_amount() -> i64 {
-    let mut roll = rand::thread_rng().gen_range(0..100);
-    for (w, n) in COIN_WEIGHTS {
-        if roll < w {
-            return n;
-        }
-        roll -= w;
+/// Trek een coin-award voor één bericht uit de tabel `coin_weights`: per rij een
+/// bedrag en een RELATIEF gewicht. We rollen in [0, som) en lopen de rijen af —
+/// zo hoeven de gewichten nergens op uit te komen en is "half zoveel kans"
+/// letterlijk 0.5. Een bedrag van 0 is een geldige uitkomst (= niets gewonnen).
+/// Hoelang een chest openstaat, in seconden. De instelling staat in minuten
+/// (`chest_pop_delay_min`); dit is de enige plek die dat omrekent.
+fn pop_delay_secs(pool: &DbPool) -> u64 {
+    (settings::i64_of(pool, "chest_pop_delay_min") * 60).max(1) as u64
+}
+
+fn coin_amount(pool: &DbPool) -> i64 {
+    let weights = db::coin_weights_all(pool);
+    let total: f64 = weights.iter().map(|(_, w)| w.max(0.0)).sum();
+    // Vangnet: lege tabel of enkel nul-gewichten → 1 coin, zoals vóór de refactor.
+    if total <= 0.0 {
+        return 1;
     }
-    1 // vangnet (som != 100)
+    let mut roll = rand::thread_rng().gen_range(0.0..total);
+    for (amount, w) in &weights {
+        roll -= w.max(0.0);
+        if roll < 0.0 {
+            return *amount;
+        }
+    }
+    // Onbereikbaar op afrondingsfouten na; dan de laatste rij.
+    weights.last().map(|(a, _)| *a).unwrap_or(1)
 }
 
 /// Log een coin-verdienste: `got N coins` → #fortuna-log, `balance: X` →
@@ -182,12 +176,19 @@ async fn handle_message(
         .clone()
         .unwrap_or_else(|| msg.author.name.clone());
 
-    if elapsed >= COOLDOWN {
+    let cooldown = settings::f64_of(&data.pool, "msg_cooldown_sec");
+    if elapsed >= cooldown {
         let old_earned = db::get_stats(&data.pool, &uid).3; // total_earned vóór award
-        let amount = coin_amount();
+        let amount = coin_amount(&data.pool);
         let total = db::award(&data.pool, &uid, &name, amount, now);
         tracing::info!("{name}: +{amount} coins (totaal {total})");
-        log_earn(&ctx.http, &name, amount, total).await;
+        // Een award van 0 is een geldige uitkomst (rij `0` in coin_weights): de
+        // cooldown loopt wél — anders bleef je doorrollen tot je iets wint — maar
+        // "+0" is geen gebeurtenis, dus het blijft uit #fortuna-log. Voor de speler
+        // is het gewoon stilte.
+        if amount > 0 {
+            log_earn(&ctx.http, &name, amount, total).await;
+        }
         // Level-up? → 1% van het saldo cadeau + privé-melding (DM) aan het lid.
         let new_level = db::level_of(old_earned + amount);
         if new_level > db::level_of(old_earned) {
@@ -219,12 +220,12 @@ async fn handle_message(
                     .await;
             }
         }
-        if COIN_FEEDBACK {
+        if COIN_FEEDBACK && amount > 0 {
             msg.reply(ctx, format!("{COIN_EMOJI} +{amount} coins! Total: **{total}**"))
                 .await?;
         }
     } else {
-        let remaining = (COOLDOWN - elapsed) as i64 + 1;
+        let remaining = (cooldown - elapsed) as i64 + 1;
         tracing::info!("{name}: cooldown, nog {remaining}s");
         if DEV_FEEDBACK {
             msg.reply(
@@ -282,7 +283,7 @@ async fn event_handler(
                     serenity::ChannelId::new(COIN_CHANNEL_ID),
                     data.chest.clone(),
                     data.pool.clone(),
-                    CHEST_POP_DELAY,
+                    pop_delay_secs(&data.pool),
                     &[],
                 )
                 .await
@@ -349,8 +350,9 @@ async fn handle_daily(
 
     let last = db::get_last_daily(&data.pool, &uid);
     let elapsed = now - last;
-    if elapsed < DAILY_COOLDOWN {
-        let left = DAILY_COOLDOWN - elapsed;
+    let daily_cooldown = settings::f64_of(&data.pool, "daily_cooldown_hours") * 3600.0;
+    if elapsed < daily_cooldown {
+        let left = daily_cooldown - elapsed;
         let hrs = (left / 3600.0).floor() as i64;
         let mins = ((left % 3600.0) / 60.0).floor() as i64;
         respond_ephemeral(
@@ -362,17 +364,24 @@ async fn handle_daily(
         return Ok(());
     }
 
-    // Streak: opnieuw geklikt binnen DAILY_STREAK_WINDOW (30u) → +1 dag, anders reset
-    // naar dag 1. Eerste claim (last == 0) = dag 1. Gecapt op DAILY_STREAK_CAP.
-    let streak = if last <= 0.0 || elapsed >= DAILY_STREAK_WINDOW {
+    // Streak: opnieuw geklikt binnen het streak-venster → +1 dag, anders reset naar
+    // dag 1. Eerste claim (last == 0) = dag 1. Gecapt op het streak-plafond.
+    let streak_window = settings::f64_of(&data.pool, "daily_streak_window_hours") * 3600.0;
+    let streak = if last <= 0.0 || elapsed >= streak_window {
         1
     } else {
-        (db::get_daily_streak(&data.pool, &uid) + 1).min(DAILY_STREAK_CAP)
+        (db::get_daily_streak(&data.pool, &uid) + 1)
+            .min(settings::i64_of(&data.pool, "daily_streak_cap_days"))
     };
     // Dag N: ondergrens/bovengrens schuiven mee met de streak.
     let step = streak - 1;
-    let lo = DAILY_BASE_MIN + step * DAILY_MIN_STEP;
-    let hi = DAILY_BASE_MAX + step * DAILY_MAX_STEP;
+    let lo = settings::i64_of(&data.pool, "daily_base_min_coins")
+        + step * settings::i64_of(&data.pool, "daily_min_step_coins");
+    let hi = settings::i64_of(&data.pool, "daily_base_max_coins")
+        + step * settings::i64_of(&data.pool, "daily_max_step_coins");
+    // De twee grenzen zijn los instelbaar, dus een admin kán ze omgekeerd zetten;
+    // `gen_range` zou daarop paniekeren. Ondergrens wint — nooit een leeg bereik.
+    let hi = hi.max(lo);
     let amount = rand::thread_rng().gen_range(lo..=hi);
     let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
     let day_word = if streak == 1 { "day" } else { "days" };
@@ -434,30 +443,43 @@ async fn respond_ephemeral(
     Ok(())
 }
 
-/// Trek een prijs volgens de ACTUELE gewogen verdeling (CHEST_TIERS).
-fn chest_prize() -> i64 {
+/// Trek een prijs volgens de ACTUELE verdeling in `chest_tiers`: eerst een tier
+/// op relatief gewicht, dan een bedrag binnen dat tier-bereik.
+fn chest_prize(pool: &DbPool) -> i64 {
+    let tiers = db::chest_tiers_all(pool);
     let mut rng = rand::thread_rng();
-    let mut roll = rng.gen_range(0..CHEST_TIER_TOTAL);
-    for (w, lo, hi) in CHEST_TIERS {
-        if roll < w {
-            return rng.gen_range(lo..=hi);
-        }
-        roll -= w;
+    let total: f64 = tiers.iter().map(|(_, w, _, _)| w.max(0.0)).sum();
+    // Vangnet: geen tiers (of enkel nul-gewichten) → de laagste historische tier.
+    if total <= 0.0 {
+        return rng.gen_range(50..=80);
     }
-    // Vangnet (mocht de som != CHEST_TIER_TOTAL zijn): laagste tier.
-    let (_, lo, hi) = CHEST_TIERS[0];
-    rng.gen_range(lo..=hi)
+    let mut roll = rng.gen_range(0.0..total);
+    for (_, w, lo, hi) in &tiers {
+        roll -= w.max(0.0);
+        if roll < 0.0 {
+            return rng.gen_range(*lo.min(hi)..=*lo.max(hi));
+        }
+    }
+    let (_, _, lo, hi) = tiers[0];
+    rng.gen_range(lo.min(hi)..=lo.max(hi))
 }
 
-/// Formatteer een tier-tabel als embed-regels ("**X%** · lo–hi coins").
-fn tier_lines(tiers: &[(u32, i64, i64)]) -> String {
+/// Formatteer de tier-tabel als embed-regels ("**X%** · lo–hi coins"). De
+/// percentages worden uit de relatieve gewichten gerekend, dus de embed klopt
+/// ook als een admin de gewichten niet op 100 (of 1000) laat uitkomen.
+fn tier_lines(tiers: &[(i64, f64, i64, i64)]) -> String {
+    let total: f64 = tiers.iter().map(|(_, w, _, _)| w.max(0.0)).sum();
+    if total <= 0.0 {
+        return "_geen verdeling ingesteld_".into();
+    }
     tiers
         .iter()
-        .map(|&(w, lo, hi)| {
-            let pct = if w % 10 == 0 {
-                format!("{}%", w / 10)
+        .map(|&(_, w, lo, hi)| {
+            let pct = w.max(0.0) / total * 100.0;
+            let pct = if (pct - pct.round()).abs() < 0.05 {
+                format!("{}%", pct.round() as i64)
             } else {
-                format!("{:.1}%", w as f64 / 10.0)
+                format!("{pct:.1}%")
             };
             format!("**{pct}** · {lo}–{hi} coins")
         })
@@ -465,12 +487,12 @@ fn tier_lines(tiers: &[(u32, i64, i64)]) -> String {
         .join("\n")
 }
 
-/// Embed met het overzicht: de huidige (live) verdeling + het fijnkorrelige voorstel.
-fn chest_odds_embed() -> serenity::CreateEmbed {
+/// Embed met het overzicht van de live prijsverdeling.
+fn chest_odds_embed(pool: &DbPool) -> serenity::CreateEmbed {
     serenity::CreateEmbed::new()
         .title("🎁 Treasure chest — coin odds")
         .description("What an opened chest can pay out. Odds are per opening; the winner is a random opener.")
-        .field("📊 Odds", tier_lines(&CHEST_TIERS), false)
+        .field("📊 Odds", tier_lines(&db::chest_tiers_all(pool)), false)
         .colour(0xF1_C4_0F)
 }
 
@@ -491,17 +513,17 @@ pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
         ctx.channel_id(),
         data.chest.clone(),
         data.pool.clone(),
-        CHEST_POP_DELAY, // prod-timing
+        pop_delay_secs(&data.pool), // prod-timing
         &[],
     )
     .await?;
     Ok(())
 }
 
-/// `!chestodds` — toon de prijsverdeling (huidig + fijnkorrelig voorstel). Enkel dev-guild.
+/// `!chestodds` — toon de live prijsverdeling. Enkel dev-guild.
 #[poise::command(prefix_command, check = "dev_guild_only")]
 pub async fn chestodds(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.send(poise::CreateReply::default().embed(chest_odds_embed()))
+    ctx.send(poise::CreateReply::default().embed(chest_odds_embed(&ctx.data().pool)))
         .await?;
     Ok(())
 }
@@ -533,7 +555,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
 
     let joiners = db::chest_joiners_from_log(pool, msg_id);
     let joiner_names = joiners.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
-    if joiners.len() < CHEST_MIN_JOINERS {
+    if joiners.len() < settings::usize_of(pool, "chest_min_joiners") {
         ctx.say(format!(
             "⚠️ Chest `{msg_id}` heeft maar {} deelnemer(s) in het log — niks uit te betalen.",
             joiners.len()
@@ -561,7 +583,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
         }
     }
     let (winner_uid, winner_name) = &joiners[idx];
-    let prize = chest_prize();
+    let prize = chest_prize(pool);
     let total = db::award(pool, winner_uid, winner_name, prize, now_secs());
     log_earn(http.as_ref(), winner_name, prize, total).await;
     tracing::info!(
@@ -579,7 +601,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
             .detail(format!("RESCUE — won uit {} deelnemer(s): {joiner_names}", joiners.len())),
     );
     // Cooldown alsnog zetten (geheugen + schijf), net als een echte opening.
-    let until = now_secs() + CHEST_CHANNEL_COOLDOWN;
+    let until = now_secs() + settings::f64_of(pool, "chest_channel_cooldown_min") * 60.0;
     ctx.data().chest.lock().unwrap().cooldown_until.insert(channel.get(), until);
     db::set_chest_cooldown(pool, channel.get(), until);
     // Uit de tracker + persistente lijst (mocht hij er nog in zitten).
@@ -617,11 +639,14 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
 }
 
 /// Bouw de chest-embed voor het huidige aantal deelnemers. Onder de drempel
-/// (CHEST_MIN_JOINERS) toont hij "It will despawn <t:R>." + "Needs N more
+/// (`chest_min_joiners`) toont hij "It will despawn <t:R>." + "Needs N more
 /// participant(s)."; zodra er genoeg deelnemers zijn verdwijnt die regel en
 /// wordt het "It will open <t:R>.". Herbruikt bij spawn én bij elke klik.
-fn chest_embed(pop_ts: i64, joiners: usize) -> serenity::CreateEmbed {
-    let enough = joiners >= CHEST_MIN_JOINERS;
+/// De drempel wordt hier live gelezen, dus de ticker toont een wijziging in
+/// Settings ook aan een chest die al openstaat.
+fn chest_embed(pool: &DbPool, pop_ts: i64, joiners: usize) -> serenity::CreateEmbed {
+    let min_joiners = settings::usize_of(pool, "chest_min_joiners");
+    let enough = joiners >= min_joiners;
     let verb = if enough { "open" } else { "despawn" };
     // Resterende tijd als M:SS — een ticker-taak werkt de embed periodiek bij zodat
     // dit zichtbaar aftelt (Discord's <t:R> telt boven 1 min niet per seconde af).
@@ -631,7 +656,7 @@ fn chest_embed(pop_ts: i64, joiners: usize) -> serenity::CreateEmbed {
     let mut desc =
         format!("### See if you win the **grand prize**! It will **{verb}** in **{mm}:{ss:02}**.");
     if !enough {
-        let need = CHEST_MIN_JOINERS - joiners;
+        let need = min_joiners - joiners;
         let p = if need == 1 { "participant" } else { "participants" };
         desc.push_str(&format!("\nNeeds **{need}** more {p}."));
     }
@@ -660,7 +685,7 @@ async fn do_spawn_chest(
         .style(serenity::ButtonStyle::Success);
     let pop_ts = (now_secs() + pop_delay as f64) as i64;
     let builder = serenity::CreateMessage::new()
-        .embed(chest_embed(pop_ts, 0)) // afbeeldingen via URL → geen attachments
+        .embed(chest_embed(&pool, pop_ts, 0)) // afbeeldingen via URL → geen attachments
         .components(vec![serenity::CreateActionRow::Buttons(vec![button])]);
     let sent = channel_id.send_message(&http, builder).await?;
     let msg_id = sent.id.get();
@@ -727,6 +752,7 @@ fn schedule_chest_tasks(
     // Ticker: werk de M:SS-timer elke CHEST_TICK_SECS bij tot de chest weg is.
     let http3 = http.clone();
     let tracker3 = tracker.clone();
+    let pool3 = pool.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(CHEST_TICK_SECS)).await;
@@ -737,7 +763,7 @@ fn schedule_chest_tasks(
             match info {
                 Some((pop_ts, n)) if (pop_ts as f64) > now_secs() + 1.0 => {
                     let builder =
-                        serenity::EditMessage::new().embeds(vec![chest_embed(pop_ts, n)]);
+                        serenity::EditMessage::new().embeds(vec![chest_embed(&pool3, pop_ts, n)]);
                     let _ = channel_id
                         .edit_message(http3.as_ref(), serenity::MessageId::new(msg_id), builder)
                         .await;
@@ -756,7 +782,7 @@ async fn maybe_spawn_chest(
     msg: &serenity::Message,
     data: &Data,
 ) -> Result<(), Error> {
-    if !CHEST_ENABLED {
+    if !settings::bool_of(&data.pool, "chest_enabled") {
         return Ok(());
     }
     // Natuurlijke chests spawnen ENKEL in het aangewezen kanaal (Magic Meadow #general).
@@ -772,6 +798,10 @@ async fn maybe_spawn_chest(
         .clone()
         .unwrap_or_else(|| msg.author.name.clone());
 
+    // Lees de spawn-drempels vóór de lock: `settings::*` doet een DB-query en die
+    // hoort niet binnen een gehouden Mutex.
+    let window = settings::f64_of(&data.pool, "chest_window_min") * 60.0;
+    let distinct_needed = settings::usize_of(&data.pool, "chest_distinct_users");
     // Beslis onder de lock: registreer de chatter, prune het venster, tel distinct.
     // Bij een spawn houden we de triggerende chatters (uid, naam) bij om te loggen.
     let (spawn, triggers) = {
@@ -780,12 +810,12 @@ async fn maybe_spawn_chest(
         let active = t.active.contains(&chan);
         let distinct = {
             let v = t.recent.entry(chan).or_default();
-            v.retain(|(_, _, ts)| now - *ts < CHEST_WINDOW); // verlopen entries weg
+            v.retain(|(_, _, ts)| now - *ts < window); // verlopen entries weg
             v.retain(|(u, _, _)| u != &uid); // oude entry van deze uid weg (verse ts erbij)
             v.push((uid.clone(), name.clone(), now));
             v.iter().map(|(u, _, _)| u.as_str()).collect::<HashSet<_>>().len()
         };
-        let go = !on_cd && !active && distinct >= CHEST_DISTINCT_USERS;
+        let go = !on_cd && !active && distinct >= distinct_needed;
         let mut triggers: Vec<(String, String)> = Vec::new();
         if go {
             if let Some(v) = t.recent.get_mut(&chan) {
@@ -812,7 +842,7 @@ async fn maybe_spawn_chest(
         msg.channel_id,
         data.chest.clone(),
         data.pool.clone(),
-        CHEST_POP_DELAY,
+        pop_delay_secs(&data.pool),
         &triggers,
     )
     .await
@@ -874,7 +904,7 @@ async fn handle_chest_click(
     // deelnemers verdwijnt die regel en wordt "despawn" → "open").
     if let Some((pop_ts, n)) = edit {
         // Afbeeldingen zitten via URL in de embed → gewoon de embed bijwerken.
-        let builder = serenity::EditMessage::new().embeds(vec![chest_embed(pop_ts, n)]);
+        let builder = serenity::EditMessage::new().embeds(vec![chest_embed(&data.pool, pop_ts, n)]);
         if let Err(e) = mc.channel_id.edit_message(&ctx.http, mc.message.id, builder).await {
             tracing::warn!("kan chest-embed niet bijwerken: {e}");
         }
@@ -882,7 +912,7 @@ async fn handle_chest_click(
     let text = match joined {
         None => format!(
             "📦 Too late — make sure you click within **{} minutes** next time!",
-            CHEST_POP_DELAY / 60
+            pop_delay_secs(&data.pool) / 60
         ),
         Some(0) => "🎁 You're already in! Sit tight for the opening.".to_string(),
         Some(_) => "🎁 You're successfully trying to open the chest!".to_string(),
@@ -918,7 +948,7 @@ async fn pop_chest(
     }
 
     // Haal de chest eruit, geef het kanaal vrij, zet de cooldown.
-    let cooldown_until = now_secs() + CHEST_CHANNEL_COOLDOWN;
+    let cooldown_until = now_secs() + settings::f64_of(&pool, "chest_channel_cooldown_min") * 60.0;
     let (joiners, cd_channel) = {
         let mut t = tracker.lock().unwrap();
         let chest = t.chests.remove(&msg_id);
@@ -957,7 +987,7 @@ async fn pop_chest(
         .join(", ");
 
     // Te weinig deelnemers → despawn: niks weggeven, wel een "Fortuna cries"-embed.
-    if joiners.len() < CHEST_MIN_JOINERS {
+    if joiners.len() < settings::usize_of(&pool, "chest_min_joiners") {
         tracing::info!(
             "chest despawned in kanaal {channel_id} (te weinig deelnemers: {})",
             joiners.len()
@@ -1013,7 +1043,7 @@ async fn pop_chest(
         }
     }
     let (winner_uid, winner_name) = &joiners[idx];
-    let prize = chest_prize();
+    let prize = chest_prize(&pool);
     let total = db::award(&pool, winner_uid, winner_name, prize, now_secs());
     log_earn(http.as_ref(), winner_name, prize, total).await;
     let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };

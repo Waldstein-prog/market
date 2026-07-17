@@ -120,6 +120,30 @@ pub fn init_pool(path: &str) -> DbPool {
             message_id TEXT PRIMARY KEY,   -- Discord-bericht-id van de open chest
             channel_id TEXT NOT NULL,
             pop_ts     INTEGER NOT NULL     -- epoch-seconden waarop de chest hoort te poppen
+        );
+        -- Admin-instelbare spelparameters. Bot én site lezen deze LIVE (zoals
+        -- coin_channels), dus een wijziging via Manage → Settings werkt meteen,
+        -- zonder herstart. Waarde als TEXT; `settings.rs` kent het type + default.
+        -- De unit zit in de KEY (_sec/_min/_hours) — zo is een eenheidsfout
+        -- zichtbaar op de call-site i.p.v. verstopt in een conversie.
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        -- Gewogen coin-award per bericht: één rij per uitkomst. `weight` is
+        -- RELATIEF (som hoeft geen 100 te zijn) en REAL, zodat 'half zoveel
+        -- kans' letterlijk 0.5 is. Leeg = vangnet in coin_amount().
+        CREATE TABLE IF NOT EXISTS coin_weights (
+            amount INTEGER PRIMARY KEY,     -- hoeveel coins deze uitkomst geeft (0 mag)
+            weight REAL NOT NULL            -- relatief gewicht, > 0
+        );
+        -- Prijsverdeling van een chest: gewicht + coin-bereik per tier.
+        CREATE TABLE IF NOT EXISTS chest_tiers (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            weight   REAL NOT NULL,          -- relatief gewicht, > 0
+            lo       INTEGER NOT NULL,       -- min coins (inclusief)
+            hi       INTEGER NOT NULL,       -- max coins (inclusief)
+            position INTEGER NOT NULL DEFAULT 0
         );",
     )
     .expect("kan tabel niet aanmaken");
@@ -224,7 +248,51 @@ pub fn init_pool(path: &str) -> DbPool {
     // Shop, en de categorie-migratie hierboven zou een re-seed telkens naar 'inventory'
     // omzetten. Bestaande (geseede + eigen) items blijven gewoon staan.
     seed_horseshoe(&pool);
+    seed_weights(&pool);
     pool
+}
+
+/// Seed de twee weegtabellen als ze leeg zijn — enkel dán, zodat een admin een
+/// rij mag wegdoen zonder dat de volgende start hem terugzet. Een tabel volledig
+/// leegmaken is wél een re-seed: dat is de "geef me de standaardverdeling terug"-weg.
+fn seed_weights(pool: &DbPool) {
+    let conn = pool.get().expect("db");
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM coin_weights", [], |r| r.get(0)).unwrap_or(0);
+    if n == 0 {
+        // Coins per bericht: 0..3 even waarschijnlijk, 4 half zo vaak, 5 een tiende
+        // (user-beslissing 2026-07-17). Gewichten zijn RELATIEF — som 4.6, geen 100.
+        for (amount, weight) in [(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 0.5), (5, 0.1)] {
+            conn.execute(
+                "INSERT INTO coin_weights (amount, weight) VALUES (?1, ?2)",
+                params![amount as i64, weight as f64],
+            )
+            .expect("seed coin_weights");
+        }
+    }
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM chest_tiers", [], |r| r.get(0)).unwrap_or(0);
+    if n == 0 {
+        // De 10-tier chest-verdeling zoals ze sinds 2026-07-14 live stond, 1:1
+        // overgenomen uit de oude CHEST_TIERS-const (gewichten waren ‰ van 1000).
+        let tiers: [(f64, i64, i64); 10] = [
+            (400.0, 50, 80),
+            (220.0, 80, 120),
+            (140.0, 120, 180),
+            (90.0, 180, 260),
+            (60.0, 260, 360),
+            (40.0, 360, 480),
+            (25.0, 480, 620),
+            (15.0, 620, 760),
+            (7.0, 760, 880),
+            (3.0, 880, 1000),
+        ];
+        for (i, (weight, lo, hi)) in tiers.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO chest_tiers (weight, lo, hi, position) VALUES (?1, ?2, ?3, ?4)",
+                params![weight, lo, hi, i as i64],
+            )
+            .expect("seed chest_tiers");
+        }
+    }
 }
 
 /// Seed de Lucky Horseshoe (idempotent op naam) op een eigen 'Boosters'-schap.
@@ -2388,4 +2456,98 @@ pub fn log_categories(pool: &DbPool) -> Vec<String> {
         .expect("query log_categories")
         .filter_map(Result::ok)
         .collect()
+}
+
+// --- admin-instelbare spelparameters ------------------------------------
+// Alles hieronder wordt LIVE gelezen (elke aanroep = één query), zoals
+// `is_coin_channel`. Geen cache: een wijziging via Manage → Settings geldt bij
+// het eerstvolgende bericht/chest, zonder herstart. De type-kennis en de
+// defaults zitten in `settings.rs`, niet hier.
+
+/// Ruwe waarde van één setting; `None` = nooit gezet → `settings.rs` neemt de default.
+pub fn setting_get(pool: &DbPool, key: &str) -> Option<String> {
+    let conn = pool.get().expect("db");
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+        .optional()
+        .expect("q setting")
+}
+
+pub fn setting_set(pool: &DbPool, key: &str, value: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .expect("set setting");
+}
+
+/// De gewogen coin-uitkomsten per bericht, oplopend op bedrag.
+/// Leeg = de tabel is nooit geseed → `bot::coin_amount` gebruikt zijn vangnet.
+pub fn coin_weights_all(pool: &DbPool) -> Vec<(i64, f64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT amount, weight FROM coin_weights ORDER BY amount")
+        .expect("prepare coin_weights");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query coin_weights")
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Voeg een uitkomst toe of wijzig het gewicht ervan (`amount` is de sleutel).
+pub fn coin_weight_set(pool: &DbPool, amount: i64, weight: f64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coin_weights (amount, weight) VALUES (?1, ?2)
+         ON CONFLICT(amount) DO UPDATE SET weight = excluded.weight",
+        params![amount, weight],
+    )
+    .expect("set coin_weight");
+}
+
+pub fn coin_weight_delete(pool: &DbPool, amount: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM coin_weights WHERE amount = ?1", params![amount])
+        .expect("del coin_weight");
+}
+
+/// De chest-prijsverdeling, in weergavevolgorde.
+pub fn chest_tiers_all(pool: &DbPool) -> Vec<(i64, f64, i64, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT id, weight, lo, hi FROM chest_tiers ORDER BY position, id")
+        .expect("prepare chest_tiers");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .expect("query chest_tiers")
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Nieuwe tier onderaan; geeft het nieuwe id terug.
+pub fn chest_tier_add(pool: &DbPool, weight: f64, lo: i64, hi: i64) -> i64 {
+    let conn = pool.get().expect("db");
+    let pos: i64 = conn
+        .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM chest_tiers", [], |r| r.get(0))
+        .expect("q tier pos");
+    conn.execute(
+        "INSERT INTO chest_tiers (weight, lo, hi, position) VALUES (?1, ?2, ?3, ?4)",
+        params![weight, lo, hi, pos],
+    )
+    .expect("add chest_tier");
+    conn.last_insert_rowid()
+}
+
+pub fn chest_tier_update(pool: &DbPool, id: i64, weight: f64, lo: i64, hi: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE chest_tiers SET weight = ?2, lo = ?3, hi = ?4 WHERE id = ?1",
+        params![id, weight, lo, hi],
+    )
+    .expect("update chest_tier");
+}
+
+pub fn chest_tier_delete(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM chest_tiers WHERE id = ?1", params![id]).expect("del chest_tier");
 }

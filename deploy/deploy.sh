@@ -13,20 +13,29 @@ REMOTE="${MARKET_REMOTE:-hytale}"
 DEST="/opt/market"
 cd "$(dirname "$0")/.."
 
+# Volgorde is bewust: ALLES wat traag is (build, scp, daemon-reload) gebeurt
+# terwijl de oude bot gewoon doordraait. Pas als alle bytes al op de server
+# staan, stoppen we — en dan is de onderbreking enkel de restart zelf (~2s)
+# i.p.v. de hele netwerkoverdracht. `install` op een draaiende binary kan niet
+# (ETXTBSY), vandaar de losse /tmp-stage en de swap ná de stop.
 echo "== 1/5 build (release) =="
 cargo build --release
 
-echo "== 2/5 service stoppen (indien actief) =="
-ssh "$REMOTE" 'systemctl stop market 2>/dev/null || true'
-
-echo "== 3/5 binary kopiëren =="
+echo "== 2/5 binary + unit klaarzetten (bot draait nog) =="
 scp target/release/market "$REMOTE:/tmp/market.new"
-ssh "$REMOTE" "install -o market -g market -m 755 /tmp/market.new $DEST/market && rm -f /tmp/market.new"
-
-echo "== 4/5 systemd-unit plaatsen =="
 scp deploy/market.service "$REMOTE:/tmp/market.service"
-ssh "$REMOTE" 'install -m 644 /tmp/market.service /etc/systemd/system/market.service && rm -f /tmp/market.service && systemctl daemon-reload'
 
-echo "== 5/5 starten + status =="
-ssh "$REMOTE" 'systemctl enable --now market && sleep 3 && systemctl --no-pager --lines=0 status market | head -6'
+echo "== 3/5 unit plaatsen + daemon-reload (bot draait nog) =="
+ssh "$REMOTE" 'install -m 644 /tmp/market.service /etc/systemd/system/market.service \
+  && rm -f /tmp/market.service && systemctl daemon-reload'
+
+# Stop → swap → start in ÉÉN ssh-sessie: geen extra round-trips (elk ~60ms naar
+# Hetzner) in het venster waarin de bot plat ligt.
+echo "== 4/5 swap + herstart (korte onderbreking) =="
+ssh "$REMOTE" "systemctl stop market 2>/dev/null || true; \
+  install -o market -g market -m 755 /tmp/market.new $DEST/market && rm -f /tmp/market.new; \
+  systemctl enable --now market"
+
+echo "== 5/5 status =="
+ssh "$REMOTE" 'sleep 3 && systemctl --no-pager --lines=0 status market | head -6'
 echo "== klaar — logs: ssh $REMOTE 'journalctl -u market -f' =="
