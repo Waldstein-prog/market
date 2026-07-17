@@ -57,6 +57,9 @@ const HYTALE_PASS_PNG: &[u8] = include_bytes!("../artwork/HytalePass_Button.png"
 const SPICY_SALE_TTF: &[u8] = include_bytes!("../artwork/fonts/spicy-sale.ttf");
 // Prod-guild (Magic Meadow): de coins-beheerpagina + kanalen-picklist lezen hiervan.
 const COINS_GUILD_ID: &str = "1296469405651435592";
+// Coins-aankondigingskanaal per omgeving (aankoopmeldingen). Prod = 🪙meadowcoins, dev = coins.
+const PROD_COINS_CHANNEL_ID: &str = "1403044480218824794";
+const DEV_COINS_CHANNEL_ID: &str = "1525189157104648343";
 // Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
 /// Herlaadt de pagina periodiek, maar **niet** terwijl je in een veld staat — anders
 /// verdwijnt een half ingetypte waarde onder je handen. Scrollpositie: zie KEEP_SCROLL_JS.
@@ -150,6 +153,15 @@ fn color_guild(cfg: &Config) -> String {
         cfg.guild_id.clone()
     } else {
         COINS_GUILD_ID.to_string()
+    }
+}
+
+/// Het coins-kanaal voor aankoopmeldingen: dev-kanaal in dev, prod #coins in prod.
+fn coins_channel(cfg: &Config) -> &'static str {
+    if cfg.environment.eq_ignore_ascii_case("dev") {
+        DEV_COINS_CHANNEL_ID
+    } else {
+        PROD_COINS_CHANNEL_ID
     }
 }
 
@@ -2087,6 +2099,18 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                     .amount(item.price)
                     .detail(item.name.clone()),
             );
+            // Publieke aankoopmelding in #coins (async, mag de redirect niet ophouden en
+            // een Discord-hapering mag de aankoop niet breken).
+            let dc = st.dc.clone();
+            let chan = coins_channel(&st.cfg).to_string();
+            let article = match item.name.chars().next().map(|c| c.to_ascii_lowercase()) {
+                Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
+                _ => "a",
+            };
+            let announce = format!("**{}** bought {} **{}** gem.", name, article, item.name);
+            tokio::spawn(async move {
+                let _ = dc.send_channel_message(&chan, &announce).await;
+            });
             format!("/market?from={}", bal + item.price)
         }
         Err(e) => format!("/market?err={}", pct(&e)),

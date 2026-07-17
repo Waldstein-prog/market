@@ -247,6 +247,25 @@ impl Discord {
         }
         Ok(())
     }
+
+    /// Post een tekstbericht in een kanaal (bv. shop-aankoopmeldingen in #coins).
+    /// Los van de gateway-bot: gewone REST-POST met het bot-token.
+    pub async fn send_channel_message(&self, channel_id: &str, content: &str) -> Result<(), String> {
+        let url = format!("{API}/channels/{channel_id}/messages");
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth())
+            .json(&serde_json::json!({ "content": content }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+        }
+        Ok(())
+    }
 }
 
 fn explain(code: u16, body: &str) -> String {
