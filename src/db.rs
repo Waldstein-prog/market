@@ -326,9 +326,13 @@ fn seed_horseshoe(pool: &DbPool) {
 
 /// De dagelijkse shop-selectie: `n` items voor `day`, stabiel bewaard in
 /// daily_shop. Pool = de **gems** (category 'inventory'); de Hytale-passen vallen
-/// er bewust buiten (staan altijd apart te koop). De **Lucky Horseshoe** (booster)
-/// is zeldzaam: hij pakt met kans **1/`booster_odds_days`** één dagslot, anders is de
-/// shop gems-only. De selectie is voor iedereen dezelfde — dat maakt verzamelen spannender.
+/// er bewust buiten (staan altijd apart te koop). **Boosters** (category 'booster',
+/// bv. de Lucky Horseshoe) zijn zeldzaam: met kans **1/`booster_odds_days`** pakt er
+/// vandaag één een dagslot, anders is de shop gems-only. Die worp weet niets van hoevéél
+/// boosters er bestaan — het blijft altijd hoogstens één boosterslot per dag. Áls de worp
+/// valt, wordt willekeurig (gelijke kans) één booster uit de hele pot gekozen; nieuwe
+/// boosteritems delen dus automatisch in dezelfde 1-per-N-dagen-kans. De selectie is voor
+/// iedereen dezelfde — dat maakt verzamelen spannender.
 pub fn shop_offers(pool: &DbPool, day: i64, n: i64, booster_odds_days: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut ids: Vec<i64> = {

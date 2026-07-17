@@ -52,6 +52,9 @@ const TICKET_IMG: &[u8] = include_bytes!("../artwork/24hHytale.png");
 const CHEST_PNG: &[u8] = include_bytes!("../artwork/treasure chest.png"); // chest-embed image via URL (/img/chest.png)
 /// Ronde Hytale-knop; draagt de aflopende pas-timer op de Coins-tab (/img/hytalepass.png).
 const HYTALE_PASS_PNG: &[u8] = include_bytes!("../artwork/HytalePass_Button.png");
+/// "Spicy Sale"-display-font (1001fonts.com, gratis personal+commercial), ingebakken in de
+/// binary en geserveerd op /fonts/spicy-sale.ttf — gebruikt voor de "Basic Gems"-titel.
+const SPICY_SALE_TTF: &[u8] = include_bytes!("../artwork/fonts/spicy-sale.ttf");
 // Prod-guild (Magic Meadow): de coins-beheerpagina + kanalen-picklist lezen hiervan.
 const COINS_GUILD_ID: &str = "1296469405651435592";
 // Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
@@ -227,6 +230,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/img/ticket.png", get(serve_ticket))
         .route("/img/chest.png", get(serve_chest))
         .route("/img/hytalepass.png", get(serve_hytale_pass))
+        .route("/fonts/spicy-sale.ttf", get(serve_spicy_sale_font))
         .route("/info", get(info_page))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
@@ -493,7 +497,7 @@ a.link{{color:{MEADOW}}}
 .shelf{{display:flex;gap:.6rem;overflow-x:auto;padding:.2rem 0 .5rem}}
 /* Inventory: gems mogen niet in een zijwaartse schuifstrip verdwijnen — laat ze
    gewoon doorlopen en afbreken over een paar rijen, zodat je alles in één blik ziet. */
-.shelf.wrap{{flex-wrap:wrap;overflow-x:visible}}
+.shelf.wrap{{flex-wrap:wrap;overflow-x:visible;justify-content:center}}
 .shelf .slot{{flex:0 0 auto;width:136px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
@@ -501,6 +505,10 @@ a.link{{color:{MEADOW}}}
 .shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700;
   display:flex;align-items:center;gap:.5rem}}
+@font-face{{font-family:'Spicy Sale';src:url('/fonts/spicy-sale.ttf') format('truetype');font-display:swap}}
+.shelf-title.center{{justify-content:center}}
+/* Basic Gems-titel in de sier-font 'Spicy Sale' — iets groter zodat het karakter opvalt. */
+.shelf-title.fancy{{font-family:'Spicy Sale',cursive;font-size:1.9rem;font-weight:400;letter-spacing:.02em}}
 .reroll-f{{display:inline;margin:0}}
 .reroll{{background:transparent;border:1px solid #2c3d2a;color:#9db095;border-radius:999px;
   width:1.6rem;height:1.6rem;padding:0;font-size:.9rem;line-height:1;cursor:pointer;
@@ -1060,7 +1068,7 @@ fn inventory_home(
     let collection = if slots.is_empty() {
         String::new()
     } else {
-        format!("<h2 class=\"shelf-title\">Basic Gems</h2><div class=\"shelf wrap\">{slots}</div>")
+        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap\">{slots}</div>")
     };
     // Admin-testhulp: verzamel-aankopen terugdraaien (coins terug). (Sync gem colors staat
     // op de Manage-pagina.)
@@ -1127,13 +1135,19 @@ fn inventory_home(
         let booster_owned: std::collections::HashSet<i64> =
             db::owned_item_ids(pool, uid).into_iter().collect();
         let boosters = db::all_booster_items(pool);
-        let shelf = if boosters.is_empty() {
+        let mut cards: String = boosters
+            .iter()
+            .map(|it| booster_slot(it, booster_owned.contains(&it.id)))
+            .collect();
+        // Permanente pas als greyed-out verzamelvakje — hoort visueel het best hier. LET OP:
+        // hij is category 'boost', NIET 'booster', dus hij zit NOOIT in de rnd-korf en blijft
+        // altijd gewoon in de shop te koop. Onthuld zodra je permanente toegang bezit.
+        if let Some(perma) = db::boost_items(pool).into_iter().find(|it| it.duration == 0) {
+            cards.push_str(&booster_slot(&perma, db::has_perma_access(pool, uid)));
+        }
+        let shelf = if cards.is_empty() {
             String::new()
         } else {
-            let cards: String = boosters
-                .iter()
-                .map(|it| booster_slot(it, booster_owned.contains(&it.id)))
-                .collect();
             format!("<h2 class=\"shelf-title\">🍀 Boosters</h2><div class=\"shelf\">{cards}</div>")
         };
         format!("{status}{name_block}{shelf}")
@@ -1411,6 +1425,25 @@ fn thumb_html(image: &str, color: &str) -> String {
     }
 }
 
+/// Getal met een punt als duizendtal-scheidingsteken: 1000 → "1.000", 20000 → "20.000".
+/// Puur cosmetisch, voor bedragen die spelers zien (bv. shop-prijzen).
+fn dots(n: i64) -> String {
+    let neg = n < 0;
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push('.');
+        }
+        out.push(c);
+    }
+    if neg {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
 fn item_thumb(it: &db::Item) -> String {
     // Een zelf geüploade afbeelding wint altijd. De dagpas kreeg vroeger onvoorwaardelijk
     // het ingebakken ticket-icoon, waardoor een upload wél opsloeg maar nooit te zien was
@@ -1506,7 +1539,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
          <div class=\"price\">{MC} {price}</div>{stock}{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
-        price = it.price,
+        price = dots(it.price),
     )
 }
 
@@ -3904,6 +3937,18 @@ async fn serve_hytale_pass() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         HYTALE_PASS_PNG,
+    )
+        .into_response()
+}
+
+/// De ingebakken "Spicy Sale"-display-font serveren (voor de Basic Gems-titel).
+async fn serve_spicy_sale_font() -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "font/ttf"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        SPICY_SALE_TTF,
     )
         .into_response()
 }
