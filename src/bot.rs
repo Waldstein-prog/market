@@ -24,6 +24,7 @@ const COIN_CHANNEL_ID: u64 = 1229046340793663488; // #general: enkel hier coins 
 const FORTUNA_LOG_CHANNEL_ID: u64 = 1526181603624226938; // Magic Meadow #fortuna-log: elke coin-verdienste (0 = uit)
 const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 0; // saldo-log uit op prod (fortuna-log dekt de verdiensten)
 const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
+const DEV_COINS_CHANNEL_ID: u64 = 1525189157104648343; // dev "coins" — preview van de correctie-embeds vóór prod
 const PROD_GENERAL_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow ☀️general (weekly zaterdag 15u)
 const PROD_GUILD_ID: u64 = 1296469405651435592; // Magic Meadow — leave/rejoin-archief triggert enkel hier
 const HOURLY_SHOUTOUT_MIN: i64 = 1; // drempel: minstens 1 coin verdiend in het afgelopen uur
@@ -35,6 +36,16 @@ const HOURLY_TEST_INTERVAL: f64 = 2.0 * 60.0; // test: interval én venster (s)
 const HOURLY_TEST_MIN: i64 = 1; // test-drempel
 // De custom Meadowcoins-emoji (guild-emoji). Bots moeten <:naam:id> sturen, niet :naam:.
 const COIN_EMOJI: &str = "<:Meadowcoins:1526188363110023308>"; // Magic Meadow-emoji; bot zit in prod → rendert op beide guilds
+
+// Level-up-embed: het stukje ná de komma varieert willekeurig. Exact de teksten van de
+// user — NIET zelf uitbreiden (elke speler-zichtbare tekst is een beslissing van de user).
+const LEVELUP_VARIANTS: &[&str] = &[
+    "super inspiring!",
+    "terrifically done",
+    "be proud of you!",
+    "you did amazing!",
+    "lots of praise to you!",
+];
 const PREFIX: &str = "!"; // deze berichten leveren geen coins op (oude commando-syntax)
 // --- daily-beloning (embed-knop) ----------------------------------------
 // Streak-daily: dag 1 = random in [daily_base_min_coins, daily_base_max_coins].
@@ -178,44 +189,14 @@ async fn handle_message(
 
     let cooldown = settings::f64_of(&data.pool, "msg_cooldown_sec");
     if elapsed >= cooldown {
-        let old_earned = db::get_stats(&data.pool, &uid).3; // total_earned vóór award
         let amount = coin_amount(&data.pool);
         let total = db::award(&data.pool, &uid, &name, amount, now);
         tracing::info!("{name}: +{amount} coins (totaal {total})");
         // Een award van 0 is een geldige uitkomst (rij `0` in coin_weights) en wordt
         // gelogd als elke andere: stilte las als een bug, niet als pech.
         log_earn(&ctx.http, &name, amount, total).await;
-        // Level-up? → 1% van het saldo cadeau + privé-melding (DM) aan het lid.
-        let new_level = db::level_of(old_earned + amount);
-        if new_level > db::level_of(old_earned) {
-            let gift = total / 100; // 1% van het saldo
-            if gift > 0 {
-                db::admin_add_coins(&data.pool, &uid, &name, gift);
-            }
-            // Logboek: level-up + de 1%-bonus (discreet coin-cadeau, geen per-bericht-ruis).
-            db::log_event(
-                &data.pool,
-                now,
-                &db::LogEntry::new("level", "levelup")
-                    .actor(&uid, &name)
-                    .amount(gift)
-                    .detail(format!("reached level {new_level}")),
-            );
-            let new_bal = total + gift;
-            let txt = if gift > 0 {
-                format!("🎉 <@{uid}> reached **Level {new_level}**! A **1% bonus** landed in their purse: **+{gift}** {COIN_EMOJI} — balance now **{new_bal}**.")
-            } else {
-                format!("🎉 <@{uid}> reached **Level {new_level}**! 🚀")
-            };
-            // NOOIT een DM. Publiek bericht in het kanaal waar men levelde + in prod #coins.
-            let _ = msg.channel_id.say(&ctx.http, txt.as_str()).await;
-            // Ook in prod #coins, tenzij men net dáár levelde (geen dubbel bericht).
-            if PROD_COINS_CHANNEL_ID != 0 && msg.channel_id.get() != PROD_COINS_CHANNEL_ID {
-                let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
-                    .say(&ctx.http, txt.as_str())
-                    .await;
-            }
-        }
+        // Level-up? → embed met claim-knop in #coins (gecentraliseerd, zie maybe_levelup).
+        maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
         if COIN_FEEDBACK {
             msg.reply(ctx, format!("{COIN_EMOJI} +{amount} coins! Total: **{total}**"))
                 .await?;
@@ -309,6 +290,10 @@ async fn event_handler(
                     handle_daily(ctx, mc, data).await?;
                 } else if mc.data.custom_id == CHEST_CUSTOM_ID {
                     handle_chest_click(ctx, mc, data).await?;
+                } else if mc.data.custom_id.starts_with("lg:") {
+                    handle_level_claim(ctx, mc, data).await?;
+                } else if mc.data.custom_id.starts_with("lgprev:") {
+                    handle_level_preview(ctx, mc).await?;
                 } else if mc.data.custom_id == SITE_ACCESS_CUSTOM_ID {
                     // De site-gate stuurt niet-admins naar /info; admins mogen de market in.
                     // Admins krijgen een login-link die na inloggen meteen op /market landt
@@ -382,6 +367,8 @@ async fn handle_daily(
     let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
     let day_word = if streak == 1 { "day" } else { "days" };
     tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
+    // Daily kan je over een levelgrens tillen → level-up-check.
+    maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
     // Logboek: dagelijkse check-in (bedrag + streak) — zodat coin-instroom te volgen is.
     db::log_event(
         &data.pool,
@@ -437,6 +424,159 @@ async fn respond_ephemeral(
     )
     .await?;
     Ok(())
+}
+
+// --- level-up-cadeaus ----------------------------------------------------
+
+/// Bouw de "LEVEL UP!"-embed. Het stukje na de komma varieert willekeurig uit
+/// `LEVELUP_VARIANTS`. `[tag]` = een mention (pingt), het levelgetal staat vet.
+fn levelup_embed(uid: &str, level: i64) -> serenity::CreateEmbed {
+    let variant = LEVELUP_VARIANTS[rand::thread_rng().gen_range(0..LEVELUP_VARIANTS.len())];
+    serenity::CreateEmbed::new()
+        .title("LEVEL UP!")
+        .description(format!("<@{uid}>, you are now level **{level}**, {variant}"))
+        .footer(serenity::CreateEmbedFooter::new("click below to claim your reward"))
+        .colour(0xF1_C4_0F)
+}
+
+/// De 🎁-claim-knop (één knop-rij) met een gegeven custom_id.
+fn claim_button_row(custom_id: String) -> serenity::CreateActionRow {
+    serenity::CreateActionRow::Buttons(vec![serenity::CreateButton::new(custom_id)
+        .emoji('🎁')
+        .label("Claim reward")
+        .style(serenity::ButtonStyle::Success)])
+}
+
+/// Level-up-check: post een embed + claim-knop voor élk nieuw level boven de marker.
+/// Zelfhelend — een level-up die via daily/chest/admin liep, wordt hier alsnog opgepikt
+/// zodra het lid weer coins verdient. Cadeau = 1,5% van het huidige saldo, half naar boven
+/// (via `admin_add_coins` bij de claim → telt niet mee voor `total_earned`, dus geen cascade).
+async fn maybe_levelup(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, name: &str) {
+    let (coins, _max, _pub, earned) = db::get_stats(pool, uid);
+    let cur = db::level_of(earned);
+    let gifted = db::get_gifted_level(pool, uid);
+    if cur <= gifted {
+        return;
+    }
+    let now = now_secs();
+    for level in (gifted + 1)..=cur {
+        let amount = ((coins as f64) * 0.015).round() as i64;
+        let gid = db::create_level_gift(pool, uid, amount, level, "levelup", now);
+        db::log_event(
+            pool,
+            now,
+            &db::LogEntry::new("level", "levelup")
+                .actor(uid, name)
+                .amount(amount)
+                .detail(format!("reached level {level}")),
+        );
+        if PROD_COINS_CHANNEL_ID != 0 {
+            let builder = serenity::CreateMessage::new()
+                .embed(levelup_embed(uid, level))
+                .components(vec![claim_button_row(format!("lg:{gid}"))]);
+            let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+                .send_message(http, builder)
+                .await;
+        }
+    }
+    db::set_gifted_level(pool, uid, cur);
+}
+
+/// Klik op een 🎁-claim-knop: keert het cadeau eenmalig uit aan de eigenaar en post een
+/// publiek regeltje. Dubbelklik of een andere klikker → ephemeral melding, geen uitkering.
+async fn handle_level_claim(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    let gid: i64 = mc
+        .data
+        .custom_id
+        .strip_prefix("lg:")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(-1);
+    let uid = mc.user.id.to_string();
+    let name = mc
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| mc.user.name.clone());
+    match db::claim_level_gift(&data.pool, gid, &uid, &name) {
+        db::GiftClaim::Granted(amount) => {
+            // Stil acken + de knop uitschakelen (voorkomt herklikken, toont "Claimed").
+            let _ = mc
+                .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+                .await;
+            let done = serenity::CreateButton::new(format!("lg:{gid}"))
+                .emoji('🎁')
+                .label("Claimed")
+                .style(serenity::ButtonStyle::Secondary)
+                .disabled(true);
+            let _ = mc
+                .channel_id
+                .edit_message(
+                    &ctx.http,
+                    mc.message.id,
+                    serenity::EditMessage::new()
+                        .components(vec![serenity::CreateActionRow::Buttons(vec![done])]),
+                )
+                .await;
+            // Publiek regeltje — de NAAM (geen ping), bewust anders dan de tag in de embed.
+            let _ = mc
+                .channel_id
+                .say(
+                    &ctx.http,
+                    format!(
+                        "**{}** got **{amount}** {COIN_EMOJI} for the level up.",
+                        escape_md(&name)
+                    ),
+                )
+                .await;
+            db::log_event(
+                &data.pool,
+                now_secs(),
+                &db::LogEntry::new("level", "claim")
+                    .actor(&uid, &name)
+                    .amount(amount)
+                    .detail("claimed level-up reward".to_string()),
+            );
+        }
+        db::GiftClaim::AlreadyClaimed => {
+            respond_ephemeral(ctx, mc, "You already claimed this reward. 🎁").await?
+        }
+        db::GiftClaim::NotYours => {
+            respond_ephemeral(
+                ctx,
+                mc,
+                "This isn't your level-up reward — only the one who leveled up can claim it.",
+            )
+            .await?
+        }
+        db::GiftClaim::NotFound => {
+            respond_ephemeral(ctx, mc, "This reward is no longer available.").await?
+        }
+    }
+    Ok(())
+}
+
+/// Klik op een preview-knop (dev-kanaal): keert NIETS uit, toont enkel wat het in prod zou
+/// geven. Respecteert de eigenaar-check zodat ook dat gedrag te verifiëren is.
+async fn handle_level_preview(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+) -> Result<(), Error> {
+    // custom_id = "lgprev:{uid}:{amount}"
+    let mut parts = mc.data.custom_id.splitn(3, ':');
+    let _ = parts.next();
+    let owner = parts.next().unwrap_or("");
+    let amount = parts.next().unwrap_or("0");
+    let msg = if mc.user.id.to_string() == owner {
+        format!("🔍 Preview — in prod zou je hier **{amount}** {COIN_EMOJI} claimen. (Nu niets uitgekeerd.)")
+    } else {
+        "🔍 Preview — dit cadeau is voor iemand anders; enkel de gelevelde kan het claimen."
+            .to_string()
+    };
+    respond_ephemeral(ctx, mc, &msg).await
 }
 
 /// Trek een prijs volgens de ACTUELE verdeling in `chest_tiers`: eerst een tier
@@ -578,6 +718,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
     let prize = chest_prize(pool);
     let total = db::award(pool, winner_uid, winner_name, prize, now_secs());
     log_earn(http.as_ref(), winner_name, prize, total).await;
+    maybe_levelup(&http, pool, winner_uid, winner_name).await;
     tracing::info!(
         "chest RESCUE geopend ({msg_id}): {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
         joiners.len()
@@ -627,6 +768,82 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
         .send_message(http.as_ref(), serenity::CreateMessage::new().embed(embed))
         .await?;
     ctx.say(format!("✅ Chest `{msg_id}` heropend — {winner_name} won {prize} coins.")).await?;
+    Ok(())
+}
+
+/// De gebundelde correctie berekenen: 1,5% van ELKE bereikte leveldrempel (1..cur), opgeteld
+/// — optie A: één cadeau per lid voor al zijn gemiste level-ups. Geeft (bereikt level,
+/// totaalbedrag) of None als er niets in te halen valt of het al gebeurde.
+fn correction_for(pool: &DbPool, uid: &str, earned: i64) -> Option<(i64, i64)> {
+    let cur = db::level_of(earned);
+    if cur == 0 || db::has_correction(pool, uid) {
+        return None;
+    }
+    let amount: i64 = (1..=cur)
+        .map(|l| (db::level_floor(l) as f64 * 0.015).round() as i64)
+        .sum();
+    Some((cur, amount))
+}
+
+/// `!levelfix_preview` — post ÉÉN sample-embed naar het DEV coins-kanaal (met een preview-knop
+/// die niets uitkeert), zodat het team enkel de look & feel kan keuren. Gebruikt de eigen
+/// gegevens van wie het commando draait (of een demo als die nog level 0 is). Admin-only.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn levelfix_preview(ctx: Context<'_>) -> Result<(), Error> {
+    let pool = &ctx.data().pool;
+    let http = ctx.serenity_context().http.clone();
+    let uid = ctx.author().id.to_string();
+    let earned = db::get_stats(pool, &uid).3;
+    // Toon een realistisch voorbeeld: het echte correctie-cadeau van de aanvrager, of een
+    // demo (level 5) als die niets in te halen heeft.
+    let (level, amount) = correction_for(pool, &uid, earned).unwrap_or((5, 12));
+    let builder = serenity::CreateMessage::new()
+        .embed(levelup_embed(&uid, level))
+        .components(vec![claim_button_row(format!("lgprev:{uid}:{amount}"))]);
+    serenity::ChannelId::new(DEV_COINS_CHANNEL_ID)
+        .send_message(&http, builder)
+        .await?;
+    ctx.say(
+        "🔍 Eén sample-embed naar het dev coins-kanaal gestuurd (preview-knop keert niets uit). Goed bevonden? → `!levelfix_commit` post de echte correctie naar prod.",
+    )
+    .await?;
+    Ok(())
+}
+
+/// `!levelfix_commit` — post de correctie-embeds ECHT naar prod #coins (met claim-knoppen)
+/// en zet per lid `gifted_level` op hun huidige level, zodat toekomstige level-ups enkel
+/// voor nieuwe levels vuren. Idempotent: na afloop doet herhalen niets meer. Admin-only.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn levelfix_commit(ctx: Context<'_>) -> Result<(), Error> {
+    let pool = &ctx.data().pool;
+    let http = ctx.serenity_context().http.clone();
+    let chan = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID);
+    let now = now_secs();
+    let (mut count, mut total) = (0i64, 0i64);
+    for (uid, name, earned) in db::all_earners(pool) {
+        if let Some((cur, amount)) = correction_for(pool, &uid, earned) {
+            let gid = db::create_level_gift(pool, &uid, amount, cur, "correction", now);
+            let builder = serenity::CreateMessage::new()
+                .embed(levelup_embed(&uid, cur))
+                .components(vec![claim_button_row(format!("lg:{gid}"))]);
+            let _ = chan.send_message(&http, builder).await;
+            db::set_gifted_level(pool, &uid, cur);
+            db::log_event(
+                pool,
+                now,
+                &db::LogEntry::new("level", "correction")
+                    .actor(&uid, &name)
+                    .amount(amount)
+                    .detail(format!("catch-up to level {cur}")),
+            );
+            count += 1;
+            total += amount;
+        }
+    }
+    ctx.say(format!(
+        "✅ Correctie live: **{count}** embeds naar prod #coins ({total} {COIN_EMOJI} te claimen). Markers gezet — herhalen doet niets meer."
+    ))
+    .await?;
     Ok(())
 }
 
@@ -1031,6 +1248,8 @@ async fn pop_chest(
     let prize = chest_prize(&pool);
     let total = db::award(&pool, winner_uid, winner_name, prize, now_secs());
     log_earn(http.as_ref(), winner_name, prize, total).await;
+    // Chest-winst kan je over een levelgrens tillen → level-up-check.
+    maybe_levelup(&http, &pool, winner_uid, winner_name).await;
     let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };
     tracing::info!(
         "chest geopend: {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
@@ -1203,7 +1422,13 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     // Enkel !chest (dev-only info-commando). Het !coins-leaderboard is verwijderd.
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![chest(), chestodds(), chestrescue()],
+            commands: vec![
+                chest(),
+                chestodds(),
+                chestrescue(),
+                levelfix_preview(),
+                levelfix_commit(),
+            ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(PREFIX.to_string()),
                 ..Default::default()

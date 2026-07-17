@@ -144,7 +144,21 @@ pub fn init_pool(path: &str) -> DbPool {
             lo       INTEGER NOT NULL,       -- min coins (inclusief)
             hi       INTEGER NOT NULL,       -- max coins (inclusief)
             position INTEGER NOT NULL DEFAULT 0
-        );",
+        );
+        -- Openstaande level-up-cadeaus: één rij per te claimen cadeau. De speler
+        -- claimt via een knop in de embed; pas dán komen de coins op zijn saldo
+        -- (claimed 0→1, atomisch). `kind` = 'levelup' (nieuw) of 'correction' (de
+        -- eenmalige inhaalslag met gebundeld bedrag). `level` = het bereikte level.
+        CREATE TABLE IF NOT EXISTS level_gifts (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid     TEXT NOT NULL,
+            amount  INTEGER NOT NULL,
+            level   INTEGER NOT NULL,
+            kind    TEXT NOT NULL DEFAULT 'levelup',
+            claimed INTEGER NOT NULL DEFAULT 0,
+            ts      REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_level_gifts_uid ON level_gifts(uid, claimed);",
     )
     .expect("kan tabel niet aanmaken");
 
@@ -160,6 +174,46 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "hytale_name", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "daily_streak", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "equipped_gem", "TEXT NOT NULL DEFAULT ''");
+    // Hoogste level waarvoor al een cadeau-embed gepost is (per lid). Nieuwe level-ups
+    // vuren enkel voor levels bóven deze marker → geen dubbele of gemiste cadeaus.
+    ensure_column(&conn, "coins", "gifted_level", "INTEGER NOT NULL DEFAULT 0");
+    // EENMALIGE baseline: bestaande leden krijgen gifted_level = hun HUIDIGE level, zodat de
+    // nieuwe level-up-embed NIET met terugwerkende kracht de hele backlog naar #coins post.
+    // Draait exact één keer (gemarkeerd in settings). De aparte inhaalslag voor het verleden
+    // (!levelfix_commit) staat hier volledig los van en berekent 1,5% per drempel.
+    {
+        let done: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'levelgift_baseline_v1'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("q baseline flag");
+        if done.is_none() {
+            let members: Vec<(String, i64)> = {
+                let mut stmt = conn
+                    .prepare("SELECT user_id, total_earned FROM coins")
+                    .expect("prep baseline");
+                let it = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                    .expect("q baseline");
+                it.filter_map(Result::ok).collect()
+            };
+            for (uid, earned) in members {
+                conn.execute(
+                    "UPDATE coins SET gifted_level = ?2 WHERE user_id = ?1",
+                    params![uid, level_of(earned)],
+                )
+                .ok();
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('levelgift_baseline_v1', '1')",
+                [],
+            )
+            .ok();
+        }
+    }
     // Lucky Horseshoe: 0 = geen boost, 1 = dubbele lot-kans bij de eerstvolgende
     // uitbetalende treasure chest waaraan het lid meedoet (nadien terug op 0).
     ensure_column(&conn, "coins", "chest_luck", "INTEGER NOT NULL DEFAULT 0");
@@ -1080,6 +1134,124 @@ pub fn level_of(earned: i64) -> i64 {
         floor += cost;
         level += 1;
     }
+}
+
+/// Total_earned nodig om `level` te BEREIKEN (som van de kosten level 0→1, 1→2, …).
+/// `level_floor(1) = 50`, `level_floor(2) = 130`, … De correctie keert 1,5% hiervan uit.
+pub fn level_floor(level: i64) -> i64 {
+    let (base, growth) = (50.0_f64, 1.6_f64);
+    let mut floor = 0i64;
+    for l in 0..level {
+        floor += (base * growth.powi(l as i32)).round() as i64;
+    }
+    floor
+}
+
+// --- level-up-cadeaus ---------------------------------------------------
+
+/// Hoogste level waarvoor dit lid al een cadeau-embed kreeg (0 = nog nooit).
+pub fn get_gifted_level(pool: &DbPool, uid: &str) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT gifted_level FROM coins WHERE user_id = ?1",
+        params![uid],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("q gifted_level")
+    .unwrap_or(0)
+}
+
+/// Zet de marker "hoogst uitgekeerde level" (na het posten van de embed(s)).
+pub fn set_gifted_level(pool: &DbPool, uid: &str, level: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE coins SET gifted_level = ?2 WHERE user_id = ?1",
+        params![uid, level],
+    )
+    .expect("set gifted_level");
+}
+
+/// Registreer een openstaand cadeau (claimed = 0) en geef het rij-id terug — dat komt
+/// in de custom_id van de claim-knop.
+pub fn create_level_gift(pool: &DbPool, uid: &str, amount: i64, level: i64, kind: &str, ts: f64) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO level_gifts (uid, amount, level, kind, claimed, ts) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+        params![uid, amount, level, kind, ts],
+    )
+    .expect("insert level_gift");
+    conn.last_insert_rowid()
+}
+
+/// Uitkomst van een claim-poging op een cadeau-knop.
+pub enum GiftClaim {
+    Granted(i64),   // bedrag toegekend
+    AlreadyClaimed, // al opgehaald
+    NotYours,       // iemand anders klikte
+    NotFound,       // cadeau bestaat niet (meer)
+}
+
+/// Claim een cadeau: atomisch (claimed 0→1) zodat dubbelklikken nooit dubbel uitbetaalt.
+/// Enkel de eigenaar (`uid`) kan claimen. Bij succes komen de coins meteen op het saldo
+/// (via `admin_add_coins`, dat `total_earned` NIET verhoogt → cadeaus tellen niet mee
+/// voor leveling, dus geen cascade).
+pub fn claim_level_gift(pool: &DbPool, gift_id: i64, uid: &str, username: &str) -> GiftClaim {
+    let amount = {
+        let conn = pool.get().expect("db");
+        let row: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT uid, amount, claimed FROM level_gifts WHERE id = ?1",
+                params![gift_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .expect("q level_gift");
+        match row {
+            None => return GiftClaim::NotFound,
+            Some((owner, _, _)) if owner != uid => return GiftClaim::NotYours,
+            Some((_, _, claimed)) if claimed != 0 => return GiftClaim::AlreadyClaimed,
+            Some((_, amount, _)) => {
+                let n = conn
+                    .execute(
+                        "UPDATE level_gifts SET claimed = 1 WHERE id = ?1 AND claimed = 0",
+                        params![gift_id],
+                    )
+                    .expect("claim update");
+                if n == 0 {
+                    return GiftClaim::AlreadyClaimed;
+                }
+                amount
+            }
+        }
+    };
+    admin_add_coins(pool, uid, username, amount);
+    GiftClaim::Granted(amount)
+}
+
+/// Kreeg dit lid al een correctie-cadeau (de eenmalige inhaalslag)? Voorkomt dubbel posten.
+pub fn has_correction(pool: &DbPool, uid: &str) -> bool {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT 1 FROM level_gifts WHERE uid = ?1 AND kind = 'correction' LIMIT 1",
+        params![uid],
+        |_| Ok(()),
+    )
+    .optional()
+    .expect("q has_correction")
+    .is_some()
+}
+
+/// Alle leden met hun all-time verdiensten (voor de eenmalige correctie-inhaalslag).
+pub fn all_earners(pool: &DbPool) -> Vec<(String, String, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT user_id, username, total_earned FROM coins ORDER BY total_earned DESC")
+        .expect("prepare all_earners");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("query all_earners");
+    rows.filter_map(Result::ok).collect()
 }
 
 /// Unix-tijdstip van de laatste daily-claim (0.0 als de user er nog geen deed).
