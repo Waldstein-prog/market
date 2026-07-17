@@ -41,7 +41,7 @@ const COIN_EMOJI: &str = "<:Meadowcoins:1526188363110023308>"; // Magic Meadow-e
 // user — NIET zelf uitbreiden (elke speler-zichtbare tekst is een beslissing van de user).
 const LEVELUP_VARIANTS: &[&str] = &[
     "super inspiring!",
-    "terrifically done",
+    "terrifically done!",
     "be proud of you!",
     "you did amazing!",
     "lots of praise to you!",
