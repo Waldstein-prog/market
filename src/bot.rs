@@ -435,7 +435,6 @@ fn levelup_embed(uid: &str, level: i64) -> serenity::CreateEmbed {
     serenity::CreateEmbed::new()
         .title("LEVEL UP!")
         .description(format!("<@{uid}>, you are now level **{level}**, {variant}"))
-        .footer(serenity::CreateEmbedFooter::new("click below to claim your reward"))
         .colour(0xF1_C4_0F)
 }
 
@@ -545,12 +544,7 @@ async fn handle_level_claim(
             respond_ephemeral(ctx, mc, "You already claimed this reward. 🎁").await?
         }
         db::GiftClaim::NotYours => {
-            respond_ephemeral(
-                ctx,
-                mc,
-                "This isn't your level-up reward — only the one who leveled up can claim it.",
-            )
-            .await?
+            respond_ephemeral(ctx, mc, "Uh-oh! This is not your reward!").await?
         }
         db::GiftClaim::NotFound => {
             respond_ephemeral(ctx, mc, "This reward is no longer available.").await?
@@ -573,8 +567,7 @@ async fn handle_level_preview(
     let msg = if mc.user.id.to_string() == owner {
         format!("🔍 Preview — in prod zou je hier **{amount}** {COIN_EMOJI} claimen. (Nu niets uitgekeerd.)")
     } else {
-        "🔍 Preview — dit cadeau is voor iemand anders; enkel de gelevelde kan het claimen."
-            .to_string()
+        "Uh-oh! This is not your reward!".to_string()
     };
     respond_ephemeral(ctx, mc, &msg).await
 }
