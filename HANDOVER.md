@@ -14,6 +14,22 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-17f) — polish: purse-loop, booster-image2, Basic Gems
+
+**Alles LIVE + gecommit + gepusht** (`133e6d9`, `39a2210`; subtree t/m `4e34bfc`).
+
+- **Purse-afteller herhaalde zich** (`133e6d9`). De shop auto-refresht elke 5s met
+  `location.reload()` → herlaadt `/market?…&from=X` → server rendert weer `data-from=X`
+  (oud saldo) → afteller springt terug en telt opnieuw af. **Fix**: zodra de animatie
+  `from` gelezen heeft, strippen we `from` uit de URL (`history.replaceState`), zodat de
+  reload een schone `/market` opvraagt → `from==saldo` → geen herhaling. `ok`/`err` blijven.
+- **Booster toonde image2 niet** (`133e6d9`). `booster_slot` op de Boosts-tab kreeg de
+  tweede afbeelding (kleinere `thumb2` onder de titel), zoals de shop-kaart.
+- **Gems → één compacte set "Basic Gems"** (`39a2210`). De 3 schap-rijen
+  (primary/secondary/prism) zijn samengevoegd tot één `.shelf wrap`-set met titel
+  **"Basic Gems"** (werktitel): rij vult zich en wrapt pas als hij vol is → zo weinig
+  mogelijk rijen. Schap-volgorde behouden; schappen/shop-indeling ongemoeid.
+
 ## ⏭️ Sessie (2026-07-17e) — Lucky Horseshoe = permanent verzamel-item
 
 **LIVE op prod + gecommit** (`2aa2005`, deploy 21:47). Nog te pushen via
