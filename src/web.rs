@@ -539,6 +539,14 @@ a.link{{color:{MEADOW}}}
 /* Inventory: gems mogen niet in een zijwaartse schuifstrip verdwijnen — laat ze
    gewoon doorlopen en afbreken over een paar rijen, zodat je alles in één blik ziet. */
 .shelf.wrap{{flex-wrap:wrap;overflow-x:visible;justify-content:center}}
+/* Inventory-gems (en Trinkets): vast 6-per-rij grid i.p.v. de flex-wrap-strip, zodat de
+   rijen netjes uitlijnen. minmax(0,1fr) laat de kaarten samen de rij delen; kaders rekken
+   in hoogte mee zodat alle tekst past. Op smallere schermen minder kolommen (leesbaarheid). */
+.shelf.gems6{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:.6rem;
+  overflow-x:visible;justify-content:initial;align-items:stretch}}
+.shelf.gems6 .slot{{width:auto;flex:initial}}
+@media (max-width:820px){{.shelf.gems6{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}
+@media (max-width:480px){{.shelf.gems6{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
 .shelf .slot{{flex:0 0 auto;width:170px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
@@ -990,10 +998,20 @@ fn gem_slot(it: &db::Item, owned: bool, equipped: bool) -> String {
     } else {
         ("Use", "", "/use/gem")
     };
+    // Tweede, kleinere afbeelding onder de titel (zoals in de shop-kaart en booster_slot).
+    let img2 = if it.image2.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"thumb2\"><img src=\"/uploads/{}?v={}\" alt=\"\"></div>",
+            esc(&it.image2),
+            img_ver(&it.image2)
+        )
+    };
     format!(
         "<div class=\"slot gemcard previewable\" data-color=\"{col}\">\
          <div class=\"thumb\">{thumb}</div>\
-         <div class=\"name\">{name}</div><div class=\"gdesc\">{desc}</div>\
+         <div class=\"name\">{name}</div>{img2}<div class=\"gdesc\">{desc}</div>\
          <form method=\"post\" action=\"{action}\" class=\"buyform\">\
            <input type=\"hidden\" name=\"item_id\" value=\"{id}\">\
            <button class=\"buy on{extra}\" type=\"submit\">{label}</button></form></div>",
@@ -1128,7 +1146,7 @@ fn inventory_home(
     let collection = if slots.is_empty() {
         String::new()
     } else {
-        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap\">{slots}</div>")
+        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap gems6\">{slots}</div>")
     };
     // Admin-testhulp: verzamel-aankopen terugdraaien (coins terug). (Sync gem colors staat
     // op de Manage-pagina.)
@@ -1196,7 +1214,7 @@ fn inventory_home(
         let shelf = if cards.is_empty() {
             String::new()
         } else {
-            format!("<h2 class=\"shelf-title\">🍀 Boosters</h2><div class=\"shelf\">{cards}</div>")
+            format!("<h2 class=\"shelf-title center fancy\">Trinkets</h2><div class=\"shelf\">{cards}</div>")
         };
         format!("{status}{shelf}")
     };
@@ -1207,7 +1225,7 @@ fn inventory_home(
          <div class=\"subtabs center\">\
            <button class=\"subtab{ca}\" data-t=\"coins\">{MC} Coins</button>\
            <button class=\"subtab{cg}\" data-t=\"gems\">💎 Gems</button>\
-           <button class=\"subtab{cb}\" data-t=\"boosts\">🚀 Boosts</button></div>\
+           <button class=\"subtab{cb}\" data-t=\"boosts\">🍀 Trinkets</button></div>\
          <div class=\"panel{ca}\" id=\"p-coins\">{coins_panel}</div>\
          <div class=\"panel{cg}\" id=\"p-gems\">{gems_panel}</div>\
          <div class=\"panel{cb}\" id=\"p-boosts\">{boosts_panel}</div>\
@@ -1405,7 +1423,7 @@ async fn admin_inventory_preview(State(st): State<AppState>, headers: HeaderMap)
     let gems_set = if gems.is_empty() {
         String::new()
     } else {
-        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap\">{gems}</div>")
+        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap gems6\">{gems}</div>")
     };
     // Alle boosters als owned.
     let boosters: String = all_items
@@ -1416,7 +1434,7 @@ async fn admin_inventory_preview(State(st): State<AppState>, headers: HeaderMap)
     let boost_set = if boosters.is_empty() {
         String::new()
     } else {
-        format!("<h2 class=\"shelf-title\">🚀 Boosts</h2><div class=\"shelf wrap\">{boosters}</div>")
+        format!("<h2 class=\"shelf-title center fancy\">Trinkets</h2><div class=\"shelf wrap gems6\">{boosters}</div>")
     };
     let body = format!(
         "{subtabs}<h1 class=\"shoptitle\">🎒 Preview inventory</h1>\
