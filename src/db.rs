@@ -147,8 +147,9 @@ pub fn init_pool(path: &str) -> DbPool {
         );
         -- Openstaande level-up-cadeaus: één rij per te claimen cadeau. De speler
         -- claimt via een knop in de embed; pas dán komen de coins op zijn saldo
-        -- (claimed 0→1, atomisch). `kind` = 'levelup' (nieuw) of 'correction' (de
-        -- eenmalige inhaalslag met gebundeld bedrag). `level` = het bereikte level.
+        -- (claimed 0→1, atomisch). `kind` = 'levelup' of 'correction' (de eenmalige
+        -- inhaalslag van 2026-07-18b, commando's nadien verwijderd — data blijft).
+        -- `level` = het bereikte level.
         CREATE TABLE IF NOT EXISTS level_gifts (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             uid     TEXT NOT NULL,
@@ -180,7 +181,7 @@ pub fn init_pool(path: &str) -> DbPool {
     // EENMALIGE baseline: bestaande leden krijgen gifted_level = hun HUIDIGE level, zodat de
     // nieuwe level-up-embed NIET met terugwerkende kracht de hele backlog naar #coins post.
     // Draait exact één keer (gemarkeerd in settings). De aparte inhaalslag voor het verleden
-    // (!levelfix_commit) staat hier volledig los van en berekent 1,5% per drempel.
+    // (uitgevoerd 2026-07-18b, commando's nadien verwijderd) stond hier volledig los van.
     {
         let done: Option<String> = conn
             .query_row(
@@ -1136,17 +1137,6 @@ pub fn level_of(earned: i64) -> i64 {
     }
 }
 
-/// Total_earned nodig om `level` te BEREIKEN (som van de kosten level 0→1, 1→2, …).
-/// `level_floor(1) = 50`, `level_floor(2) = 130`, … De correctie keert 1,5% hiervan uit.
-pub fn level_floor(level: i64) -> i64 {
-    let (base, growth) = (50.0_f64, 1.6_f64);
-    let mut floor = 0i64;
-    for l in 0..level {
-        floor += (base * growth.powi(l as i32)).round() as i64;
-    }
-    floor
-}
-
 // --- level-up-cadeaus ---------------------------------------------------
 
 /// Hoogste level waarvoor dit lid al een cadeau-embed kreeg (0 = nog nooit).
@@ -1230,46 +1220,6 @@ pub fn claim_level_gift(pool: &DbPool, gift_id: i64, uid: &str, username: &str, 
     };
     credit_earned(pool, uid, username, amount, ts);
     GiftClaim::Granted(amount)
-}
-
-/// De levels waarvoor dit lid al een cadeau-rij heeft (welke kind dan ook). De correctie
-/// gebruikt dit om een level dat al écht een gift kreeg (bv. een level-up ná de baseline)
-/// niet nóg eens terug te betalen. NB: de baseline zette enkel de scalaire `gifted_level`
-/// en maakte GEEN rijen — die levels horen dus wél in de correctie en blijven hier buiten.
-pub fn gifted_levels(pool: &DbPool, uid: &str) -> std::collections::HashSet<i64> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT level FROM level_gifts WHERE uid = ?1")
-        .expect("prepare gifted_levels");
-    let rows = stmt
-        .query_map(params![uid], |r| r.get::<_, i64>(0))
-        .expect("query gifted_levels");
-    rows.filter_map(|r| r.ok()).collect()
-}
-
-/// Kreeg dit lid al een correctie-cadeau (de eenmalige inhaalslag)? Voorkomt dubbel posten.
-pub fn has_correction(pool: &DbPool, uid: &str) -> bool {
-    let conn = pool.get().expect("db");
-    conn.query_row(
-        "SELECT 1 FROM level_gifts WHERE uid = ?1 AND kind = 'correction' LIMIT 1",
-        params![uid],
-        |_| Ok(()),
-    )
-    .optional()
-    .expect("q has_correction")
-    .is_some()
-}
-
-/// Alle leden met hun all-time verdiensten (voor de eenmalige correctie-inhaalslag).
-pub fn all_earners(pool: &DbPool) -> Vec<(String, String, i64)> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare("SELECT user_id, username, total_earned FROM coins ORDER BY total_earned DESC")
-        .expect("prepare all_earners");
-    let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .expect("query all_earners");
-    rows.filter_map(Result::ok).collect()
 }
 
 /// Unix-tijdstip van de laatste daily-claim (0.0 als de user er nog geen deed).
