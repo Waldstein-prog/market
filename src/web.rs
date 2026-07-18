@@ -542,6 +542,9 @@ a.link{{color:{MEADOW}}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
 .shelf.shop .slot{{width:210px}}
+/* Enkel de dagpicks horizontaal centreren (de passen-rij blijft links). `safe` valt terug
+   op links als de rij te breed wordt, zodat er op smalle schermen niks wegvalt. */
+.shelf.picks{{justify-content:safe center}}
 .shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700;
   display:flex;align-items:center;gap:.5rem}}
@@ -1261,14 +1264,14 @@ async fn market(
         };
         format!(
             "<h2 class=\"shelf-title\">✨ Today's picks{reroll}{countdown}</h2>\
-             <div class=\"shelf shop\">{offers}</div>"
+             <div class=\"shelf shop picks\">{offers}</div>"
         )
     } else {
         // Nog niet vrijgegeven: SHOP_DAILY_N grijze 🔒-placeholders i.p.v. echte gems.
         let ph: String = (0..SHOP_DAILY_N).map(|_| placeholder_slot()).collect();
         format!(
             "<h2 class=\"shelf-title\">✨ Today's picks{countdown}</h2>\
-             <div class=\"shelf shop\">{ph}</div>"
+             <div class=\"shelf shop picks\">{ph}</div>"
         )
     };
     // Hytale-passen: dagpas blijft koopbaar; de permanente pas staat grijs als textloze

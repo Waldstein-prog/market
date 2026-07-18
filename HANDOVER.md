@@ -16,7 +16,7 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
 
 ## ⏭️ Sessie (2026-07-18c) — levelfix-commando's weg, shop-dag-afteller, boosters uit de dagrotatie
 
-**Alles LIVE op prod + gecommit + gepusht** (`7f0b29d` → `d4c7660`; subtree t/m `6b41c1b`).
+**Alles LIVE op prod + gecommit + gepusht** (`7f0b29d` → `b13ab9e`; subtree t/m `18bb886`).
 
 - **Eenmalige `!levelfix`-commando's verwijderd** (`7f0b29d`) — de correctie was uitgevoerd
   (18b): `!levelfix_preview`/`!levelfix_commit` + `handle_level_preview` + de `lgprev:`-route +
@@ -31,9 +31,23 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
 - **Boosters uit de dagrotatie — gems-only** (`d4c7660`) — `horseshoe_shop_odds_days`: `min`
   1 → 0, met **0 = UIT** (read/write klemmen op de spec-grenzen, dus 0 vergt de min-wijziging).
   **Live op prod op 0 gezet** + dag-cache gewist. Omkeerbaar via ⚙ Settings (terug op N).
-- **NB — publieke shop staat nog in day-pass-only game-test** (`SHOP_TEST_DAY_PASS_ONLY = true`,
-  web.rs): enkel de Hytale-dagpas ligt er. De **gems-rotatie + de afteller zijn dus nog niet
-  zichtbaar** tot die vlag op `false` gaat (user-keuze 2026-07-18c: **aan laten**).
+- **Daily picks in trekkingsvolgorde** (`d5e64de`) — `daily_shop` heeft PK `(day,item_id)`; de
+  lees-query zonder ORDER BY gaf de gems gesorteerd op item_id terug → bij een reroll leek de
+  auto-refresh ze te "herordenen". Fix: `ORDER BY rowid` = insertie- = trekkingsvolgorde.
+- **Publieke shop = volledig ontwerp met grijze teasers** (`f959683`, `b13ab9e`) — de
+  day-pass-only-test (`SHOP_TEST_DAY_PASS_ONLY`) is **vervangen** door het volle ontwerp
+  (dagrotatie + Hytale-passen, zoals de Admin shop preview) met twee feature-flags in `web.rs`:
+  - `SHOP_DAILY_PICKS_LIVE = false` → 4 grijze textloze 🔒-teasers i.p.v. gems. **Op groen licht
+    → `true`** → echte gem-rotatie (+ admin-reroll).
+  - `SHOP_PERMA_PASS_LIVE = false` → permanente pas = grijze 🔒-teaser (géén naam/prijs). **Later,
+    als de server-mod af is → `true`**. De **dagpas blijft koopbaar**.
+  - Afteller staat inline naast de titel (waar de reroll stond). Pas-vakjes gelijke hoogte
+    (`.shelf align-items:stretch` + `.slot.soon justify-content:center`). **Dagpicks-rij
+    horizontaal gecentreerd** (`.shelf.picks{justify-content:safe center}`); de passen-rij niet.
+- **Alle klant/GUI-tekst in het Engels** (`b13ab9e`) — klant-facing was al Engels; resterende
+  gerenderde NL → Engels (chestrescue-Discord-replies, log-details deelnemer→participant, admin
+  Settings-units, ∞-tooltip, "Nobody has bought anything yet"). Server-logs (`tracing`), panics
+  en code-comments blijven NL (niet speler-zichtbaar). **Regel: alle buitenwereld-tekst = Engels.**
 
 ### 📌 Open TODO — horseshoe-testprotocol (voor later, user-keuze 2026-07-18c)
 De Lucky Horseshoe (permanente booster, bezit = 2 loten i.p.v. 1 bij chest-trekking) moet eerst
@@ -42,6 +56,12 @@ op testaccounts kopen (Admin shop toont alles), een reeks chests draaien, checke
 ~2× wint + de 🍀-regel verschijnt + permanent/éénmalig, dan balans-oordeel (2× / prijs 120 /
 zeldzaamheid). **Uitgesteld op verzoek** — pas als dit gebeurd is `horseshoe_shop_odds_days`
 terug op N zetten.
+
+### 📌 Open TODO — verjaardagen + birthday-chest (geparkeerd 2026-07-18c)
+- **Verjaardagen overnemen van MEE6**: de birthday-data die de MEE6-bot bijhoudt opvragen en
+  importeren in market (mechaniek nog uit te zoeken — MEE6 API/dashboard-export?).
+- **Cadeau = 500 coins** op de verjaardag.
+- **Nieuwe chest ontwerpen** speciaal hiervoor (birthday-chest). Ontwerp nog te bespreken.
 
 ---
 
