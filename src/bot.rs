@@ -26,8 +26,8 @@ const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 0; // saldo-log uit op prod (fortuna-lo
 const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
 const PROD_GENERAL_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow ☀️general (weekly zaterdag 15u)
 const PROD_GUILD_ID: u64 = 1296469405651435592; // Magic Meadow — leave/rejoin-archief triggert enkel hier
-// Weekly leaderboard tijdelijk uitgeschakeld tot de cadeauknoppen-feature af is (2026-07-18).
-const WEEKLY_LEADERBOARD_ENABLED: bool = false;
+// Weekly leaderboard aan: vuurt elke zaterdag 15:00 (Brussel) in prod #general.
+const WEEKLY_LEADERBOARD_ENABLED: bool = true;
 const HOURLY_SHOUTOUT_MIN: i64 = 1; // drempel: minstens 1 coin verdiend in het afgelopen uur
 const HOURLY_SHOUTOUT_TOP: i64 = 10; // hoeveel leden in het uurlijkse top-embed
 // TEST-modus: vuur elke HOURLY_TEST_INTERVAL sec met venster = die interval,
@@ -1313,24 +1313,32 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
                 "Top earners of the past week!\n\n{lines}\n🎉 **Top Three claim your prize below!** <:MM_party:1522596802874835014>"
             ))
             .colour(0x6B_9B_52);
-        // Cadeauknoppen voor de top 3 (Gold 300 / Silver 200 / Bronze 100). Elk enkel
-        // claimbaar door de bijhorende winnaar (server-side check in claim_level_gift).
-        // Hergebruikt de level_gifts-tabel (kind='weekly') voor de atomische claim.
+        // ÉÉN "🎁 Claim your reward"-knop voor de top 3 (300/200/100 naar plaats 1/2/3).
+        // De 3 cadeau-rijen (level_gifts kind='weekly') zitten in de custom_id "wg:g1,g2,g3";
+        // de handler kiest bij een klik het cadeau van de klikker. Discord kan de knop niet
+        // per-gebruiker grijzen — iedereen ziet 'm groen; nr 4+ krijgt de ephemeral.
         let now2 = now_secs();
-        let mut buttons: Vec<serenity::CreateButton> = Vec::new();
-        for (rank, amount, label) in [(0usize, 300i64, "Gold"), (1, 200, "Silver"), (2, 100, "Bronze")] {
+        let mut gids: Vec<String> = Vec::new();
+        for (rank, amount) in [(0usize, 300i64), (1, 200), (2, 100)] {
             if let Some((uid, _n, _t)) = top.get(rank) {
                 let gid = db::create_level_gift(&pool, uid, amount, 0, "weekly", now2);
-                buttons.push(
-                    serenity::CreateButton::new(format!("wg:{gid}"))
-                        .label(label)
-                        .style(serenity::ButtonStyle::Secondary),
-                );
+                gids.push(gid.to_string());
             }
         }
-        let mut msg = serenity::CreateMessage::new().embed(embed);
-        if !buttons.is_empty() {
-            msg = msg.components(vec![serenity::CreateActionRow::Buttons(buttons)]);
+        // Tag de top 3 in de CONTENT (mentions in een embed pingen niet — in de content wel).
+        let pings: String = top
+            .iter()
+            .take(3)
+            .map(|(uid, _n, _t)| format!("<@{uid}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut msg = serenity::CreateMessage::new().content(pings).embed(embed);
+        if !gids.is_empty() {
+            let btn = serenity::CreateButton::new(format!("wg:{}", gids.join(",")))
+                .emoji('🎁')
+                .label("Claim your reward")
+                .style(serenity::ButtonStyle::Success);
+            msg = msg.components(vec![serenity::CreateActionRow::Buttons(vec![btn])]);
         }
         if PROD_GENERAL_CHANNEL_ID != 0 {
             let _ = serenity::ChannelId::new(PROD_GENERAL_CHANNEL_ID)
@@ -1340,33 +1348,48 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
     }
 }
 
-/// Klik op een weekly-cadeauknop (Gold/Silver/Bronze): keert het bedrag eenmalig uit aan de
-/// bijhorende winnaar en post een publiek regeltje in #coins. Enkel de eigenaar; een andere
-/// klikker of dubbelklik doet niets — **stil acken, GEEN ephemeral** (huisregel).
+/// Klik op de ene "🎁 Claim your reward"-knop van de weekly. De custom_id "wg:g1,g2,g3" bevat
+/// de 3 cadeau-rijen (top 3). We proberen elk cadeau te claimen voor de klikker: enkel de
+/// eigenaar (plaats 1/2/3) krijgt zijn bedrag (300/200/100) → publiek regeltje in #coins.
+/// Al geclaimd → stil. Niet in de top 3 (bv. plaats 4+) → ephemeral "This is not your prize.".
 async fn handle_weekly_claim(
     ctx: &serenity::Context,
     mc: &serenity::ComponentInteraction,
     data: &Data,
 ) -> Result<(), Error> {
-    let gid: i64 = mc
+    let gids: Vec<i64> = mc
         .data
         .custom_id
         .strip_prefix("wg:")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(-1);
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|s| s.parse::<i64>().ok())
+        .collect();
     let uid = mc.user.id.to_string();
     let name = mc
         .user
         .global_name
         .clone()
         .unwrap_or_else(|| mc.user.name.clone());
-    // Altijd stil acken (geen ephemeral, geen zichtbaar antwoord op de interactie).
-    let _ = mc
-        .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
-        .await;
-    if let db::GiftClaim::Granted(amount) =
-        db::claim_level_gift(&data.pool, gid, &uid, &name, now_secs())
-    {
+    // Zoek onder de 3 cadeaus dat van de klikker. claim_level_gift geeft NotYours voor een
+    // cadeau dat niet van hem is (zonder iets te wijzigen), Granted voor zíjn openstaande
+    // cadeau (claimt het), AlreadyClaimed als hij het al ophaalde.
+    let mut granted: Option<i64> = None;
+    let mut owns_but_claimed = false;
+    for gid in gids {
+        match db::claim_level_gift(&data.pool, gid, &uid, &name, now_secs()) {
+            db::GiftClaim::Granted(a) => {
+                granted = Some(a);
+                break;
+            }
+            db::GiftClaim::AlreadyClaimed => owns_but_claimed = true,
+            db::GiftClaim::NotYours | db::GiftClaim::NotFound => {}
+        }
+    }
+    if let Some(amount) = granted {
+        let _ = mc
+            .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+            .await;
         if PROD_COINS_CHANNEL_ID != 0 {
             let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
                 .say(
@@ -1387,6 +1410,14 @@ async fn handle_weekly_claim(
                 .detail("weekly leaderboard reward".to_string()),
         );
         maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
+    } else if owns_but_claimed {
+        // Winnaar die al claimde → stil acken, geen bericht.
+        let _ = mc
+            .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+            .await;
+    } else {
+        // Geen cadeau voor deze klikker (niet in de top 3) → ephemeral.
+        respond_ephemeral(ctx, mc, "This is not your prize.").await?;
     }
     Ok(())
 }
