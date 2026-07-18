@@ -14,6 +14,60 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-18e) — weekly-cadeau-feature, affordability-knop, inventory-preview + polish
+
+**Alles LIVE op prod + gecommit + gepusht** (`6163a87` → `7a28ecb`; subtree t/m `3ebfc34`).
+
+### ‼️ TWEE HARDE HUISREGELS (user, met nadruk — vanaf nu altijd)
+1. **Geen eigen tekst/labels.** Verzin NOOIT speler-/klant-zichtbare tekst, labels of uitleg.
+   Gebruik enkel de tekst die de user aanlevert; **ontbreekt die → vraag ze**. (Zie [[geen-eigen-publieke-teksten]].)
+2. **Geen ephemerals**, als regel. Enige toegestane uitzondering die de user expliciet vroeg:
+   de weekly-knop bij een verkeerde klikker → ephemeral **"This is not your prize."**.
+
+### Weekly leaderboard — cadeau-feature (de grote brok, veel iteraties)
+- **Post-kanaal = prod #coins** (`PROD_COINS_CHANNEL_ID`; user-keuze), zaterdag 15:00 Brussel.
+  `WEEKLY_LEADERBOARD_ENABLED` (bot.rs) = **true** → loop hervat volgende zaterdag.
+- **Embed**: titel "🏆 Weekly leaderboard"; ranglijst met plaats-iconen — **1-3 = 👑🥈🥉**,
+  **4-9 = 4️⃣…9️⃣**, **vanaf 10 = `**N.**`** (vet, met punt). Onderaan: `🎉 **Top Three claim your
+  prize below!** <:MM_party:1522596802874835014>` (MM_party = emoji in de **Magic Meadow**-guild).
+- **Top 3 getagd in de message-CONTENT** (niet in de embed — mentions in een embed **pingen niet**,
+  in de content wél).
+- **Eén groene "🎁 Claim your reward"-knop** (niet 3). custom_id = `wg:g1,g2,g3` bevat de 3
+  cadeau-rijen (`level_gifts` kind='weekly'). Handler `handle_weekly_claim` kiest bij een klik het
+  cadeau van de klikker → plaats **1/2/3 → 300/200/100** (`credit_earned`, telt mee) + publiek
+  `**Naam** won **X** coins with the weekly leaderboard.` in #coins. **Plaats 4+ → ephemeral**
+  "This is not your prize."; al geclaimd → stil.
+- **Knop grijst uit zodra alle 3 geclaimd** (bericht-brede edit → disabled; per-gebruiker grijzen
+  kan Discord NIET). Helper `db::gift_claimed`.
+- **NB huidige stand**: er staat nog een **handmatige** weekly-post in #coins (vorige week,
+  gereconstrueerd uit `earn_log`): FayBelle 300 (**al geclaimd**), TimmyThumb 200 + Yâ-Ôd 100 (open).
+  Dit was een eenmalige recovery na een accidentele 15:00-fire (opgeruimd). Data-recovery: het
+  weekly-venster is `[fire−7d, fire)` uit `earn_log` (pruning ~8 dagen).
+
+### Shop / inventory
+- **Buy-knop grijs bij te weinig coins** (`shop_slot` kent nu het saldo) → de "not enough
+  coins"-banner verschijnt niet meer in de normale flow; server-side rem blijft als vangnet.
+- **Inventory-vakken breder (136→170px)** + **gem-omschrijving niet meer afgekapt** (clamp weg) +
+  **Use-knop `margin-top:auto`** (knoppen uitgelijnd bij ongelijke omschrijvingen).
+- **Preview inventory** (admin, `/admin/inventory`): volledige inventory met alle items als
+  owned/unlocked. **Vervangt** de oude "Admin shop items"-pagina (`admin_shop` weg).
+
+### 🖼 Emoji-blokker
+De bot heeft **geen "Manage Emojis"-rechten** in de guild → ik kon `artwork/toeter.png` niet zelf
+als emoji uploaden. De user maakte zelf **`<:MM_party:1522596802874835014>`** (Magic Meadow). Bot
+zit in 2 guilds: **WaldsteinDevZone** (`652452615879262220`, waar dev-coins zit) + **Magic Meadow**
+(`1296469405651435592`, prod). Emoji uit Magic Meadow rendert overal waar de bot post.
+
+### 📌 Nog geparkeerd (uit de grote batch die de weekly onderbrak — NIET gedaan)
+- **"Boosts" → "Trinkets"** hernoemen (inventory-tab + titel in de Basic-Gems-sierfont).
+- **image2 (2e afbeelding) tonen in de inventory** (staat wel in de shop-kaart, niet in `gem_slot`).
+- **Lucky Horseshoe-omschrijving** wijzigen — user-tekst: *"You will have twice as much chance to
+  open Foruna's Favor"* (⚠️ "Foruna" = vermoedelijk typo voor **Fortuna**; vragen vóór live).
+- **Gems 6-per-rij** in de inventory (grid), kaders desnoods hoger voor alle tekst.
+- **"jaar niet actief member"** — TODO (nog te specificeren met user).
+
+---
+
 ## ⏭️ Sessie (2026-07-18d) — shop live (gems-only), aankoop-tekst, weekly top-20, feedback-mockups
 
 **Alles LIVE op prod + gecommit + gepusht** (`1b1fc72` → `cddda98`; subtree t/m `ed12171`).
