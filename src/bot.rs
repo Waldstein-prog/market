@@ -1340,8 +1340,9 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
                 .style(serenity::ButtonStyle::Success);
             msg = msg.components(vec![serenity::CreateActionRow::Buttons(vec![btn])]);
         }
-        if PROD_GENERAL_CHANNEL_ID != 0 {
-            let _ = serenity::ChannelId::new(PROD_GENERAL_CHANNEL_ID)
+        // In prod #coins (user-keuze 2026-07-18) — zelfde kanaal als de claim-melding.
+        if PROD_COINS_CHANNEL_ID != 0 {
+            let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
                 .send_message(http.as_ref(), msg)
                 .await;
         }
