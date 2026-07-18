@@ -33,12 +33,15 @@ const MEADOW: &str = "#6b9b52";
 /// enkel via de Admin shop te koop — zo blijft alles verzamelen een werk van dagen.
 const SHOP_DAILY_N: i64 = 4;
 
-/// GAME-TEST (aan sinds 2026-07-15): de shop toont **enkel de Hytale-dagpas**, zodat
-/// testers zonder afleiding de whitelist-keten kunnen aflopen. De prijs van die pas is
-/// gewoon data (Manage → Shop), geen constante — nu op 1 coin gezet.
-/// Terug op `false` → dagrotatie + beide passen komen weer tevoorschijn. De Admin shop
-/// toont sowieso alles, ook tijdens de test.
-const SHOP_TEST_DAY_PASS_ONLY: bool = true;
+/// De publieke shop toont het volledige ontwerp (dagrotatie + Hytale-passen, zoals de Admin
+/// shop preview), maar twee onderdelen zijn nog niet vrijgegeven en staan grijs:
+///
+/// * `SHOP_DAILY_PICKS_LIVE = false` → de 4 dagvakjes zijn grijze 🔒-placeholders i.p.v. echte
+///   gems. Op **groen licht** → `true` → de echte gem-rotatie verschijnt (+ admin-reroll).
+/// * `SHOP_PERMA_PASS_LIVE = false` → de permanente Hytale-pas staat grijs (nog niet te koop,
+///   wacht op de server-mod). De **dagpas blijft gewoon koopbaar**. Later → `true`.
+const SHOP_DAILY_PICKS_LIVE: bool = false;
+const SHOP_PERMA_PASS_LIVE: bool = false;
 
 /// De dag waarop de shop-rotatie draait (hele dagen sinds epoch, UTC → rolt om
 /// middernacht UTC, 01:00/02:00 Brusselse tijd).
@@ -551,11 +554,15 @@ a.link{{color:{MEADOW}}}
   width:1.6rem;height:1.6rem;padding:0;font-size:.9rem;line-height:1;cursor:pointer;
   display:inline-flex;align-items:center;justify-content:center}}
 .reroll:hover{{background:#20301e;color:#e8f0e4;border-color:#3a4d38}}
-/* Afteller naar de volgende dag-refresh (middernacht UTC). Rechts in de titelbalk. */
-.shop-countdown{{margin-left:auto;font-size:.78rem;font-weight:600;color:#9db095;
+/* Afteller naar de volgende dag-refresh (middernacht UTC). Inline naast de titel, op
+   dezelfde plek waar de admin-reroll staat (niet naar rechts geduwd). */
+.shop-countdown{{font-size:.78rem;font-weight:600;color:#9db095;
   background:#141d14;border:1px solid #2c3d2a;border-radius:999px;padding:.22rem .6rem;
   white-space:nowrap;font-variant-numeric:tabular-nums}}
 .shop-countdown b{{color:#cfe0c8}}
+/* Nog niet vrijgegeven: grijs, niet-klikbaar placeholder-vakje met een slotje. */
+.slot.soon{{opacity:.5;filter:grayscale(.75)}}
+.slot.soon .thumb{{display:flex;align-items:center;justify-content:center;font-size:2.2rem}}
 /* Ronde Hytale-knop onderaan de Coins-tab, met de pas-timer eróver. De H in de
    afbeelding is druk, dus de tijd krijgt een donker pilletje — anders leest hij niet. */
 .passbtn{{position:relative;width:125px;margin:1.4rem auto .2rem;line-height:0}}
@@ -1228,30 +1235,23 @@ async fn market(
     let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
     let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass);
 
-    // GAME-TEST (SHOP_TEST_DAY_PASS_ONLY): enkel de dagpas ligt in de winkel, zodat testers
-    // recht op de whitelist-keten afgaan zonder afleiding. Anders: de dagrotatie
-    // (SHOP_DAILY_N willekeurige items, voor iedereen dezelfde, stabiel tot middernacht UTC)
-    // met daaronder los de passen — die moeten altijd te koop zijn.
-    let shelves = if SHOP_TEST_DAY_PASS_ONLY {
-        let pass: String = db::boost_items(&st.pool)
-            .iter()
-            .filter(|it| it.duration > 0) // dagpas = de boost mét looptijd
-            .map(slot)
-            .collect();
-        format!(
-            "<h2 class=\"shelf-title\">🎟 Hytale access</h2><div class=\"shelf shop\">{pass}</div>"
+    // Volledig shop-ontwerp (zoals de Admin shop preview): dagrotatie + Hytale-passen.
+    // Twee onderdelen zijn nog niet vrijgegeven en staan grijs (zie de flags bovenaan).
+    // Afteller tot de volgende rotatie = eerstvolgende UTC-middernacht (epoch-seconden);
+    // de client rekent met Date.now() → tijdzone-onafhankelijk, tikt elke seconde.
+    let next_refresh = (shop_day() + 1) * 86400;
+    let countdown =
+        format!("<span class=\"shop-countdown\" data-refresh=\"{next_refresh}\">⏳ …</span>");
+    let picks = if SHOP_DAILY_PICKS_LIVE {
+        let offers: String = db::shop_offers(
+            &st.pool,
+            shop_day(),
+            SHOP_DAILY_N,
+            settings::i64_of(&st.pool, "horseshoe_shop_odds_days"),
         )
-    } else {
-        let offers: String =
-            db::shop_offers(
-                &st.pool,
-                shop_day(),
-                SHOP_DAILY_N,
-                settings::i64_of(&st.pool, "horseshoe_shop_odds_days"),
-            )
-            .iter()
-            .map(slot)
-            .collect();
+        .iter()
+        .map(slot)
+        .collect();
         // Admins mogen opnieuw laten trekken zonder een dag te wachten (test-knopje).
         let reroll = if admin {
             "<form method=\"post\" action=\"/admin/shop/reroll\" class=\"reroll-f\">\
@@ -1259,18 +1259,35 @@ async fn market(
         } else {
             ""
         };
-        let passes: String = db::boost_items(&st.pool).iter().map(slot).collect();
-        // Afteller tot de volgende rotatie = eerstvolgende UTC-middernacht (epoch-seconden).
-        // De client rekent met Date.now() → tijdzone-onafhankelijk, tikt elke seconde.
-        let next_refresh = (shop_day() + 1) * 86400;
         format!(
-            "<h2 class=\"shelf-title\">✨ Today's picks{reroll}\
-               <span class=\"shop-countdown\" data-refresh=\"{next_refresh}\">⏳ …</span></h2>\
-             <div class=\"shelf shop\">{offers}</div>\
-             <h2 class=\"shelf-title\">🎟 Hytale access</h2>\
-             <div class=\"shelf shop\">{passes}</div>"
+            "<h2 class=\"shelf-title\">✨ Today's picks{reroll}{countdown}</h2>\
+             <div class=\"shelf shop\">{offers}</div>"
+        )
+    } else {
+        // Nog niet vrijgegeven: SHOP_DAILY_N grijze 🔒-placeholders i.p.v. echte gems.
+        let ph: String = (0..SHOP_DAILY_N).map(|_| placeholder_slot()).collect();
+        format!(
+            "<h2 class=\"shelf-title\">✨ Today's picks{countdown}</h2>\
+             <div class=\"shelf shop\">{ph}</div>"
         )
     };
+    // Hytale-passen: dagpas blijft koopbaar; de permanente pas staat grijs als textloze
+    // teaser (zelfde 🔒-placeholder als de picks — géén naam/prijs) tot vrijgegeven.
+    let passes: String = db::boost_items(&st.pool)
+        .iter()
+        .map(|it| {
+            if it.duration == 0 && !SHOP_PERMA_PASS_LIVE {
+                placeholder_slot()
+            } else {
+                slot(it)
+            }
+        })
+        .collect();
+    let shelves = format!(
+        "{picks}\
+         <h2 class=\"shelf-title\">🎟 Hytale access</h2>\
+         <div class=\"shelf shop\">{passes}</div>"
+    );
 
     let from = q.from.unwrap_or(coins);
 
@@ -1586,6 +1603,15 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
         name = esc(&it.name),
         price = dots(it.price),
     )
+}
+
+/// Grijs, textloos 🔒-placeholder-vakje als teaser voor iets dat nog niet vrijgegeven is:
+/// de dagpicks (`SHOP_DAILY_PICKS_LIVE = false`) én de permanente pas (`SHOP_PERMA_PASS_LIVE
+/// = false`). Bewust géén naam/prijs/tekst — enkel het slotje — zodat er niks speler-zichtbaars
+/// verzonnen wordt; de kaart houdt wel de vakjes-hoogte aan.
+fn placeholder_slot() -> String {
+    "<div class=\"slot soon\"><div class=\"thumb\">🔒</div><div class=\"name\">&nbsp;</div></div>"
+        .to_string()
 }
 
 /// Inventory-sectie — placeholder tot items bestaan (gekocht/gewonnen).
