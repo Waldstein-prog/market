@@ -40,7 +40,7 @@ const SHOP_DAILY_N: i64 = 4;
 ///   gems. Op **groen licht** → `true` → de echte gem-rotatie verschijnt (+ admin-reroll).
 /// * `SHOP_PERMA_PASS_LIVE = false` → de permanente Hytale-pas staat grijs (nog niet te koop,
 ///   wacht op de server-mod). De **dagpas blijft gewoon koopbaar**. Later → `true`.
-const SHOP_DAILY_PICKS_LIVE: bool = false;
+const SHOP_DAILY_PICKS_LIVE: bool = true;
 const SHOP_PERMA_PASS_LIVE: bool = false;
 
 /// De dag waarop de shop-rotatie draait (hele dagen sinds epoch, UTC → rolt om
@@ -170,24 +170,24 @@ fn coins_channel(cfg: &Config) -> &'static str {
 
 /// Tekst van de publieke aankoopmelding. Gems krijgen het achtervoegsel "gem"; passen en
 /// boosters worden bij hun naam genoemd. `a`/`an` volgt de eerste letter van de naam.
-fn purchase_announce(name: &str, item: &db::Item) -> String {
+fn purchase_announce(uid: &str, item: &db::Item) -> String {
     let article = match item.name.chars().next().map(|c| c.to_ascii_lowercase()) {
         Some('a' | 'e' | 'i' | 'o' | 'u') => "an",
         _ => "a",
     };
     if item.category == "inventory" {
-        format!("**{name}** bought {article} **{}** gem.", item.name)
+        format!("<@{uid}> bought {article} **{}** gem.", item.name)
     } else {
-        format!("**{name}** bought {article} **{}**.", item.name)
+        format!("<@{uid}> bought {article} **{}**.", item.name)
     }
 }
 
 /// Post de aankoopmelding in #coins (async, mag de redirect niet ophouden en een
 /// Discord-hapering mag de aankoop niet breken).
-fn announce_purchase(st: &AppState, name: &str, item: &db::Item) {
+fn announce_purchase(st: &AppState, uid: &str, item: &db::Item) {
     let dc = st.dc.clone();
     let chan = coins_channel(&st.cfg).to_string();
-    let msg = purchase_announce(name, item);
+    let msg = purchase_announce(uid, item);
     tokio::spawn(async move {
         let _ = dc.send_channel_message(&chan, &msg).await;
     });
@@ -564,12 +564,13 @@ a.link{{color:{MEADOW}}}
   white-space:nowrap;font-variant-numeric:tabular-nums}}
 .shop-countdown b{{color:#cfe0c8}}
 /* Nog niet vrijgegeven: grijs, niet-klikbaar placeholder-vakje met een slotje. */
-/* Teaser = één strak grijs vak (de .slot zelf), met het slotje gecentreerd. De thumb vult
-   het hele vak (géén eigen rand/achtergrond) i.p.v. een klein doosje-in-een-doos. min-height
-   geeft de losstaande dagpicks-rij een nette hoogte; in de passen-rij rekt hij mee (stretch). */
-.slot.soon{{opacity:.5;filter:grayscale(.75)}}
-.slot.soon .thumb{{flex:1;aspect-ratio:auto;min-height:150px;border:0;background:transparent;
-  display:flex;align-items:center;justify-content:center;font-size:2.2rem}}
+/* Teaser = één strak, uniform grijs vak met het slotje gecentreerd. De thumb HOUDT
+   aspect-ratio:1 (nodig: dat laat `align-items:stretch` het vak wél naar de volle
+   pashoogte rekken — een `flex:1`-thumb blokkeert die stretch), maar krijgt géén eigen
+   rand/achtergrond, zodat het geen doosje-in-een-doos is. `justify-content:center` zet
+   het slotje in het midden van het (uitgerekte) vak. */
+.slot.soon{{opacity:.5;filter:grayscale(.75);justify-content:center}}
+.slot.soon .thumb{{border:0;background:transparent;font-size:2.2rem}}
 /* Ronde Hytale-knop onderaan de Coins-tab, met de pas-timer eróver. De H in de
    afbeelding is druk, dus de tijd krijgt een donker pilletje — anders leest hij niet. */
 .passbtn{{position:relative;width:125px;margin:1.4rem auto .2rem;line-height:0}}
@@ -2160,7 +2161,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                 .detail(format!("{} → whitelisted as {hname}", item.name)),
         );
         // Publieke aankoopmelding in #coins (pas).
-        announce_purchase(&st, &name, &item);
+        announce_purchase(&st, &uid, &item);
         return Redirect::to(&format!("/market?ok={}&from={}", pct(&msg), oldbal)).into_response();
     }
 
@@ -2179,7 +2180,7 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                     .detail(item.name.clone()),
             );
             // Publieke aankoopmelding in #coins (gem of booster — de helper kiest de tekst).
-            announce_purchase(&st, &name, &item);
+            announce_purchase(&st, &uid, &item);
             format!("/market?from={}", bal + item.price)
         }
         Err(e) => format!("/market?err={}", pct(&e)),
