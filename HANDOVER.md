@@ -14,6 +14,41 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-18g) — Manage → Inactives + last_seen-tracking; Horseshoe-tekst; Favor-spelling
+
+**Alles LIVE op prod + gecommit + gepusht + gedeployd** (commits `051149a`, `7c53368`;
+subtree `market-gh` → `4260feb`).
+
+### Manage → Inactives + activiteits-tracking (voorbereiding "verdeel-kist")
+Idee (user): leden die ~1 jaar niks deden worden opgegeven → speciale 24u-chest waarbij
+deelnemers hun coins verdelen. **Mechaniek zelf nog te bepalen**; deze sessie = de fundering.
+- **Belangrijke realiteit** (aan user uitgelegd): Discord geeft géén retro "laatst getypt",
+  en `earn_log` wordt na 8 dagen gewist → er is **geen jaar-historiek**. Enige weg = vanaf nu
+  **vooruit** meten. Backfill van kanaalgeschiedenis bewust NIET gedaan (user-keuze).
+- **Nieuwe tabel** `member_activity(user_id, name, last_seen)` + helpers `touch_activity`
+  (upsert, naam-behoudend), `seed_activity` (INSERT OR IGNORE), `list_inactives` (aflopend
+  op afwezigheid + saldo). db.rs.
+- **Bot**: `GUILD_MESSAGE_REACTIONS`-intent erbij (niet-privileged). Élk niet-bot-**bericht**
+  in de prod-guild ververst `last_seen` (ongeacht kanaal/commando/cooldown — activiteit ≠ coins);
+  nieuwe **ReactionAdd**-handler doet hetzelfde voor reacties. Bij **CacheReady** krijgt elk
+  huidig prod-lid `last_seen = nu` (seed, klok start; bestaande metingen blijven). **Geverifieerd
+  op prod: 33 Magic-Meadow-leden geseed op nu; dev-guild bewust niet.**
+- **Web**: Manage → **💤 Inactives**-tab (`/admin/inactives`) — tabel aflopend op dagen
+  inactief, ≥1-jaar-kandidaten met ⚑-vlag, uitleg-note dat de teller vooruit opbouwt. Admin-UI
+  is Nederlands (zoals de andere Manage-pagina's).
+- **NB startdatum-klok = 2026-07-18.** Iedereen staat nu op 0 dagen; pas ~2027-07-18 kan iemand
+  "365" halen. De verdeel-kist-feature is dus pas na een echt jaar zinvol tenzij de user de
+  drempel verlaagt.
+
+### Lucky Horseshoe-omschrijving + Favor-spelling (afronding 18f-parkeerpunt)
+- **Omschrijving** = *"You will have twice as much chance to open Fortuna's Favor."* (user-tekst;
+  "Foruna"-typo → "Fortuna"). Seed-default in db.rs + **live prod-DB-rij** direct bijgewerkt
+  (seed is idempotent). Geen binary-redeploy nodig geweest voor die tekst (DB-driven).
+- **Chest-naam overal US "Favor"** — de 2 resterende "Favour"-comments (db.rs, web.rs)
+  gelijkgetrokken; user bevestigde: "favour" was zijn Britse typo, US aanhouden.
+
+---
+
 ## ⏭️ Sessie (2026-07-18f) — inventory-polish: Trinkets, gem-image2, gems 6-per-rij
 
 **Alles LIVE op prod + gecommit + gepusht** (commit `0a72f92`; subtree `market-gh` → `572a7a1`).
@@ -85,9 +120,10 @@ zit in 2 guilds: **WaldsteinDevZone** (`652452615879262220`, waar dev-coins zit)
 - ✅ ~~"Boosts" → "Trinkets"~~ — **gedaan in 18f**.
 - ✅ ~~image2 (2e afbeelding) tonen in de inventory~~ — **gedaan in 18f**.
 - ✅ ~~Gems 6-per-rij in de inventory~~ — **gedaan in 18f**.
-- **Lucky Horseshoe-omschrijving** wijzigen — user-tekst: *"You will have twice as much chance to
-  open Foruna's Favor"* (⚠️ "Foruna" = vermoedelijk typo voor **Fortuna**; vragen vóór live).
-- **"jaar niet actief member"** — TODO (nog te specificeren met user).
+- ✅ ~~Lucky Horseshoe-omschrijving~~ — **gedaan in 18g** ("...open Fortuna's Favor.").
+- ✅ ~~"jaar niet actief member"~~ — **fundering gedaan in 18g** (Manage → Inactives +
+  last_seen-tracking live). **Nog open: de verdeel-kist-mechaniek zelf** (24u-chest die het
+  saldo van een opgegeven inactief lid onder de deelnemers verdeelt — details uit te werken).
 
 ---
 
