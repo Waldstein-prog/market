@@ -3925,10 +3925,9 @@ async fn admin_absent(
             };
             format!(
                 "<tr data-uid=\"{uid}\"><td>{member}{flag}</td>\
-                 <td>{days}</td><td><span class=\"hint\">{ago} geleden</span></td>\
+                 <td>{days}</td><td><span class=\"hint\">{days} dagen geleden</span></td>\
                  <td>{MC} {coins}</td></tr>",
                 uid = esc(&m.user_id),
-                ago = fmt_dur(elapsed),
                 coins = dots(m.coins),
             )
         })
