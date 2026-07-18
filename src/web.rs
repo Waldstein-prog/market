@@ -1260,15 +1260,10 @@ async fn market(
         .iter()
         .map(slot)
         .collect();
-        // Admins mogen opnieuw laten trekken zonder een dag te wachten (test-knopje).
-        let reroll = if admin {
-            "<form method=\"post\" action=\"/admin/shop/reroll\" class=\"reroll-f\">\
-               <button class=\"reroll\" title=\"Roll a new daily selection (admin)\">↻</button></form>"
-        } else {
-            ""
-        };
+        // GEEN reroll-knop op de publieke shop (de admin-reroll leeft enkel op de
+        // Admin shop preview). De publieke shop toont enkel de afteller.
         format!(
-            "<h2 class=\"shelf-title\">✨ Today's picks{reroll}{countdown}</h2>\
+            "<h2 class=\"shelf-title\">✨ Today's picks{countdown}</h2>\
              <div class=\"shelf shop picks\">{offers}</div>"
         )
     } else {
