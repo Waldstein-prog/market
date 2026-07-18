@@ -1310,7 +1310,7 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
         let embed = serenity::CreateEmbed::new()
             .title("🏆 Weekly leaderboard")
             .description(format!(
-                "Top earners of the past week!\n\n{lines}\n🎉 **Top Three claim your prize below!**"
+                "Top earners of the past week!\n\n{lines}\n🎉 **Top Three claim your prize below!** <:MM_party:1522596802874835014>"
             ))
             .colour(0x6B_9B_52);
         // Cadeauknoppen voor de top 3 (Gold 300 / Silver 200 / Bronze 100). Elk enkel
