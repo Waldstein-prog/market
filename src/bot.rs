@@ -1279,7 +1279,7 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
 
         // Venster = de net afgelopen week: sinds de vorige zaterdag 15:00.
         let since = db::last_saturday_1500_brussels(now_secs()) - 7.0 * 86400.0;
-        let top = db::leaderboard_week(&pool, since, 10);
+        let top = db::leaderboard_week(&pool, since, 20);
         if top.is_empty() {
             continue;
         }
