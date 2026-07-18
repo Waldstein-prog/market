@@ -596,6 +596,9 @@ a.link{{color:{MEADOW}}}
 .gemcard.previewable{{cursor:pointer}}
 .gemcard.previewsel{{outline:2px solid {MEADOW};outline-offset:2px}}
 .gemcard .gdesc{{font-size:.7rem;color:#9db095;line-height:1.25}}
+/* Duw de Use-knop naar de onderkant van de (uitgerekte) kaart, zodat de knoppen op één rij
+   uitlijnen ook al is de ene omschrijving langer dan de andere. */
+.gemcard .buyform{{margin-top:auto}}
 .booster-active{{font-size:.72rem;color:#c9a227;font-weight:700;text-align:center;margin:.15rem 0 .3rem}}
 .booster-banner{{background:rgba(201,162,39,.12);border:1px solid rgba(201,162,39,.5);
   color:#e0c56a;border-radius:10px;padding:.55rem .8rem;margin:.6rem 0;font-size:.85rem;font-weight:600}}
