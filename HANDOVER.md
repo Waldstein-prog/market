@@ -14,6 +14,81 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-18a) — level-up-cadeaus (embed+claim), correctie-inhaalslag, aankoopmeldingen, cosmetica
+
+**Alles LIVE op prod + gecommit + gepusht** (`f1f69ac` → `b205e6e`; subtree t/m `128a253`).
+
+### 1. Level-up-cadeaus — nieuw embed+claim-systeem (`15a5d2f` e.v.)
+**Vervangt** het oude auto-uitgekeerde 1%-bonusje (dat enkel in het chat-award-pad vuurde en
+door de recente deploy nooit was getriggerd — 0 level-events in `server_log`, terwijl 19 leden
+al ≥ level 1 stonden).
+
+- **Voortaan:** bij een level-up post de bot een embed **"🎉 LEVEL UP! 🎉"** in **prod #coins**
+  met tekst `<@tag>, you are now level **N**, <variant>` + een **🎁 Claim reward**-knop.
+  - Variant = willekeurig uit **5 user-teksten** (`LEVELUP_VARIANTS` in `bot.rs`): *super
+    inspiring!* · *terrifically done!* · *be proud of you!* · *you did amazing!* · *lots of
+    praise to you!* (allemaal met `!`). **Niet zelf uitbreiden** — user-beslissing.
+  - **Enkel de gelevelde** kan claimen (custom_id `lg:{id}`, atomische claim). Andere klikker →
+    ephemeral **"Uh-oh! This is not your reward!"**. Bij claim → publiek **"<naam> got X coins
+    for the level up."** (de náám, géén ping — bewust anders dan de tag in de embed).
+  - **Cadeau = 1,5 % van je saldo** op het moment van de level-up (half naar boven), uitgekeerd
+    via `admin_add_coins` → verhoogt **niet** `total_earned` (geen cascade).
+- **Gecentraliseerd + zelfhelend:** `maybe_levelup(http, pool, uid, name)` draait na élke
+  coin-bron (bericht `bot.rs:~193`, daily `~365`, chest-pop `~1015`, chest-rescue `~562`).
+  Marker `coins.gifted_level` = hoogst gepost level → geen dubbele/gemiste embeds; een level-up
+  via admin-grant wordt bij de volgende verdienste alsnog opgepikt.
+- **Baseline-migratie (eenmalig, `db.rs` init, flag `settings.levelgift_baseline_v1`):** zet bij
+  deploy `gifted_level = huidig level` voor bestaande leden, zodat de embed **niet met
+  terugwerkende kracht** de hele backlog naar #coins spamt. ✅ Geverifieerd: 0 mismatches.
+- **DB:** tabel `level_gifts(id,uid,amount,level,kind,claimed,ts)` + kolom `coins.gifted_level`.
+  Helpers in `db.rs`: `level_floor`, `get/set_gifted_level`, `create_level_gift`,
+  `claim_level_gift`→`GiftClaim`, `has_correction`, `all_earners`.
+
+### 2. Eenmalige correctie-inhaalslag — ⚠️ WACHT OP GOEDKEURING (nog NIET uitgevoerd)
+Beslissing user: **géén** stille bulk-uitkering; wél de gemiste level-ups **replayen** als
+één gebundeld cadeau per lid (**optie A**). Basis = **1,5 % van elke bereikte leveldrempel**
+(`level_floor(1..cur)`, som). Twee admin-`!`-commando's (`admin_only`, geregistreerd):
+- **`!levelfix_preview`** → post **1 sample-embed** naar het **dev "coins"**-kanaal
+  (`DEV_COINS_CHANNEL_ID = 1525189157104648343`) met een **preview-knop** die niets uitkeert
+  (custom_id `lgprev:{uid}:{amount}`). Verandert niets aan de DB.
+- **`!levelfix_commit`** → post de **19 gebundelde correctie-embeds** naar **prod #coins** met
+  echte claim-knoppen, zet `gifted_level`, logt `level/correction`. **Idempotent** via
+  `level_gifts.kind='correction'` (herhalen doet niets; resumable).
+
+**Dry-run (prod, 2026-07-18):** 19 leden, **860 coins** totaal. Waldstein+FayBelle 215 (lvl 9),
+DinDin 130 (8), thatladtag 78 (7), Yâ-Ôd 46 (6), 6×26 (lvl 5), Rivi+Ezuldor 7 (3), 6×1 (lvl 1).
+
+**→ Volgende sessie / user-actie:** user typt `!levelfix_preview` in dev-coins → keurt de look →
+`!levelfix_commit` voor prod. Pas dán is de correctie uitgekeerd.
+
+### 3. Aankoopmeldingen in #coins — ALLE items (`2e335d2`, `b205e6e`)
+Web-aankoop postte niets naar Discord. Nu wel, via **nieuwe** `discord_rest::send_channel_message`
+(REST-POST, los van de gateway-bot) + helper `announce_purchase`/`purchase_announce` in `web.rs`,
+in **beide** koop-branches (pas + gem/booster). Async gespawnd (blokkeert de redirect niet, een
+Discord-hapering breekt de aankoop niet). Omgevingsbewust (`coins_channel`: dev→dev-coins,
+prod→prod #coins). Teksten: gems **"<naam> bought a/an <Gem> gem."**, boosters/passen
+**"<naam> bought a/an <Naam>."** (a/an op de eerste letter).
+
+### 4. Cosmetica (`f1f69ac`, `7bd1cf5`)
+- **Duizendtal-punt** in de shop-prijzen (`dots()` in `web.rs`): 7.777, 20.000.
+- **"Basic Gems"-titel + kaarten gecentreerd**; titel in de sier-font **"Spicy Sale"**
+  (1001fonts, gratis comm.) — ingebakken via `include_bytes!`, geserveerd op
+  `/fonts/spicy-sale.ttf`, `@font-face` + class `shelf-title.fancy`.
+- **Permanente pas als grey-out verzamelvakje** op de Boosts-tab (naast de boosters). Blijft
+  `category='boost'` → **NOOIT** in de rnd-korf, altijd gewoon in de shop; onthult per koper
+  (`has_perma_access`).
+- **Boosts-tab toont geen Hytale-naam meer** (naam + "No Hytale pass yet."-placeholder geschrapt).
+- **`shop_offers`-docstring veralgemeend**: de 1/N-booster-loting geldt voor álle toekomstige
+  boosters (category='booster') — automatisch 1 slot per N dagen, willekeurig één gekozen. De
+  rnd is zuiver bevonden via simulatie (2M dagen → 7,117 % ≈ 1/14; grillige gaps, mediaan 10).
+
+### Open / nog te beslissen
+- **`!levelfix_commit` nog te draaien** na preview-goedkeuring (zie §2).
+- Level-up embed **knop-label**: nu "Claim reward" — user mag nog kiezen voor enkel 🎁.
+- Multi-level-catch-up going-forward geeft 1 embed **per** gepasseerd level (zeldzaam).
+
+---
+
 ## ⏭️ Sessie (2026-07-17f) — polish: purse-loop, booster-image2, Basic Gems
 
 **Alles LIVE + gecommit + gepusht** (`133e6d9`, `39a2210`; subtree t/m `4e34bfc`).
