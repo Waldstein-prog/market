@@ -169,6 +169,16 @@ async fn handle_message(
     if msg.author.bot {
         return Ok(());
     }
+    // Activiteits-tracking voor Manage → Inactives: élk niet-bot-bericht in de prod-guild
+    // ververst last_seen — ongeacht kanaal, commando of coin-cooldown (activiteit ≠ coins).
+    if msg.guild_id.map(|g| g.get()) == Some(PROD_GUILD_ID) {
+        let n = msg
+            .author
+            .global_name
+            .clone()
+            .unwrap_or_else(|| msg.author.name.clone());
+        db::touch_activity(&data.pool, &msg.author.id.to_string(), &n, now_secs());
+    }
     // Commando's (!coins e.d.) zijn immuun: geen coins, cooldown onaangeroerd.
     if msg.content.starts_with(PREFIX) {
         return Ok(());
@@ -250,6 +260,21 @@ async fn event_handler(
                         for m in &humans {
                             tracing::info!("    - {} ({})", m.display_name(), m.user.id);
                         }
+                        // Activiteits-klok starten (Manage → Inactives): elk huidig prod-lid
+                        // krijgt last_seen = nu, enkel als het nog niet bestaat (bestaande
+                        // metingen blijven). Zo start niemand vals als "al lang inactief".
+                        if gid.get() == PROD_GUILD_ID {
+                            let ts = now_secs();
+                            for m in &humans {
+                                db::seed_activity(
+                                    &data.pool,
+                                    &m.user.id.to_string(),
+                                    &m.display_name().to_string(),
+                                    ts,
+                                );
+                            }
+                            tracing::info!("Inactives: {} leden geseed op nu", humans.len());
+                        }
                     }
                     Err(e) => tracing::warn!("kan leden niet ophalen voor {gname}: {e}"),
                 }
@@ -272,6 +297,27 @@ async fn event_handler(
         }
         serenity::FullEvent::Message { new_message } => {
             handle_message(ctx, new_message, data).await?;
+        }
+        serenity::FullEvent::ReactionAdd { add_reaction } => {
+            // Een reactie in de prod-guild telt als activiteit (Manage → Inactives).
+            // Discord stuurt bij een guild-reactie het member-object mee → weergavenaam;
+            // valt dat weg, dan updaten we last_seen met lege naam (blijft behouden).
+            if add_reaction.guild_id.map(|g| g.get()) == Some(PROD_GUILD_ID) {
+                if let Some(uid) = add_reaction.user_id {
+                    let bot_react = add_reaction
+                        .member
+                        .as_ref()
+                        .is_some_and(|m| m.user.bot);
+                    if !bot_react {
+                        let n = add_reaction
+                            .member
+                            .as_ref()
+                            .map(|m| m.display_name().to_string())
+                            .unwrap_or_default();
+                        db::touch_activity(&data.pool, &uid.to_string(), &n, now_secs());
+                    }
+                }
+            }
         }
         serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } => {
             // Lid verliet de prod-server → saldo archiveren + resetten (verse start bij terugkeer).
@@ -1446,7 +1492,9 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
     let intents = serenity::GatewayIntents::GUILDS
         | serenity::GatewayIntents::GUILD_MESSAGES
         | serenity::GatewayIntents::MESSAGE_CONTENT
-        | serenity::GatewayIntents::GUILD_MEMBERS;
+        | serenity::GatewayIntents::GUILD_MEMBERS
+        // Reacties tellen mee als activiteit voor Manage → Inactives (niet-privileged intent).
+        | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
     // Verlopen tijdelijke rollen periodiek intrekken.
     tokio::spawn(role_grant_sweeper(pool.clone(), cfg.clone()));

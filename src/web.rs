@@ -239,6 +239,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/delete", post(admin_item_delete))
         .route("/admin/item/stock", post(admin_item_stock))
         .route("/admin/accounts", get(admin_accounts))
+        .route("/admin/inactives", get(admin_inactives))
         .route("/admin/item/move", post(admin_item_move))
         .route("/admin/item/shelf", post(admin_item_shelf))
         .route("/admin/item/image/clear", post(admin_item_image_clear))
@@ -829,11 +830,12 @@ fn admin_subtabs(active: &str) -> String {
         format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
     };
     format!(
-        "<div class=\"subtabs\">{}{}{}{}{}{}{}{}{}</div>",
+        "<div class=\"subtabs\">{}{}{}{}{}{}{}{}{}{}</div>",
         item("/admin/market", "market", "🛒 Shop"),
         item("/admin/inventory", "inv_preview", "🎒 Preview inventory"),
         item("/admin/shop/preview", "shop_preview", "👁 Admin shop preview"),
         item("/admin/accounts", "accounts", "👥 Accounts"),
+        item("/admin/inactives", "inactives", "💤 Inactives"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
         item("/admin/settings", "settings", "⚙ Settings"),
@@ -3879,6 +3881,75 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
     );
     Html(shell(
         "Accounts — Meadow Market",
+        &chrome(&name, "admin", true, ""),
+        true,
+        &body,
+    ))
+    .into_response()
+}
+
+/// Manage → Inactives: alle gevolgde leden, **aflopend op afwezigheid** (langst inactief
+/// bovenaan). Voorbereiding op de latere "verdeel-kist": een lid dat ~een jaar niets deed
+/// wordt opgegeven, waarna een speciale 24u-chest zijn coins onder de deelnemers verdeelt
+/// (mechaniek nog uit te werken).
+///
+/// ⚠️ De afwezigheids-teller wordt **vooruit** opgebouwd vanaf de uitrol van deze feature:
+/// Discord levert geen retro "laatst getypt", dus iedereen startte op 0 dagen. Pas na een
+/// echt jaar zonder message/reactie haalt iemand "365 dagen".
+async fn admin_inactives(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let now = now_secs();
+    let members = db::list_inactives(&st.pool);
+    let rows: String = members
+        .iter()
+        .map(|m| {
+            let elapsed = (now - m.last_seen).max(0.0) as i64;
+            let days = elapsed / 86400;
+            let member = if m.name.is_empty() {
+                format!("<span class=\"hint\">({})</span>", esc(&m.user_id))
+            } else {
+                esc(&m.name)
+            };
+            // ≥1 jaar inactief → markeren (kandidaat voor de verdeel-kist).
+            let flag = if days >= 365 {
+                " <span class=\"yes\">⚑ ≥1 jaar</span>"
+            } else {
+                ""
+            };
+            format!(
+                "<tr data-uid=\"{uid}\"><td>{member}{flag}</td>\
+                 <td>{days}</td><td><span class=\"hint\">{ago} geleden</span></td>\
+                 <td>{MC} {coins}</td></tr>",
+                uid = esc(&m.user_id),
+                ago = fmt_dur(elapsed),
+                coins = dots(m.coins),
+            )
+        })
+        .collect();
+    let table = if members.is_empty() {
+        "<p class=\"muted\">Nog geen activiteit gevolgd — de klok start zodra de bot met deze \
+         versie draait en de leden inleest.</p>"
+            .to_string()
+    } else {
+        format!(
+            "<table class=\"ctable\"><thead><tr>\
+               <th>Lid</th><th>Dagen inactief</th><th>Laatst actief</th><th>Saldo</th>\
+             </tr></thead><tbody>{rows}</tbody></table>"
+        )
+    };
+    let note = "<p class=\"muted\" style=\"margin:.2rem 0 .8rem\">\
+        Afwezigheid = tijd sinds het laatste bericht of de laatste reactie in de prod-server. \
+        De teller wordt <b>vooruit</b> opgebouwd vanaf de uitrol (Discord kent geen retro \
+        “laatst getypt”), dus iedereen startte op 0 dagen. Kandidaten voor de \
+        verdeel-kist (≥ 1 jaar) worden gemarkeerd; de kist-mechaniek zelf komt later.</p>";
+    let body = format!(
+        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Inactives</div>{note}{table}",
+        admin_subtabs("inactives"),
+    );
+    Html(shell(
+        "Inactives — Meadow Market",
         &chrome(&name, "admin", true, ""),
         true,
         &body,

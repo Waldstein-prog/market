@@ -81,6 +81,15 @@ pub fn init_pool(path: &str) -> DbPool {
             ts          REAL NOT NULL       -- epoch-seconden van de verdienste
         );
         CREATE INDEX IF NOT EXISTS idx_earn_log_ts ON earn_log(ts);
+        -- Laatste activiteit per lid (message OF reactie) in de prod-guild. Voedt
+        -- Manage → Inactives (leden die lang niks deden). NB: last_seen wordt vooruit
+        -- opgebouwd vanaf uitrol — er is geen retro-historiek in Discord/earn_log.
+        CREATE TABLE IF NOT EXISTS member_activity (
+            user_id   TEXT PRIMARY KEY,   -- Discord-user
+            name      TEXT NOT NULL,      -- laatst gekende weergavenaam ('' = onbekend)
+            last_seen REAL NOT NULL       -- epoch-seconden van laatste message/reactie
+        );
+        CREATE INDEX IF NOT EXISTS idx_member_activity_seen ON member_activity(last_seen);
         CREATE TABLE IF NOT EXISTS admin_undo (
             id         INTEGER PRIMARY KEY CHECK(id = 1), -- max één rij: de laatste ingreep
             user_id    TEXT NOT NULL,
@@ -739,6 +748,65 @@ pub fn hourly_earners(
 pub fn prune_earn_log(pool: &DbPool, before: f64) {
     let conn = pool.get().expect("db");
     let _ = conn.execute("DELETE FROM earn_log WHERE ts < ?1", params![before]);
+}
+
+// --- lid-activiteit (Manage → Inactives) --------------------------------
+
+/// Ververs de laatste activiteit van een lid (message of reactie in de prod-guild).
+/// `name` leeg → last_seen wordt bijgewerkt maar de bestaande naam blijft (bv. bij een
+/// reactie waar we de weergavenaam niet kennen). Upsert, dus altijd goedkoop.
+pub fn touch_activity(pool: &DbPool, uid: &str, name: &str, ts: f64) {
+    let conn = pool.get().expect("db");
+    let _ = conn.execute(
+        "INSERT INTO member_activity (user_id, name, last_seen) VALUES (?1, ?2, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET last_seen = excluded.last_seen,
+           name = CASE WHEN excluded.name != '' THEN excluded.name ELSE member_activity.name END",
+        params![uid, name, ts],
+    );
+}
+
+/// Zet de startklok voor een lid **enkel als het nog niet bestaat** (INSERT OR IGNORE):
+/// bij uitrol/CacheReady krijgt elk huidig lid `last_seen = nu`, zonder al gemeten
+/// activiteit te overschrijven.
+pub fn seed_activity(pool: &DbPool, uid: &str, name: &str, ts: f64) {
+    let conn = pool.get().expect("db");
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO member_activity (user_id, name, last_seen) VALUES (?1, ?2, ?3)",
+        params![uid, name, ts],
+    );
+}
+
+/// Eén rij in de Inactives-lijst: lid + laatste activiteit + huidig saldo (relevant voor
+/// de latere verdeel-kist).
+pub struct Inactive {
+    pub user_id: String,
+    pub name: String,
+    pub last_seen: f64,
+    pub coins: i64,
+}
+
+/// Alle gevolgde leden, **aflopend op afwezigheid** (langst inactief eerst). Saldo komt
+/// uit de coins-tabel (0 als er nog geen coins-rij is).
+pub fn list_inactives(pool: &DbPool) -> Vec<Inactive> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.user_id, a.name, a.last_seen, COALESCE(c.coins, 0)
+               FROM member_activity a LEFT JOIN coins c ON c.user_id = a.user_id
+              ORDER BY a.last_seen ASC",
+        )
+        .expect("prep inactives");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(Inactive {
+                user_id: r.get(0)?,
+                name: r.get(1)?,
+                last_seen: r.get(2)?,
+                coins: r.get(3)?,
+            })
+        })
+        .expect("query inactives");
+    rows.filter_map(|r| r.ok()).collect()
 }
 
 // --- admin coins-beheer -------------------------------------------------
