@@ -14,6 +14,37 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-18c) — levelfix-commando's weg, shop-dag-afteller, boosters uit de dagrotatie
+
+**Alles LIVE op prod + gecommit + gepusht** (`7f0b29d` → `d4c7660`; subtree t/m `6b41c1b`).
+
+- **Eenmalige `!levelfix`-commando's verwijderd** (`7f0b29d`) — de correctie was uitgevoerd
+  (18b): `!levelfix_preview`/`!levelfix_commit` + `handle_level_preview` + de `lgprev:`-route +
+  `correction_for` + `DEV_COINS_CHANNEL_ID` (bot.rs) weg, plus de verweesde db-helpers
+  `level_floor`/`gifted_levels`/`has_correction`/`all_earners`. **De echte claim (`lg:` →
+  `handle_level_claim` → `claim_level_gift`) blijft ongemoeid** → de 19 al-geposte
+  correctie-embeds in prod #coins blijven claimbaar. `level_gifts`-data blijft staan.
+- **Shop-dag-afteller** (`d4c7660`) — live-tickende `⏳ New picks in H:MM:SS` naast
+  "✨ Today's picks", voor iedereen (client rekent met `Date.now()` → tijdzone-proof). Admin
+  houdt zijn ↻ reroll ernaast. **Refresh-moment = 00:00 UTC = 02:00 Brussel (CEST) / 01:00
+  (CET)**, want `shop_day() = floor(now/86400)` in UTC.
+- **Boosters uit de dagrotatie — gems-only** (`d4c7660`) — `horseshoe_shop_odds_days`: `min`
+  1 → 0, met **0 = UIT** (read/write klemmen op de spec-grenzen, dus 0 vergt de min-wijziging).
+  **Live op prod op 0 gezet** + dag-cache gewist. Omkeerbaar via ⚙ Settings (terug op N).
+- **NB — publieke shop staat nog in day-pass-only game-test** (`SHOP_TEST_DAY_PASS_ONLY = true`,
+  web.rs): enkel de Hytale-dagpas ligt er. De **gems-rotatie + de afteller zijn dus nog niet
+  zichtbaar** tot die vlag op `false` gaat (user-keuze 2026-07-18c: **aan laten**).
+
+### 📌 Open TODO — horseshoe-testprotocol (voor later, user-keuze 2026-07-18c)
+De Lucky Horseshoe (permanente booster, bezit = 2 loten i.p.v. 1 bij chest-trekking) moet eerst
+**apart getest** worden vóór hij terug in de dagrotatie mag. Voorstel lag klaar: in de dev-guild
+op testaccounts kopen (Admin shop toont alles), een reeks chests draaien, checken dat de houder
+~2× wint + de 🍀-regel verschijnt + permanent/éénmalig, dan balans-oordeel (2× / prijs 120 /
+zeldzaamheid). **Uitgesteld op verzoek** — pas als dit gebeurd is `horseshoe_shop_odds_days`
+terug op N zetten.
+
+---
+
 ## ⏭️ Sessie (2026-07-18b) — ALLE coins tellen mee voor leveling + gift in uur-overzicht + dubbel-pay-fix
 
 **Alles LIVE op prod + gecommit + gepusht** (commit `fd56e39`; subtree t/m `baeb094`).
