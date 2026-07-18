@@ -228,7 +228,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/use/gem", post(use_gem))
         .route("/use/gem/unequip", post(unequip_gem))
         .route("/admin/market", get(admin_market))
-        .route("/admin/shop", get(admin_shop))
+        .route("/admin/inventory", get(admin_inventory_preview))
         .route("/admin/shop/preview", get(admin_shop_preview))
         .route("/admin/shop/reroll", post(admin_shop_reroll))
         .route("/admin/shelf/add", post(admin_shelf_add))
@@ -820,7 +820,7 @@ fn admin_subtabs(active: &str) -> String {
     format!(
         "<div class=\"subtabs\">{}{}{}{}{}{}{}{}{}</div>",
         item("/admin/market", "market", "🛒 Shop"),
-        item("/admin/shop", "shop", "🛍 Admin shop items"),
+        item("/admin/inventory", "inv_preview", "🎒 Preview inventory"),
         item("/admin/shop/preview", "shop_preview", "👁 Admin shop preview"),
         item("/admin/accounts", "accounts", "👥 Accounts"),
         item("/admin/coins", "coins", "🪙 Coins"),
@@ -1325,59 +1325,6 @@ async fn market(
         .into_response()
 }
 
-/// De **Admin shop**: de volledige catalogus, koopbaar, zoals de gewone shop er vroeger
-/// uitzag. De publieke shop toont sinds de herwerking nog maar `SHOP_DAILY_N` dagitems —
-/// admins moeten alles kunnen kopen om te testen, dus dat oude beeld leeft hier voort.
-async fn admin_shop(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<MarketQuery>,
-) -> Response {
-    let refresh = auto_refresh_js(AUTO_REFRESH_SHOP_MS);
-    let Some((uid, name)) = require_admin(&st, &headers) else {
-        return Redirect::to("/").into_response();
-    };
-    let (coins, _m, _p, _te) = db::get_stats(&st.pool, &uid);
-    let notice = market_notice(&q);
-    let owned: std::collections::HashSet<i64> =
-        db::owned_item_ids(&st.pool, &uid).into_iter().collect();
-    let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
-    let has_perma = db::has_perma_access(&st.pool, &uid);
-    let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
-
-    // Alle schappen met al hun items; lege schappen overslaan.
-    let shelves: String = db::list_shelves(&st.pool)
-        .iter()
-        .map(|(sid, title)| {
-            let slots: String = db::shelf_items(&st.pool, *sid)
-                .iter()
-                .map(|it| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass, coins))
-                .collect();
-            if slots.is_empty() {
-                return String::new();
-            }
-            format!(
-                "<h2 class=\"shelf-title\">{title}</h2><div class=\"shelf shop\">{slots}</div>",
-                title = esc(title),
-            )
-        })
-        .collect();
-
-    let from = q.from.unwrap_or(coins);
-    let body = format!(
-        "{subtabs}\
-         <div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
-           <span class=\"purse-n\" data-bal>{coins}</span></div>\
-         <h1 class=\"shoptitle\">🛍 Admin shop</h1>\
-         <p class=\"muted\">The full catalogue — buy anything to test. Members only see the \
-          daily picks on the <a class=\"link\" href=\"/market\">Shop</a> page.</p>\
-         {notice}{shelves}{KEEP_SCROLL_JS}{refresh}",
-        subtabs = admin_subtabs("shop"),
-    );
-    Html(shell("Admin shop — Meadow Market", &chrome(&name, "admin", true, ""), true, &body))
-        .into_response()
-}
-
 /// **Admin shop preview**: het beoogde publieke shop-ontwerp — de dagrotatie (`SHOP_DAILY_N`
 /// willekeurige items, voor iedereen dezelfde, stabiel tot middernacht UTC) met de passen los
 /// eronder, precies zoals de shop eruitzag vóór hij voor de Hytale-test werd verborgen. Nu enkel
@@ -1432,6 +1379,49 @@ async fn admin_shop_preview(
         subtabs = admin_subtabs("shop_preview"),
     );
     Html(shell("Shop preview — Meadow Market", &chrome(&name, "admin", true, ""), true, &body))
+        .into_response()
+}
+
+/// Admin-preview van de VOLLEDIGE inventory: alle verzamel-items (gems + boosters) getoond
+/// als owned/ontgrendeld, zodat je kunt inschatten hoe een volle inventory eruitziet. Enkel
+/// admin. Puur visueel — de knoppen (Use/Unequip) blijven functioneel zoals bij een lid.
+async fn admin_inventory_preview(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let all_items: Vec<db::Item> = db::list_shelves(&st.pool)
+        .iter()
+        .flat_map(|(sid, _)| db::shelf_items(&st.pool, *sid))
+        .collect();
+    // Alle gems als owned → afbeelding + naam + volledige omschrijving.
+    let gems: String = all_items
+        .iter()
+        .filter(|it| it.category == "inventory")
+        .map(|it| gem_slot(it, true, false))
+        .collect();
+    let gems_set = if gems.is_empty() {
+        String::new()
+    } else {
+        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap\">{gems}</div>")
+    };
+    // Alle boosters als owned.
+    let boosters: String = all_items
+        .iter()
+        .filter(|it| it.category == "booster")
+        .map(|it| booster_slot(it, true))
+        .collect();
+    let boost_set = if boosters.is_empty() {
+        String::new()
+    } else {
+        format!("<h2 class=\"shelf-title\">🚀 Boosts</h2><div class=\"shelf wrap\">{boosters}</div>")
+    };
+    let body = format!(
+        "{subtabs}<h1 class=\"shoptitle\">🎒 Preview inventory</h1>\
+         <p class=\"muted\">Every collectible shown as owned/unlocked — to gauge how a full inventory looks.</p>\
+         {gems_set}{boost_set}{KEEP_SCROLL_JS}",
+        subtabs = admin_subtabs("inv_preview"),
+    );
+    Html(shell("Inventory preview — Meadow Market", &chrome(&name, "admin", true, ""), true, &body))
         .into_response()
 }
 
