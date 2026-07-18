@@ -40,6 +40,16 @@ laatste bericht. Bij benadering — ze checken alles handmatig vóór een kick.
   op die kanalen en her-run de backfill. **Log-cosmetica**: de 403-tekst zegt "lacks 'Manage
   Roles'" (generieke `explain()`-tekst) — misleidend, het gaat om leesrecht; log-only.
 - **NB**: nog niemand ≥1 jaar (top = 358 d). De ≥1-jaar-vlag werkt zodra iemand de drempel haalt.
+- **Polish** (`d092709`, gedeployd): "Laatst actief"-kolom toont enkel **dagen** ("358 dagen
+  geleden"), niet meer dagen+uren (user-verzoek).
+
+### 📌 Open follow-ups (Absent/verdeel-kist)
+- **Verdeel-kist-mechaniek zelf** — nog te bepalen met user (opgeven-flow + 24u-chest + saldo
+  onder deelnemers verdelen).
+- **Bot-leesrecht** op de 403-kanalen (View Channel + Read Message History) → dan backfill
+  her-runnen voor 100% dekking. Nu 33/33 via #general e.a.
+- **Cosmetica**: 403-log zegt misleidend "lacks 'Manage Roles'" (generieke `explain()`) — het is
+  leesrecht; log-only, laag prioritair.
 
 ---
 
