@@ -392,8 +392,11 @@ fn seed_horseshoe(pool: &DbPool) {
 pub fn shop_offers(pool: &DbPool, day: i64, n: i64, booster_odds_days: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut ids: Vec<i64> = {
+        // ORDER BY rowid = insertie-volgorde = de (random) trekkingsvolgorde. Zonder dit
+        // gebruikt SQLite de PK-index (day, item_id) en komen de items gesorteerd op item_id
+        // terug — dan lijkt de shop bij elke her-lees "geherordend" i.p.v. random.
         let mut stmt = conn
-            .prepare("SELECT item_id FROM daily_shop WHERE day = ?1")
+            .prepare("SELECT item_id FROM daily_shop WHERE day = ?1 ORDER BY rowid")
             .expect("prepare daily_shop");
         stmt.query_map(params![day], |r| r.get::<_, i64>(0))
             .expect("query daily_shop")
