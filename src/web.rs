@@ -564,8 +564,12 @@ a.link{{color:{MEADOW}}}
   white-space:nowrap;font-variant-numeric:tabular-nums}}
 .shop-countdown b{{color:#cfe0c8}}
 /* Nog niet vrijgegeven: grijs, niet-klikbaar placeholder-vakje met een slotje. */
-.slot.soon{{opacity:.5;filter:grayscale(.75);justify-content:center}}
-.slot.soon .thumb{{display:flex;align-items:center;justify-content:center;font-size:2.2rem}}
+/* Teaser = één strak grijs vak (de .slot zelf), met het slotje gecentreerd. De thumb vult
+   het hele vak (géén eigen rand/achtergrond) i.p.v. een klein doosje-in-een-doos. min-height
+   geeft de losstaande dagpicks-rij een nette hoogte; in de passen-rij rekt hij mee (stretch). */
+.slot.soon{{opacity:.5;filter:grayscale(.75)}}
+.slot.soon .thumb{{flex:1;aspect-ratio:auto;min-height:150px;border:0;background:transparent;
+  display:flex;align-items:center;justify-content:center;font-size:2.2rem}}
 /* Ronde Hytale-knop onderaan de Coins-tab, met de pas-timer eróver. De H in de
    afbeelding is druk, dus de tijd krijgt een donker pilletje — anders leest hij niet. */
 .passbtn{{position:relative;width:125px;margin:1.4rem auto .2rem;line-height:0}}
