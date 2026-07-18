@@ -291,6 +291,8 @@ async fn event_handler(
                     handle_chest_click(ctx, mc, data).await?;
                 } else if mc.data.custom_id.starts_with("lg:") {
                     handle_level_claim(ctx, mc, data).await?;
+                } else if mc.data.custom_id.starts_with("wg:") {
+                    handle_weekly_claim(ctx, mc, data).await?;
                 } else if mc.data.custom_id == SITE_ACCESS_CUSTOM_ID {
                     // De site-gate stuurt niet-admins naar /info; admins mogen de market in.
                     // Admins krijgen een login-link die na inloggen meteen op /market landt
@@ -1300,12 +1302,82 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
             .title("🏆 Weekly leaderboard")
             .description(format!("Top earners of the past week!\n\n{lines}"))
             .colour(0x6B_9B_52);
+        // Cadeauknoppen voor de top 3 (Gold 300 / Silver 200 / Bronze 100). Elk enkel
+        // claimbaar door de bijhorende winnaar (server-side check in claim_level_gift).
+        // Hergebruikt de level_gifts-tabel (kind='weekly') voor de atomische claim.
+        let now2 = now_secs();
+        let mut buttons: Vec<serenity::CreateButton> = Vec::new();
+        for (rank, amount, label) in [(0usize, 300i64, "Gold"), (1, 200, "Silver"), (2, 100, "Bronze")] {
+            if let Some((uid, _n, _t)) = top.get(rank) {
+                let gid = db::create_level_gift(&pool, uid, amount, 0, "weekly", now2);
+                buttons.push(
+                    serenity::CreateButton::new(format!("wg:{gid}"))
+                        .label(label)
+                        .style(serenity::ButtonStyle::Secondary),
+                );
+            }
+        }
+        let mut msg = serenity::CreateMessage::new().embed(embed);
+        if !buttons.is_empty() {
+            msg = msg.components(vec![serenity::CreateActionRow::Buttons(buttons)]);
+        }
         if PROD_GENERAL_CHANNEL_ID != 0 {
             let _ = serenity::ChannelId::new(PROD_GENERAL_CHANNEL_ID)
-                .send_message(http.as_ref(), serenity::CreateMessage::new().embed(embed))
+                .send_message(http.as_ref(), msg)
                 .await;
         }
     }
+}
+
+/// Klik op een weekly-cadeauknop (Gold/Silver/Bronze): keert het bedrag eenmalig uit aan de
+/// bijhorende winnaar en post een publiek regeltje in #coins. Enkel de eigenaar; een andere
+/// klikker of dubbelklik doet niets — **stil acken, GEEN ephemeral** (huisregel).
+async fn handle_weekly_claim(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    let gid: i64 = mc
+        .data
+        .custom_id
+        .strip_prefix("wg:")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(-1);
+    let uid = mc.user.id.to_string();
+    let name = mc
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| mc.user.name.clone());
+    // Altijd stil acken (geen ephemeral, geen zichtbaar antwoord op de interactie).
+    let _ = mc
+        .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+        .await;
+    if let db::GiftClaim::Granted(amount) =
+        db::claim_level_gift(&data.pool, gid, &uid, &name, now_secs())
+    {
+        if PROD_COINS_CHANNEL_ID != 0 {
+            let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+                .say(
+                    &ctx.http,
+                    format!(
+                        "**{}** won **{amount}** coins with the weekly leaderboard.",
+                        escape_md(&name)
+                    ),
+                )
+                .await;
+        }
+        db::log_event(
+            &data.pool,
+            now_secs(),
+            &db::LogEntry::new("level", "weekly_claim")
+                .actor(&uid, &name)
+                .amount(amount)
+                .detail("weekly leaderboard reward".to_string()),
+        );
+        maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
+    }
+    Ok(())
 }
 
 pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
