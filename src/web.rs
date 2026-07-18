@@ -1197,7 +1197,7 @@ fn inventory_home(
 
         // Boosters (Lucky Horseshoe): permanent verzamel-item, getoond als grey-out-slot
         // zoals de gems — vergrendeld "???" tot je het koopt, daarna onthuld. Géén Use:
-        // bezit = altijd dubbele kans bij de treasure chest (Fortuna's Favour).
+        // bezit = altijd dubbele kans bij de treasure chest (Fortuna's Favor).
         let booster_owned: std::collections::HashSet<i64> =
             db::owned_item_ids(pool, uid).into_iter().collect();
         let boosters = db::all_booster_items(pool);

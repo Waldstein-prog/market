@@ -373,7 +373,7 @@ fn seed_horseshoe(pool: &DbPool) {
     conn.execute(
         "INSERT INTO items (zone, shelf_id, name, price, color, category, description, position)
          VALUES ('shelf', ?1, 'Lucky Horseshoe', 7777, '#c9a227', 'booster',
-                 'A lucky charm — boosts your fortune.', 0)",
+                 'You will have twice as much chance to open Fortuna''s Favor.', 0)",
         params![shelf_id],
     )
     .expect("seed horseshoe");
@@ -1883,7 +1883,7 @@ pub fn owns_horseshoe(pool: &DbPool, uid: &str) -> bool {
 }
 
 /// Het lot-gewicht van dit lid bij een treasure-chest-trekking: **2** wie de Lucky
-/// Horseshoe bezit, anders 1. Geldt (voorlopig) voor de enige chest, Fortuna's Favour;
+/// Horseshoe bezit, anders 1. Geldt (voorlopig) voor de enige chest, Fortuna's Favor;
 /// een later ander chest-type dat deze weging niet wil, roept dit gewoon niet aan.
 pub fn chest_weight(pool: &DbPool, uid: &str) -> u32 {
     if owns_horseshoe(pool, uid) {
