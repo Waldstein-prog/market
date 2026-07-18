@@ -3967,14 +3967,17 @@ async fn admin_absent(
          </form>"
             .to_string()
     };
-    let note = "<p class=\"muted\" style=\"margin:.2rem 0 .8rem\">\
-        Afwezigheid = tijd sinds het laatste bericht/reactie in de prod-server. Live wordt dit \
-        bijgehouden; de <b>backfill</b> scant de kanaalgeschiedenis terug in de tijd voor ieders \
-        laatste bericht (bij benadering — enkel berichten, geen reacties; wie nooit postte valt \
-        terug op zijn join-datum). Kandidaten voor de verdeel-kist (≥ 1 jaar) zijn gemarkeerd; \
-        controleer altijd handmatig vóór een kick.</p>";
+    // Uitleg als tooltip op de titel (hover), niet meer inline — houdt het scherm rustig.
+    let tip = esc(
+        "Afwezigheid = tijd sinds het laatste bericht/reactie in de prod-server. Live wordt dit \
+         bijgehouden; de backfill scant de kanaalgeschiedenis terug in de tijd voor ieders \
+         laatste bericht (bij benadering — enkel berichten, geen reacties; wie nooit postte valt \
+         terug op zijn join-datum). Kandidaten voor de verdeel-kist (≥ 1 jaar) zijn gemarkeerd; \
+         controleer altijd handmatig vóór een kick.",
+    );
     let body = format!(
-        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Absent</div>{banner}{note}\
+        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem;cursor:help;\
+           text-decoration:underline dotted;text-underline-offset:3px\" title=\"{tip}\">Absent</div>{banner}\
          <div style=\"margin:.2rem 0 .9rem;display:flex;gap:.6rem;align-items:center\">{button}{last_run}</div>{table}",
         admin_subtabs("absent"),
     );
