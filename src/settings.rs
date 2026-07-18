@@ -190,9 +190,9 @@ pub const SPECS: &[Spec] = &[
         group: SHOP,
         kind: Kind::Int,
         default: 14.0,
-        min: 1.0,
+        min: 0.0,
         max: 365.0,
-        help: "De Lucky Horseshoe verschijnt gemiddeld 1 keer per zoveel dagen in de dagshop (1-op-N-kans per dag). Hoger = zeldzamer.",
+        help: "De Lucky Horseshoe verschijnt gemiddeld 1 keer per zoveel dagen in de dagshop (1-op-N-kans per dag). Hoger = zeldzamer. 0 = UIT: geen boosters in de dagshop (dan enkel gems).",
     },
 ];
 

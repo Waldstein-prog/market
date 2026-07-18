@@ -551,6 +551,11 @@ a.link{{color:{MEADOW}}}
   width:1.6rem;height:1.6rem;padding:0;font-size:.9rem;line-height:1;cursor:pointer;
   display:inline-flex;align-items:center;justify-content:center}}
 .reroll:hover{{background:#20301e;color:#e8f0e4;border-color:#3a4d38}}
+/* Afteller naar de volgende dag-refresh (middernacht UTC). Rechts in de titelbalk. */
+.shop-countdown{{margin-left:auto;font-size:.78rem;font-weight:600;color:#9db095;
+  background:#141d14;border:1px solid #2c3d2a;border-radius:999px;padding:.22rem .6rem;
+  white-space:nowrap;font-variant-numeric:tabular-nums}}
+.shop-countdown b{{color:#cfe0c8}}
 /* Ronde Hytale-knop onderaan de Coins-tab, met de pas-timer eróver. De H in de
    afbeelding is druk, dus de tijd krijgt een donker pilletje — anders leest hij niet. */
 .passbtn{{position:relative;width:125px;margin:1.4rem auto .2rem;line-height:0}}
@@ -1255,8 +1260,12 @@ async fn market(
             ""
         };
         let passes: String = db::boost_items(&st.pool).iter().map(slot).collect();
+        // Afteller tot de volgende rotatie = eerstvolgende UTC-middernacht (epoch-seconden).
+        // De client rekent met Date.now() → tijdzone-onafhankelijk, tikt elke seconde.
+        let next_refresh = (shop_day() + 1) * 86400;
         format!(
-            "<h2 class=\"shelf-title\">✨ Today's picks{reroll}</h2>\
+            "<h2 class=\"shelf-title\">✨ Today's picks{reroll}\
+               <span class=\"shop-countdown\" data-refresh=\"{next_refresh}\">⏳ …</span></h2>\
              <div class=\"shelf shop\">{offers}</div>\
              <h2 class=\"shelf-title\">🎟 Hytale access</h2>\
              <div class=\"shelf shop\">{passes}</div>"
@@ -1279,6 +1288,17 @@ async fn market(
            function step(t){{var k=Math.min(1,(t-s)/d);\
              el.textContent=Math.round(from+(to-from)*k);\
              if(k<1)requestAnimationFrame(step);}}requestAnimationFrame(step);}})();</script>\
+         <script>(function(){{\
+           var el=document.querySelector('.shop-countdown');if(!el)return;\
+           var target=+el.dataset.refresh*1000;\
+           function p(n){{return(n<10?'0':'')+n;}}\
+           function tick(){{\
+             var s=Math.max(0,Math.round((target-Date.now())/1000));\
+             if(s<=0){{el.innerHTML='⏳ Refreshing…';return;}}\
+             var h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;\
+             el.innerHTML='⏳ New picks in <b>'+h+':'+p(m)+':'+p(ss)+'</b>';\
+             setTimeout(tick,1000);}}\
+           tick();}})();</script>\
          {KEEP_SCROLL_JS}{refresh}",
     );
     Html(shell("Shop — Meadow Market", &chrome(&name, "market", admin, ""), true, &body))

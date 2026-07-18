@@ -383,7 +383,8 @@ fn seed_horseshoe(pool: &DbPool) {
 /// daily_shop. Pool = de **gems** (category 'inventory'); de Hytale-passen vallen
 /// er bewust buiten (staan altijd apart te koop). **Boosters** (category 'booster',
 /// bv. de Lucky Horseshoe) zijn zeldzaam: met kans **1/`booster_odds_days`** pakt er
-/// vandaag één een dagslot, anders is de shop gems-only. Die worp weet niets van hoevéél
+/// vandaag één een dagslot, anders is de shop gems-only. **`booster_odds_days <= 0` = UIT**:
+/// dan komt er nooit een booster in de dagshop (enkel gems). Die worp weet niets van hoevéél
 /// boosters er bestaan — het blijft altijd hoogstens één boosterslot per dag. Áls de worp
 /// valt, wordt willekeurig (gelijke kans) één booster uit de hele pot gekozen; nieuwe
 /// boosteritems delen dus automatisch in dezelfde 1-per-N-dagen-kans. De selectie is voor
