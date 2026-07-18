@@ -26,6 +26,8 @@ const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 0; // saldo-log uit op prod (fortuna-lo
 const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
 const PROD_GENERAL_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow ☀️general (weekly zaterdag 15u)
 const PROD_GUILD_ID: u64 = 1296469405651435592; // Magic Meadow — leave/rejoin-archief triggert enkel hier
+// Weekly leaderboard tijdelijk uitgeschakeld tot de cadeauknoppen-feature af is (2026-07-18).
+const WEEKLY_LEADERBOARD_ENABLED: bool = false;
 const HOURLY_SHOUTOUT_MIN: i64 = 1; // drempel: minstens 1 coin verdiend in het afgelopen uur
 const HOURLY_SHOUTOUT_TOP: i64 = 10; // hoeveel leden in het uurlijkse top-embed
 // TEST-modus: vuur elke HOURLY_TEST_INTERVAL sec met venster = die interval,
@@ -1300,7 +1302,9 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
             .collect();
         let embed = serenity::CreateEmbed::new()
             .title("🏆 Weekly leaderboard")
-            .description(format!("Top earners of the past week!\n\n{lines}"))
+            .description(format!(
+                "Top earners of the past week!\n\n{lines}\n────────────────────\n**Top Three claim your prize below!**"
+            ))
             .colour(0x6B_9B_52);
         // Cadeauknoppen voor de top 3 (Gold 300 / Silver 200 / Bronze 100). Elk enkel
         // claimbaar door de bijhorende winnaar (server-side check in claim_level_gift).
@@ -1429,7 +1433,11 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
                 // Uurlijkse shout-out voor wie ≥100 coins verdiende in het afgelopen uur.
                 tokio::spawn(hourly_shoutouts(hourly_http, hourly_pool));
                 // Weekly leaderboard elke zaterdag 15:00 (Brussel) in prod #general.
-                tokio::spawn(weekly_leaderboard(weekly_http, weekly_pool));
+                // TIJDELIJK UIT tot de cadeauknoppen-feature af/goedgekeurd is: de loop wordt
+                // niet gespawnd → geen fire. Zet WEEKLY_LEADERBOARD_ENABLED weer op true wanneer klaar.
+                if WEEKLY_LEADERBOARD_ENABLED {
+                    tokio::spawn(weekly_leaderboard(weekly_http, weekly_pool));
+                }
 
                 // Chest-staat uit de DB herstellen → een herstart verliest niets meer:
                 // (1) de per-kanaal cooldowns, (2) de lopende chests met hun pop-timer.
