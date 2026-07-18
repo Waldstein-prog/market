@@ -14,6 +14,35 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-18d) — shop live (gems-only), aankoop-tekst, weekly top-20, feedback-mockups
+
+**Alles LIVE op prod + gecommit + gepusht** (`1b1fc72` → `cddda98`; subtree t/m `ed12171`).
+
+- **Dagpicks LIVE** (`bf80d01`) — `SHOP_DAILY_PICKS_LIVE = true`: de 4 dagpicks tonen echte
+  **gems** (Ruby/Topaz/Cinnabar/Amber e.d.), **boosters blijven eruit** (`horseshoe_shop_odds_days=0`).
+  `SHOP_PERMA_PASS_LIVE` blijft `false` → permanente pas nog grijze teaser. Dagpas koopbaar.
+- **Reroll-knop weg van de publieke shop** (`3b8f0b1`) — verscheen toen de picks live gingen;
+  hoort enkel in de **admin-secties** (Admin shop preview houdt zijn reroll). `market()` toont
+  enkel nog de afteller.
+- **Aankoopmelding: platte naam, NIET getagd** (`cddda98`) — `**Naam** bought a/an **X** (gem).`
+  (kort even een `<@mention>` geweest → teruggedraaid op user-verzoek; naam als tekst, geen ping).
+- **Weekly leaderboard → top 20** (`cddda98`) — `leaderboard_week` limiet 10→20 (filtert al op
+  **≥1 coin**, sorteert **DESC** op coins). Basis = **week-earnings** uit `earn_log` sinds de vorige
+  zaterdag (chat+daily+chest+geclaimde gifts), **niet** het saldo/all-time — bewust, want all-time
+  zou vertekenen door de toegekende coins uit het oude economysysteem. Post **zaterdag 15:00**
+  Brussel in **#general** (niet #coins; user vroeg of het 14:00 was — het is 15:00).
+- **Uur-overzicht ("⏳ Earners of the last hour")**: weergave was al **alfabetisch** (niet op coins) —
+  bewust géén wedstrijd-gevoel; ongewijzigd gelaten.
+- **Teaser-hoogte**: de grijze teaser mag iets korter zijn dan de echte kaart (user-akkoord); een
+  flex `align-items:stretch` rekt de teaser tot ~16px kort van de dagpas door een aspect-ratio/
+  min-content-flexquirk — niet verder achtervolgd. Teaser = uniform grijs vak met gecentreerd 🔒.
+- **Feedback-mockups in dev-coins**: alle prod-#coins-berichten (daily, aankoop gem/pas, level-up
+  embed + **uitgeschakelde** 🎁-knop, claim-regel, uur-overzicht, weekly) als mockup gepost in het
+  dev "coins"-kanaal (`1525189157104648343`) ter tekstcontrole — via een los script met de
+  bot-token op de server (geen commando). **Regel bevestigd: alle buitenwereld-tekst = Engels.**
+
+---
+
 ## ⏭️ Sessie (2026-07-18c) — levelfix-commando's weg, shop-dag-afteller, boosters uit de dagrotatie
 
 **Alles LIVE op prod + gecommit + gepusht** (`7f0b29d` → `b13ab9e`; subtree t/m `18bb886`).
