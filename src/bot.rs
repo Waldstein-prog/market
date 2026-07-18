@@ -447,9 +447,10 @@ fn claim_button_row(custom_id: String) -> serenity::CreateActionRow {
 }
 
 /// Level-up-check: post een embed + claim-knop voor élk nieuw level boven de marker.
-/// Zelfhelend — een level-up die via daily/chest/admin liep, wordt hier alsnog opgepikt
-/// zodra het lid weer coins verdient. Cadeau = 1,5% van het huidige saldo, half naar boven
-/// (via `admin_add_coins` bij de claim → telt niet mee voor `total_earned`, dus geen cascade).
+/// Zelfhelend — een level-up die via daily/chest/admin/gift liep, wordt hier alsnog opgepikt
+/// zodra het lid weer coins verdient. Cadeau = 1,5% van het huidige saldo, half naar boven.
+/// De claim boekt de coins als échte verdienste (`credit_earned` → `total_earned` + `earn_log`):
+/// álle coins tellen mee voor de level-up, ongeacht bron. Geen op-hol-slaan: 1,5% < een levelgat.
 async fn maybe_levelup(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, name: &str) {
     let (coins, _max, _pub, earned) = db::get_stats(pool, uid);
     let cur = db::level_of(earned);
@@ -500,7 +501,7 @@ async fn handle_level_claim(
         .global_name
         .clone()
         .unwrap_or_else(|| mc.user.name.clone());
-    match db::claim_level_gift(&data.pool, gid, &uid, &name) {
+    match db::claim_level_gift(&data.pool, gid, &uid, &name, now_secs()) {
         db::GiftClaim::Granted(amount) => {
             // Stil acken + de knop uitschakelen (voorkomt herklikken, toont "Claimed").
             let _ = mc
@@ -539,6 +540,9 @@ async fn handle_level_claim(
                     .amount(amount)
                     .detail("claimed level-up reward".to_string()),
             );
+            // De gift telt nu mee voor total_earned → in het zeldzame randgeval dat ze een
+            // volgend level ontgrendelt, pikt dit dat meteen op (zelfhelend, bounded).
+            maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
         }
         db::GiftClaim::AlreadyClaimed => {
             respond_ephemeral(ctx, mc, "You already claimed this reward. 🎁").await?
@@ -764,17 +768,24 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
     Ok(())
 }
 
-/// De gebundelde correctie berekenen: 1,5% van ELKE bereikte leveldrempel (1..cur), opgeteld
-/// — optie A: één cadeau per lid voor al zijn gemiste level-ups. Geeft (bereikt level,
-/// totaalbedrag) of None als er niets in te halen valt of het al gebeurde.
+/// De gebundelde correctie berekenen: 1,5% van elke bereikte leveldrempel (1..cur) die nog
+/// GEEN gift-rij kreeg, opgeteld — optie A: één cadeau per lid voor zijn gemiste level-ups.
+/// Levels die na de baseline al een echte level-up-gift kregen worden overgeslagen (geen
+/// dubbele betaling). Geeft (bereikt level, totaalbedrag) of None als er niets in te halen
+/// valt (alles al gegift) of het al gebeurde.
 fn correction_for(pool: &DbPool, uid: &str, earned: i64) -> Option<(i64, i64)> {
     let cur = db::level_of(earned);
     if cur == 0 || db::has_correction(pool, uid) {
         return None;
     }
+    let already = db::gifted_levels(pool, uid);
     let amount: i64 = (1..=cur)
+        .filter(|l| !already.contains(l))
         .map(|l| (db::level_floor(l) as f64 * 0.015).round() as i64)
         .sum();
+    if amount == 0 {
+        return None;
+    }
     Some((cur, amount))
 }
 

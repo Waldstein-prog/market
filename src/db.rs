@@ -666,6 +666,33 @@ pub fn award(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64)
     .expect("query totaal")
 }
 
+/// Voeg coins toe die **als verdienste** meetellen: `coins` + `total_earned` + `earn_log`,
+/// maar **zonder** `last_award` aan te raken (dat is enkel de chat-cooldown — een cadeau
+/// mag die niet resetten). Zo tellen deze coins mee voor de level-up (all-time saldo) én
+/// verschijnen ze in het uurlijkse "Earners"-overzicht. Gebruikt voor level-up-cadeaus.
+/// Returnt het nieuwe saldo.
+pub fn credit_earned(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO coins (user_id, username, coins, max_balance, total_earned)
+         VALUES (?1, ?2, ?3, ?3, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET
+             coins        = coins + excluded.coins,
+             username     = excluded.username,
+             max_balance  = MAX(max_balance, coins + excluded.coins),
+             total_earned = total_earned + excluded.coins",
+        params![user_id, username, amount],
+    )
+    .expect("credit earned");
+    log_earn_event(&conn, user_id, amount, ts);
+    conn.query_row(
+        "SELECT coins FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )
+    .expect("query totaal")
+}
+
 /// Log één verdienste in earn_log (voor het "≥100 coins dit uur"-overzicht).
 fn log_earn_event(conn: &rusqlite::Connection, user_id: &str, amount: i64, ts: f64) {
     let _ = conn.execute(
@@ -723,16 +750,6 @@ pub fn all_balances(pool: &DbPool) -> std::collections::HashMap<String, i64> {
     rows.filter_map(|r| r.ok()).collect()
 }
 
-fn current_coins(conn: &rusqlite::Connection, user_id: &str) -> i64 {
-    conn.query_row(
-        "SELECT coins FROM coins WHERE user_id = ?1",
-        params![user_id],
-        |r| r.get(0),
-    )
-    .optional()
-    .expect("q coins")
-    .unwrap_or(0)
-}
 
 /// Zet het saldo op een absolute waarde (startwaarde): coins + total_earned +
 /// max_balance = `value`, zodat het lid meteen het juiste level heeft en op het
@@ -791,23 +808,6 @@ pub fn admin_adjust(
     )
     .expect("admin adjust");
     (pc, pe)
-}
-
-/// Tel een (mogelijk negatief) bedrag bij het saldo; returnt het vorige saldo.
-pub fn admin_add_coins(pool: &DbPool, user_id: &str, username: &str, delta: i64) -> i64 {
-    let conn = pool.get().expect("db");
-    let prev = current_coins(&conn, user_id);
-    let newv = prev + delta;
-    conn.execute(
-        "INSERT INTO coins (user_id, username, coins, max_balance) VALUES (?1, ?2, ?3, ?3)
-         ON CONFLICT(user_id) DO UPDATE SET
-             coins = ?3,
-             username = excluded.username,
-             max_balance = MAX(max_balance, ?3)",
-        params![user_id, username, newv],
-    )
-    .expect("admin add coins");
-    prev
 }
 
 /// Bewaar de laatste ingreep (enige rij) zodat ze ongedaan gemaakt kan worden.
@@ -1194,9 +1194,12 @@ pub enum GiftClaim {
 
 /// Claim een cadeau: atomisch (claimed 0→1) zodat dubbelklikken nooit dubbel uitbetaalt.
 /// Enkel de eigenaar (`uid`) kan claimen. Bij succes komen de coins meteen op het saldo
-/// (via `admin_add_coins`, dat `total_earned` NIET verhoogt → cadeaus tellen niet mee
-/// voor leveling, dus geen cascade).
-pub fn claim_level_gift(pool: &DbPool, gift_id: i64, uid: &str, username: &str) -> GiftClaim {
+/// **als verdienste** (via `credit_earned` → verhoogt `total_earned` en logt in `earn_log`):
+/// álle coins tellen mee voor de level-up, ongeacht de bron, en de gift verschijnt in het
+/// uurlijkse overzicht. Geen op-hol-slaan: een gift is 1,5 % van het saldo, terwijl een
+/// levelgat altijd ~30-40 % is → een cadeau kan nooit zélf een volgend level ontgrendelen.
+/// (De caller draait na de claim alsnog `maybe_levelup` voor het randgeval + directe consistentie.)
+pub fn claim_level_gift(pool: &DbPool, gift_id: i64, uid: &str, username: &str, ts: f64) -> GiftClaim {
     let amount = {
         let conn = pool.get().expect("db");
         let row: Option<(String, i64, i64)> = conn
@@ -1225,8 +1228,23 @@ pub fn claim_level_gift(pool: &DbPool, gift_id: i64, uid: &str, username: &str) 
             }
         }
     };
-    admin_add_coins(pool, uid, username, amount);
+    credit_earned(pool, uid, username, amount, ts);
     GiftClaim::Granted(amount)
+}
+
+/// De levels waarvoor dit lid al een cadeau-rij heeft (welke kind dan ook). De correctie
+/// gebruikt dit om een level dat al écht een gift kreeg (bv. een level-up ná de baseline)
+/// niet nóg eens terug te betalen. NB: de baseline zette enkel de scalaire `gifted_level`
+/// en maakte GEEN rijen — die levels horen dus wél in de correctie en blijven hier buiten.
+pub fn gifted_levels(pool: &DbPool, uid: &str) -> std::collections::HashSet<i64> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT level FROM level_gifts WHERE uid = ?1")
+        .expect("prepare gifted_levels");
+    let rows = stmt
+        .query_map(params![uid], |r| r.get::<_, i64>(0))
+        .expect("query gifted_levels");
+    rows.filter_map(|r| r.ok()).collect()
 }
 
 /// Kreeg dit lid al een correctie-cadeau (de eenmalige inhaalslag)? Voorkomt dubbel posten.
