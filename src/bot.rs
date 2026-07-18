@@ -1377,7 +1377,7 @@ async fn handle_weekly_claim(
     // cadeau (claimt het), AlreadyClaimed als hij het al ophaalde.
     let mut granted: Option<i64> = None;
     let mut owns_but_claimed = false;
-    for gid in gids {
+    for &gid in &gids {
         match db::claim_level_gift(&data.pool, gid, &uid, &name, now_secs()) {
             db::GiftClaim::Granted(a) => {
                 granted = Some(a);
@@ -1391,6 +1391,24 @@ async fn handle_weekly_claim(
         let _ = mc
             .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
             .await;
+        // Alle top-3 geclaimd? → knop uitschakelen/grijs, duidelijk dat er niks meer te halen valt.
+        if !gids.is_empty() && gids.iter().all(|&g| db::gift_claimed(&data.pool, g)) {
+            let ids = gids.iter().map(|g| g.to_string()).collect::<Vec<_>>().join(",");
+            let done = serenity::CreateButton::new(format!("wg:{ids}"))
+                .emoji('🎁')
+                .label("Claim your reward")
+                .style(serenity::ButtonStyle::Secondary)
+                .disabled(true);
+            let _ = mc
+                .channel_id
+                .edit_message(
+                    &ctx.http,
+                    mc.message.id,
+                    serenity::EditMessage::new()
+                        .components(vec![serenity::CreateActionRow::Buttons(vec![done])]),
+                )
+                .await;
+        }
         if PROD_COINS_CHANNEL_ID != 0 {
             let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
                 .say(

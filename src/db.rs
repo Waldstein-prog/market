@@ -1226,6 +1226,20 @@ pub fn claim_level_gift(pool: &DbPool, gift_id: i64, uid: &str, username: &str, 
     GiftClaim::Granted(amount)
 }
 
+/// Is dit cadeau (id) al geclaimd? Een niet-bestaand id → true (geen blocker voor "alles op").
+pub fn gift_claimed(pool: &DbPool, gid: i64) -> bool {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT claimed FROM level_gifts WHERE id = ?1",
+        params![gid],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .expect("q gift_claimed")
+    .map(|c| c != 0)
+    .unwrap_or(true)
+}
+
 /// Unix-tijdstip van de laatste daily-claim (0.0 als de user er nog geen deed).
 pub fn get_last_daily(pool: &DbPool, user_id: &str) -> f64 {
     let conn = pool.get().expect("db");
