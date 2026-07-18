@@ -239,7 +239,8 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/delete", post(admin_item_delete))
         .route("/admin/item/stock", post(admin_item_stock))
         .route("/admin/accounts", get(admin_accounts))
-        .route("/admin/inactives", get(admin_inactives))
+        .route("/admin/absent", get(admin_absent))
+        .route("/admin/absent/backfill", post(admin_absent_backfill))
         .route("/admin/item/move", post(admin_item_move))
         .route("/admin/item/shelf", post(admin_item_shelf))
         .route("/admin/item/image/clear", post(admin_item_image_clear))
@@ -835,7 +836,7 @@ fn admin_subtabs(active: &str) -> String {
         item("/admin/inventory", "inv_preview", "🎒 Preview inventory"),
         item("/admin/shop/preview", "shop_preview", "👁 Admin shop preview"),
         item("/admin/accounts", "accounts", "👥 Accounts"),
-        item("/admin/inactives", "inactives", "💤 Inactives"),
+        item("/admin/absent", "absent", "💤 Absent"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
         item("/admin/settings", "settings", "⚙ Settings"),
@@ -3888,15 +3889,19 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
     .into_response()
 }
 
-/// Manage → Inactives: alle gevolgde leden, **aflopend op afwezigheid** (langst inactief
-/// bovenaan). Voorbereiding op de latere "verdeel-kist": een lid dat ~een jaar niets deed
-/// wordt opgegeven, waarna een speciale 24u-chest zijn coins onder de deelnemers verdeelt
-/// (mechaniek nog uit te werken).
+/// Manage → Absent: alle gevolgde leden, **aflopend op dagen afwezig** (langst weg bovenaan).
+/// Voorbereiding op de latere "verdeel-kist": een lid dat ~een jaar niets deed wordt opgegeven,
+/// waarna een speciale 24u-chest zijn coins onder de deelnemers verdeelt (mechaniek nog te
+/// bepalen).
 ///
-/// ⚠️ De afwezigheids-teller wordt **vooruit** opgebouwd vanaf de uitrol van deze feature:
-/// Discord levert geen retro "laatst getypt", dus iedereen startte op 0 dagen. Pas na een
-/// echt jaar zonder message/reactie haalt iemand "365 dagen".
-async fn admin_inactives(State(st): State<AppState>, headers: HeaderMap) -> Response {
+/// Afwezigheid = tijd sinds het laatste bericht/reactie. Live wordt dat vooruit bijgehouden;
+/// met de **backfill-knop** scant de bot de kanaalgeschiedenis terug in de tijd voor ieders
+/// laatste bericht (bij benadering — reacties zitten niet in de historiek).
+async fn admin_absent(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
@@ -3912,7 +3917,7 @@ async fn admin_inactives(State(st): State<AppState>, headers: HeaderMap) -> Resp
             } else {
                 esc(&m.name)
             };
-            // ≥1 jaar inactief → markeren (kandidaat voor de verdeel-kist).
+            // ≥1 jaar afwezig → markeren (kandidaat voor de verdeel-kist).
             let flag = if days >= 365 {
                 " <span class=\"yes\">⚑ ≥1 jaar</span>"
             } else {
@@ -3929,32 +3934,153 @@ async fn admin_inactives(State(st): State<AppState>, headers: HeaderMap) -> Resp
         })
         .collect();
     let table = if members.is_empty() {
-        "<p class=\"muted\">Nog geen activiteit gevolgd — de klok start zodra de bot met deze \
-         versie draait en de leden inleest.</p>"
+        "<p class=\"muted\">Nog geen activiteit gevolgd — start de backfill of wacht tot er \
+         live berichten binnenkomen.</p>"
             .to_string()
     } else {
         format!(
             "<table class=\"ctable\"><thead><tr>\
-               <th>Lid</th><th>Dagen inactief</th><th>Laatst actief</th><th>Saldo</th>\
+               <th>Lid</th><th>Dagen afwezig</th><th>Laatst actief</th><th>Saldo</th>\
              </tr></thead><tbody>{rows}</tbody></table>"
         )
     };
+    // Backfill-status + knop.
+    let running = db::kv_get(&st.pool, "absent_backfill_status").as_deref() == Some("running");
+    let ran_at = db::kv_get(&st.pool, "absent_backfill_ran_at")
+        .and_then(|s| s.parse::<f64>().ok());
+    let last_run = match ran_at {
+        Some(ts) => format!(
+            "<span class=\"hint\">Laatste backfill: {} geleden.</span>",
+            fmt_dur((now - ts).max(0.0) as i64)
+        ),
+        None => "<span class=\"hint\">Nog geen backfill uitgevoerd.</span>".to_string(),
+    };
+    let banner = match q.get("msg").map(String::as_str) {
+        Some("started") => "<p class=\"notice ok\">🔄 Backfill gestart — scant de kanalen op de \
+            achtergrond. Ververs deze pagina over een minuut.</p>",
+        Some("busy") => "<p class=\"notice\">⏳ Er loopt al een backfill.</p>",
+        _ => "",
+    };
+    let button = if running {
+        "<button class=\"btn small\" disabled>⏳ Backfill loopt…</button>".to_string()
+    } else {
+        "<form method=\"post\" action=\"/admin/absent/backfill\" style=\"display:inline\">\
+           <button class=\"btn small\" type=\"submit\">🔄 Backfill (scan kanaalgeschiedenis)</button>\
+         </form>"
+            .to_string()
+    };
     let note = "<p class=\"muted\" style=\"margin:.2rem 0 .8rem\">\
-        Afwezigheid = tijd sinds het laatste bericht of de laatste reactie in de prod-server. \
-        De teller wordt <b>vooruit</b> opgebouwd vanaf de uitrol (Discord kent geen retro \
-        “laatst getypt”), dus iedereen startte op 0 dagen. Kandidaten voor de \
-        verdeel-kist (≥ 1 jaar) worden gemarkeerd; de kist-mechaniek zelf komt later.</p>";
+        Afwezigheid = tijd sinds het laatste bericht/reactie in de prod-server. Live wordt dit \
+        bijgehouden; de <b>backfill</b> scant de kanaalgeschiedenis terug in de tijd voor ieders \
+        laatste bericht (bij benadering — enkel berichten, geen reacties; wie nooit postte valt \
+        terug op zijn join-datum). Kandidaten voor de verdeel-kist (≥ 1 jaar) zijn gemarkeerd; \
+        controleer altijd handmatig vóór een kick.</p>";
     let body = format!(
-        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Inactives</div>{note}{table}",
-        admin_subtabs("inactives"),
+        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Absent</div>{banner}{note}\
+         <div style=\"margin:.2rem 0 .9rem;display:flex;gap:.6rem;align-items:center\">{button}{last_run}</div>{table}",
+        admin_subtabs("absent"),
     );
     Html(shell(
-        "Inactives — Meadow Market",
+        "Absent — Meadow Market",
         &chrome(&name, "admin", true, ""),
         true,
         &body,
     ))
     .into_response()
+}
+
+/// Start de kanaal-backfill op de achtergrond: scan de prod-guild-kanalen terug in de tijd en
+/// zet ieders `last_seen` op het recentste gevonden bericht (of, als er niks gevonden werd,
+/// zijn join-datum). Idempotent herhaalbaar; één run tegelijk.
+async fn admin_absent_backfill(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&st, &headers).is_none() {
+        return Redirect::to("/").into_response();
+    }
+    if db::kv_get(&st.pool, "absent_backfill_status").as_deref() == Some("running") {
+        return Redirect::to("/admin/absent?msg=busy").into_response();
+    }
+    db::kv_set(&st.pool, "absent_backfill_status", "running");
+    let dc = st.dc.clone();
+    let pool = st.pool.clone();
+    tokio::spawn(async move {
+        match run_absence_backfill(&dc, &pool).await {
+            Ok((found, total)) => {
+                tracing::info!("Absent-backfill klaar: {found}/{total} leden met bericht gevonden");
+            }
+            Err(e) => tracing::warn!("Absent-backfill mislukt: {e}"),
+        }
+        db::kv_set(&pool, "absent_backfill_status", "done");
+        db::kv_set(&pool, "absent_backfill_ran_at", &now_secs().to_string());
+    });
+    Redirect::to("/admin/absent?msg=started").into_response()
+}
+
+/// Scan alle tekstkanalen van de prod-guild terug in de tijd (tot een horizon) en bepaal per
+/// lid het recentste bericht → `last_seen`. Wie niets postte binnen de horizon valt terug op
+/// zijn join-datum. Geeft (aantal-met-bericht, totaal-leden). Bij benadering: reacties en
+/// kanalen zonder leesrecht tellen niet mee.
+async fn run_absence_backfill(dc: &Discord, pool: &DbPool) -> Result<(usize, usize), String> {
+    use crate::discord_rest::snowflake_secs;
+    let guild = COINS_GUILD_ID;
+    let now = now_secs();
+    // ~2,2 jaar terug scannen; wie daarvóór laatst postte valt op zijn join-datum terug.
+    let horizon_ts = now - 800.0 * 86400.0;
+    let members = dc.list_members_joined(guild).await?;
+    let channels = dc.list_channels(guild).await?;
+    let mut latest: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (cid, cname) in &channels {
+        let mut before: Option<String> = None;
+        loop {
+            let batch = match dc.get_messages(cid, before.as_deref(), 100).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("backfill: kanaal #{cname} overgeslagen ({e})");
+                    break;
+                }
+            };
+            if batch.is_empty() {
+                break;
+            }
+            let mut oldest = u64::MAX;
+            for (aid, mid, is_bot) in &batch {
+                if *mid < oldest {
+                    oldest = *mid;
+                }
+                if *is_bot {
+                    continue;
+                }
+                let ts = snowflake_secs(*mid);
+                latest
+                    .entry(aid.clone())
+                    .and_modify(|v| {
+                        if ts > *v {
+                            *v = ts;
+                        }
+                    })
+                    .or_insert(ts);
+            }
+            before = Some(oldest.to_string());
+            // Voorbij de horizon → dit kanaal is genoeg gescand.
+            if snowflake_secs(oldest) < horizon_ts {
+                break;
+            }
+            // Beleefdheids-pauze tussen pagina's (bovenop de 429-afhandeling).
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+    }
+    let mut found = 0usize;
+    for (uid, name, joined) in &members {
+        let ls = match latest.get(uid) {
+            Some(ts) => {
+                found += 1;
+                *ts
+            }
+            // Niks gepost binnen de scan → afwezig sinds join (benadering).
+            None => *joined,
+        };
+        db::touch_activity(pool, uid, name, ls);
+    }
+    Ok((found, members.len()))
 }
 
 /// Geüploade afbeelding van een item wissen (terug naar kleur-thumb).

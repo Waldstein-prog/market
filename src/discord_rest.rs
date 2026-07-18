@@ -248,6 +248,102 @@ impl Discord {
         Ok(())
     }
 
+    /// Alle guild-leden (max 1000): (user_id, weergavenaam, join-tijd epoch-sec). Bots
+    /// overgeslagen. `joined_at` dient als afwezigheids-fallback voor wie nooit postte.
+    pub async fn list_members_joined(
+        &self,
+        guild: &str,
+    ) -> Result<Vec<(String, String, f64)>, String> {
+        let url = format!("{API}/guilds/{guild}/members?limit=1000");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+        }
+        let arr: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        if let Some(members) = arr.as_array() {
+            for m in members {
+                let u = &m["user"];
+                if u["bot"].as_bool().unwrap_or(false) {
+                    continue;
+                }
+                let id = u["id"].as_str().unwrap_or_default().to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let name = m["nick"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| u["global_name"].as_str().filter(|s| !s.is_empty()))
+                    .or_else(|| u["username"].as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let joined = m["joined_at"]
+                    .as_str()
+                    .and_then(iso8601_to_secs)
+                    .unwrap_or(0.0);
+                out.push((id, name, joined));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Eén pagina kanaalberichten (nieuw→oud), max `limit` (≤100). `before` = message-id om
+    /// vanaf terug te bladeren (None = nieuwste). Geeft `(author_id, message_id, author_is_bot)`.
+    /// De message-id (snowflake) bevat de aanmaaktijd → geen timestamp-parsing nodig
+    /// (zie `snowflake_secs`). 429 wordt intern afgewacht en herprobeerd.
+    pub async fn get_messages(
+        &self,
+        channel_id: &str,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<(String, u64, bool)>, String> {
+        let mut url = format!("{API}/channels/{channel_id}/messages?limit={limit}");
+        if let Some(b) = before {
+            url.push_str(&format!("&before={b}"));
+        }
+        for _ in 0..6 {
+            let resp = self
+                .client
+                .get(&url)
+                .header("Authorization", self.auth())
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let status = resp.status();
+            if status.as_u16() == 429 {
+                let body: Value = resp.json().await.unwrap_or_default();
+                let wait = body["retry_after"].as_f64().unwrap_or(1.0);
+                tokio::time::sleep(std::time::Duration::from_secs_f64(wait + 0.1)).await;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+            }
+            let arr: Value = resp.json().await.map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            if let Some(msgs) = arr.as_array() {
+                for m in msgs {
+                    let aid = m["author"]["id"].as_str().unwrap_or_default().to_string();
+                    let is_bot = m["author"]["bot"].as_bool().unwrap_or(false);
+                    let mid = m["id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    if !aid.is_empty() && mid != 0 {
+                        out.push((aid, mid, is_bot));
+                    }
+                }
+            }
+            return Ok(out);
+        }
+        Err("Rate limited (429) — te vaak achtereen, kanaal opgegeven.".to_string())
+    }
+
     /// Post een tekstbericht in een kanaal (bv. shop-aankoopmeldingen in #coins).
     /// Los van de gateway-bot: gewone REST-POST met het bot-token.
     pub async fn send_channel_message(&self, channel_id: &str, content: &str) -> Result<(), String> {
@@ -266,6 +362,31 @@ impl Discord {
         }
         Ok(())
     }
+}
+
+/// Discord-snowflake → epoch-seconden. De bovenste 42 bits zijn ms sinds de Discord-epoch
+/// (2015-01-01). Zo lezen we de aanmaaktijd van een bericht zonder de ISO-timestamp te parsen.
+pub fn snowflake_secs(id: u64) -> f64 {
+    (((id >> 22) + 1_420_070_400_000) as f64) / 1000.0
+}
+
+/// ISO-8601 UTC-timestamp (Discord `joined_at`, bv. "2021-06-15T18:30:00.000000+00:00")
+/// → epoch-seconden. Discord levert altijd UTC (+00:00), dus geen zone-correctie nodig.
+/// Days-from-civil volgens het standaardalgoritme (Howard Hinnant).
+fn iso8601_to_secs(s: &str) -> Option<f64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let num = |a: usize, z: usize| s.get(a..z)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, se) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = (if y2 >= 0 { y2 } else { y2 - 399 }) / 400;
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some((days * 86400 + h * 3600 + mi * 60 + se) as f64)
 }
 
 fn explain(code: u16, body: &str) -> String {

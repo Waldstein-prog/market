@@ -90,6 +90,12 @@ pub fn init_pool(path: &str) -> DbPool {
             last_seen REAL NOT NULL       -- epoch-seconden van laatste message/reactie
         );
         CREATE INDEX IF NOT EXISTS idx_member_activity_seen ON member_activity(last_seen);
+        -- Vrije sleutel/waarde voor kleine stukjes state (bv. status + tijd van de laatste
+        -- Absent-backfill). Los van de getypte `settings`-tabel.
+        CREATE TABLE IF NOT EXISTS kv (
+            k TEXT PRIMARY KEY,
+            v TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS admin_undo (
             id         INTEGER PRIMARY KEY CHECK(id = 1), -- max één rij: de laatste ingreep
             user_id    TEXT NOT NULL,
@@ -773,6 +779,23 @@ pub fn seed_activity(pool: &DbPool, uid: &str, name: &str, ts: f64) {
     let _ = conn.execute(
         "INSERT OR IGNORE INTO member_activity (user_id, name, last_seen) VALUES (?1, ?2, ?3)",
         params![uid, name, ts],
+    );
+}
+
+/// Vrije KV-lees. None = sleutel bestaat niet.
+pub fn kv_get(pool: &DbPool, k: &str) -> Option<String> {
+    let conn = pool.get().expect("db");
+    conn.query_row("SELECT v FROM kv WHERE k = ?1", params![k], |r| r.get(0))
+        .ok()
+}
+
+/// Vrije KV-schrijf (upsert).
+pub fn kv_set(pool: &DbPool, k: &str, v: &str) {
+    let conn = pool.get().expect("db");
+    let _ = conn.execute(
+        "INSERT INTO kv (k, v) VALUES (?1, ?2)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        params![k, v],
     );
 }
 
