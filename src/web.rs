@@ -3925,8 +3925,7 @@ async fn admin_absent(
             };
             format!(
                 "<tr data-uid=\"{uid}\"><td>{member}{flag}</td>\
-                 <td>{days}</td><td><span class=\"hint\">{days} dagen geleden</span></td>\
-                 <td>{MC} {coins}</td></tr>",
+                 <td>{days}</td><td>{MC} {coins}</td></tr>",
                 uid = esc(&m.user_id),
                 coins = dots(m.coins),
             )
@@ -3939,7 +3938,7 @@ async fn admin_absent(
     } else {
         format!(
             "<table class=\"ctable\"><thead><tr>\
-               <th>Lid</th><th>Dagen afwezig</th><th>Laatst actief</th><th>Saldo</th>\
+               <th>Lid</th><th>Dagen afwezig</th><th>Saldo</th>\
              </tr></thead><tbody>{rows}</tbody></table>"
         )
     };
