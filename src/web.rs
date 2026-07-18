@@ -539,7 +539,7 @@ a.link{{color:{MEADOW}}}
 /* Inventory: gems mogen niet in een zijwaartse schuifstrip verdwijnen — laat ze
    gewoon doorlopen en afbreken over een paar rijen, zodat je alles in één blik ziet. */
 .shelf.wrap{{flex-wrap:wrap;overflow-x:visible;justify-content:center}}
-.shelf .slot{{flex:0 0 auto;width:136px}}
+.shelf .slot{{flex:0 0 auto;width:170px}}
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
 .shelf.shop .slot{{width:210px}}
@@ -595,8 +595,7 @@ a.link{{color:{MEADOW}}}
 .preview-hint{{text-align:center;font-size:.72rem;margin:-.4rem 0 .8rem}}
 .gemcard.previewable{{cursor:pointer}}
 .gemcard.previewsel{{outline:2px solid {MEADOW};outline-offset:2px}}
-.gemcard .gdesc{{font-size:.7rem;color:#9db095;line-height:1.25;
-  max-height:2.6em;overflow:hidden}}
+.gemcard .gdesc{{font-size:.7rem;color:#9db095;line-height:1.25}}
 .booster-active{{font-size:.72rem;color:#c9a227;font-weight:700;text-align:center;margin:.15rem 0 .3rem}}
 .booster-banner{{background:rgba(201,162,39,.12);border:1px solid rgba(201,162,39,.5);
   color:#e0c56a;border-radius:10px;padding:.55rem .8rem;margin:.6rem 0;font-size:.85rem;font-weight:600}}
