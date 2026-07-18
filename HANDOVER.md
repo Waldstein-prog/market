@@ -14,6 +14,35 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-19a) — Absent-tab (rename) + kanaal-backfill van afwezigheid
+
+**Alles LIVE op prod + gecommit + gepusht + gedeployd** (commit `41a0092`; subtree
+`market-gh` → `41dd827`). Backfill **op prod uitgevoerd en geverifieerd**.
+
+User wilde tóch retro terug in de tijd: neem alle members, ga alle kanalen af, zoek hun
+laatste bericht. Bij benadering — ze checken alles handmatig vóór een kick.
+- **Inactives → Absent** hernoemd (tab `💤 Absent`, route `/admin/absent`, kolom "Dagen
+  afwezig", aflopend gesorteerd). `admin_inactives` → `admin_absent`.
+- **Backfill** (`/admin/absent/backfill`, POST → achtergrondtaak, 1 tegelijk):
+  `run_absence_backfill` scant alle prod-tekstkanalen **terug in de tijd tot ~800 dagen**,
+  neemt per lid het **recentste bericht** als `last_seen`; wie niks postte binnen de scan
+  valt terug op zijn **join-datum**. Knop + laatste-run-status op de pagina.
+  - `discord_rest`: `get_messages` (paginatie via `before`, 429-retry), `list_members_joined`
+    (met `joined_at`), helpers `snowflake_secs` (msg-id → aanmaaktijd, geen ISO-parsing) en
+    `iso8601_to_secs` (`joined_at`).
+  - `db`: vrije `kv`-tabel + `kv_get/kv_set` (backfill-status + laatste-run-tijd).
+- **Prod-run geverifieerd**: *"Absent-backfill klaar: 33/33 leden met bericht gevonden"* (~30s).
+  Lijst nu reëel: Varun Sariv 358 d, King_Leopold 331 … tot recent-actieven op 0,3 d. Backfill
+  getriggerd via tijdelijke admin-sessie (nadien verwijderd).
+- **⚠️ Gedeeltelijke dekking**: kanalen zonder bot-leesrecht (o.a. #moderator-only, diverse
+  categorie-kanalen) gaven **403** en zijn overgeslagen — toch 33/33 leden gevonden (iedereen
+  postte o.a. in #general). Wil je 100%? Geef de bot **View Channel + Read Message History**
+  op die kanalen en her-run de backfill. **Log-cosmetica**: de 403-tekst zegt "lacks 'Manage
+  Roles'" (generieke `explain()`-tekst) — misleidend, het gaat om leesrecht; log-only.
+- **NB**: nog niemand ≥1 jaar (top = 358 d). De ≥1-jaar-vlag werkt zodra iemand de drempel haalt.
+
+---
+
 ## ⏭️ Sessie (2026-07-18g) — Manage → Inactives + last_seen-tracking; Horseshoe-tekst; Favor-spelling
 
 **Alles LIVE op prod + gecommit + gepusht + gedeployd** (commits `051149a`, `7c53368`;
