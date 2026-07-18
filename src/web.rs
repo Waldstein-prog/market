@@ -534,7 +534,7 @@ a.link{{color:{MEADOW}}}
 .notice{{padding:.6rem .9rem;border-radius:10px;margin:.2rem 0 1rem;font-size:.92rem}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
 .notice.err{{background:#3a201c;color:#f0c9c0;border:1px solid #6e352c}}
-.shelf{{display:flex;gap:.6rem;overflow-x:auto;padding:.2rem 0 .5rem}}
+.shelf{{display:flex;gap:.6rem;overflow-x:auto;padding:.2rem 0 .5rem;align-items:stretch}}
 /* Inventory: gems mogen niet in een zijwaartse schuifstrip verdwijnen — laat ze
    gewoon doorlopen en afbreken over een paar rijen, zodat je alles in één blik ziet. */
 .shelf.wrap{{flex-wrap:wrap;overflow-x:visible;justify-content:center}}
@@ -561,7 +561,7 @@ a.link{{color:{MEADOW}}}
   white-space:nowrap;font-variant-numeric:tabular-nums}}
 .shop-countdown b{{color:#cfe0c8}}
 /* Nog niet vrijgegeven: grijs, niet-klikbaar placeholder-vakje met een slotje. */
-.slot.soon{{opacity:.5;filter:grayscale(.75)}}
+.slot.soon{{opacity:.5;filter:grayscale(.75);justify-content:center}}
 .slot.soon .thumb{{display:flex;align-items:center;justify-content:center;font-size:2.2rem}}
 /* Ronde Hytale-knop onderaan de Coins-tab, met de pas-timer eróver. De H in de
    afbeelding is druk, dus de tijd krijgt een donker pilletje — anders leest hij niet. */
@@ -1610,8 +1610,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
 /// = false`). Bewust géén naam/prijs/tekst — enkel het slotje — zodat er niks speler-zichtbaars
 /// verzonnen wordt; de kaart houdt wel de vakjes-hoogte aan.
 fn placeholder_slot() -> String {
-    "<div class=\"slot soon\"><div class=\"thumb\">🔒</div><div class=\"name\">&nbsp;</div></div>"
-        .to_string()
+    "<div class=\"slot soon\"><div class=\"thumb\">🔒</div></div>".to_string()
 }
 
 /// Inventory-sectie — placeholder tot items bestaan (gekocht/gewonnen).
@@ -1917,7 +1916,7 @@ async fn internal_revoke_pass(
             now_secs(),
             &db::LogEntry::new("admin", "pass_revoke")
                 .actor(uid, uname)
-                .detail(format!("pas ingetrokken via het panel — {name} (geen coins terug)")),
+                .detail(format!("pass revoked via the panel — {name} (no coins refunded)")),
         );
     }
     tracing::info!("interne revoke: {name} → {} grant(s) ingetrokken", hits.len());
@@ -2345,7 +2344,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         };
         let inf = if it.stock >= 0 {
             "<button class=\"btn small ghost\" type=\"submit\" name=\"unlimited\" value=\"1\" \
-               title=\"Niet meer tellen: altijd te koop\">∞</button>"
+               title=\"Stop counting: unlimited, always for sale\">∞</button>"
         } else {
             ""
         };
@@ -3224,15 +3223,15 @@ async fn admin_channels_remove(
 /// sleutel. Dat is meteen de reden dat de unit ín de sleutelnaam zit.
 fn unit_of(key: &str) -> &'static str {
     if key.ends_with("_sec") {
-        "seconden"
+        "seconds"
     } else if key.ends_with("_min") {
-        "minuten"
+        "minutes"
     } else if key.ends_with("_hours") {
-        "uur"
+        "hours"
     } else if key.ends_with("_coins") {
         "coins"
     } else if key.ends_with("_days") {
-        "dagen"
+        "days"
     } else {
         ""
     }
@@ -3846,7 +3845,7 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
         })
         .collect();
     let table = if accounts.is_empty() {
-        "<p class=\"muted\">Nog niemand heeft iets gekocht.</p>".to_string()
+        "<p class=\"muted\">Nobody has bought anything yet.</p>".to_string()
     } else {
         format!(
             "<table class=\"ctable\"><thead><tr>\

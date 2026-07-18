@@ -659,7 +659,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
     let msg_id = match msg_id.or_else(|| db::last_unresolved_chest(pool)) {
         Some(id) => id,
         None => {
-            ctx.say("⚠️ Geen openstaande (verweesde) chest gevonden in het log.").await?;
+            ctx.say("⚠️ No orphaned (unresolved) chest found in the log.").await?;
             return Ok(());
         }
     };
@@ -668,7 +668,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
     let joiner_names = joiners.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
     if joiners.len() < settings::usize_of(pool, "chest_min_joiners") {
         ctx.say(format!(
-            "⚠️ Chest `{msg_id}` heeft maar {} deelnemer(s) in het log — niks uit te betalen.",
+            "⚠️ Chest `{msg_id}` only has {} participant(s) in the log — nothing to pay out.",
             joiners.len()
         ))
         .await?;
@@ -706,7 +706,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
             .channel(channel.get())
             .reference(msg_id)
             .amount(prize)
-            .detail(format!("RESCUE — won uit {} deelnemer(s): {joiner_names}", joiners.len())),
+            .detail(format!("RESCUE — won from {} participant(s): {joiner_names}", joiners.len())),
     );
     // Cooldown alsnog zetten (geheugen + schijf), net als een echte opening.
     let until = now_secs() + settings::f64_of(pool, "chest_channel_cooldown_min") * 60.0;
@@ -995,9 +995,9 @@ async fn handle_chest_click(
     // Logboek: elke klik vastleggen — óók een te late klik (chest al gepopt),
     // want net dát verklaart een "ontbrekende" deelnemer bij de opening.
     let (log_event, log_detail) = match joined {
-        None => ("too_late", "klikte nadat de chest al weg was".to_string()),
-        Some(0) => ("already_in", "klikte opnieuw (zat er al in)".to_string()),
-        Some(n) => ("join", format!("deelnemer #{n}")),
+        None => ("too_late", "clicked after the chest was already gone".to_string()),
+        Some(0) => ("already_in", "clicked again (already in)".to_string()),
+        Some(n) => ("join", format!("participant #{n}")),
     };
     db::log_event(
         &data.pool,
@@ -1108,9 +1108,9 @@ async fn pop_chest(
                 .reference(msg_id)
                 .amount(joiners.len() as i64)
                 .detail(if joiner_names.is_empty() {
-                    "0 deelnemers".to_string()
+                    "0 participants".to_string()
                 } else {
-                    format!("{} deelnemer(s): {joiner_names}", joiners.len())
+                    format!("{} participant(s): {joiner_names}", joiners.len())
                 }),
         );
         let who = if joiners.is_empty() { "**No one**" } else { "**Only one**" };
@@ -1163,7 +1163,7 @@ async fn pop_chest(
             .reference(msg_id)
             .amount(prize)
             .detail(format!(
-                "won uit {} deelnemer(s): {joiner_names}",
+                "won from {} participant(s): {joiner_names}",
                 joiners.len()
             )),
     );
