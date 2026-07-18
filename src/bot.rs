@@ -1287,11 +1287,18 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
         if top.is_empty() {
             continue;
         }
+        // Plaats 1-3 = medailles; plaats 4-9 = cijfer-emoji (4️⃣…9️⃣); vanaf 10 = gewoon het getal.
         let medal = |i: usize| match i {
-            0 => "👑",
-            1 => "🥈",
-            2 => "🥉",
-            _ => "🌼",
+            0 => "👑".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            3 => "4️⃣".to_string(),
+            4 => "5️⃣".to_string(),
+            5 => "6️⃣".to_string(),
+            6 => "7️⃣".to_string(),
+            7 => "8️⃣".to_string(),
+            8 => "9️⃣".to_string(),
+            n => format!("{}", n + 1),
         };
         let lines: String = top
             .iter()
@@ -1303,7 +1310,7 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
         let embed = serenity::CreateEmbed::new()
             .title("🏆 Weekly leaderboard")
             .description(format!(
-                "Top earners of the past week!\n\n{lines}\n────────────────────\n**Top Three claim your prize below!**"
+                "Top earners of the past week!\n\n{lines}\n**Top Three claim your prize below!**"
             ))
             .colour(0x6B_9B_52);
         // Cadeauknoppen voor de top 3 (Gold 300 / Silver 200 / Bronze 100). Elk enkel
