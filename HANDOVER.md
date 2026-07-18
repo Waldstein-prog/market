@@ -14,6 +14,48 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-18b) — ALLE coins tellen mee voor leveling + gift in uur-overzicht + dubbel-pay-fix
+
+**Alles LIVE op prod + gecommit + gepusht** (commit `fd56e39`; subtree t/m `baeb094`).
+
+**Aanleiding — audit van TimmyThumb.** User meldde: Timmy levelt om 04:08 (claimt 20), krijgt
+tegelijk +49 checkin, maar het 05:01-uuroverzicht toont enkel 49 — "klopt niet". Bevinding: Timmy
+had **al zijn coins** (`coins 1354 = total_earned 1334 + gift 20`); het overzicht toonde 49 omdat
+de level-up-gift **bewust niet** meetelde als verdienste (`earn_log`/`total_earned`). Volledige
+reconciliatie over alle 21 leden: **0 mismatches** (`coins = total_earned + geclaimde gifts −
+uitgegeven`). Dus geen boekhoudfout — wél een beleidsmismatch.
+
+**User-beslissing:** *alle* coins moeten meetellen voor de level-up (all-time saldo, ongeacht bron)
+én het uur-bericht moet **alle** verdiensten tonen. Correctie mag levels ontgrendelen (**optie A**),
+maar de dubbele betaling eruit.
+
+**Doorgevoerd (commit `fd56e39`):**
+- **`db::credit_earned`** (nieuw): boekt coins **als verdienste** (`coins` + `total_earned` +
+  `earn_log`) **zonder** `last_award` aan te raken (dat is enkel de chat-cooldown — een cadeau mag
+  die niet resetten; daarom géén hergebruik van `award`). `claim_level_gift` gebruikt dit i.p.v.
+  `admin_add_coins`. Gevolg: gift telt mee voor leveling **en** verschijnt in **"⏳ Earners of the
+  last hour"**.
+- **`handle_level_claim`** draait `maybe_levelup` ná de claim → een gift die een nieuw level
+  ontgrendelt wordt meteen opgepikt. **Geen cascade:** een gift = 1,5 % van het saldo, een levelgat
+  is altijd ~30-40 % → een cadeau kan nooit zélf een volgend level openen (behalve de grotere
+  correctie-gift, zie onder).
+- **`correction_for`** slaat levels over die al een echte gift-rij hebben (`db::gifted_levels`,
+  nieuw) → **geen dubbele betaling** meer. Timmy: **26** i.p.v. 46 (zijn al-uitgekeerde level-6-gift
+  wordt niet nog eens betaald). Totaal correctie blijft **860 coins / 19 leden**.
+- Verweesde `admin_add_coins` + `current_coins` verwijderd.
+
+**Data (prod, eenmalig):** TimmyThumb's al-geclaimde gift (20) alsnog in `total_earned` geboekt
+(1334 → **1354**), idempotent-veilig. Reconciliatie ná afloop: **0 mismatches / 21**; invariant is
+nu `coins == total_earned − spent` (gifts zitten voortaan ín `total_earned`).
+
+**⚠️ Impact op `!levelfix_commit` (nog te draaien):** onder het nieuwe beleid triggert de correctie
+precies **één** nieuwe level-up — **Waldstein 9 → 10** (215 duwt hem over drempel 10 = 9078) → krijgt
+daar bovenop een verse level-10-gift (~138). Bewust toegelaten (optie A). Alle anderen blijven op hun
+level. **Handmatige admin-grants** (Manage → Coins, was `admin_add_coins`) tellen **bewust niet** mee
+— aparte, opzettelijke admin-tool.
+
+---
+
 ## ⏭️ Sessie (2026-07-18a) — level-up-cadeaus (embed+claim), correctie-inhaalslag, aankoopmeldingen, cosmetica
 
 **Alles LIVE op prod + gecommit + gepusht** (`f1f69ac` → `b205e6e`; subtree t/m `128a253`).
@@ -31,8 +73,9 @@ al ≥ level 1 stonden).
   - **Enkel de gelevelde** kan claimen (custom_id `lg:{id}`, atomische claim). Andere klikker →
     ephemeral **"Uh-oh! This is not your reward!"**. Bij claim → publiek **"<naam> got X coins
     for the level up."** (de náám, géén ping — bewust anders dan de tag in de embed).
-  - **Cadeau = 1,5 % van je saldo** op het moment van de level-up (half naar boven), uitgekeerd
-    via `admin_add_coins` → verhoogt **niet** `total_earned` (geen cascade).
+  - **Cadeau = 1,5 % van je saldo** op het moment van de level-up (half naar boven). *(Achterhaald
+    op 2026-07-18b: de claim liep via `admin_add_coins` en telde toen niet mee voor `total_earned`;
+    nu via `credit_earned` → telt **wél** mee. Zie het 18b-blok bovenaan.)*
 - **Gecentraliseerd + zelfhelend:** `maybe_levelup(http, pool, uid, name)` draait na élke
   coin-bron (bericht `bot.rs:~193`, daily `~365`, chest-pop `~1015`, chest-rescue `~562`).
   Marker `coins.gifted_level` = hoogst gepost level → geen dubbele/gemiste embeds; een level-up
