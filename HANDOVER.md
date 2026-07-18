@@ -14,6 +14,29 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-18f) — inventory-polish: Trinkets, gem-image2, gems 6-per-rij
+
+**Alles LIVE op prod + gecommit + gepusht** (commit `0a72f92`; subtree `market-gh` → `572a7a1`).
+Drie geparkeerde inventory-klussen (1, 2, 4 uit 18e) zelfstandig afgewerkt:
+
+- **"Boosts/Boosters" → "Trinkets"** — sub-tab-knop (`🍀 Trinkets`) + schap-titel in de
+  fancy Spicy-Sale-font (spiegelt de "Basic Gems"-titel); ook in de admin-preview. Interne
+  ids (`data-t="boosts"`, `#p-boosts`) ongewijzigd gelaten (niet speler-zichtbaar). "Trinkets"
+  = user-woord; 🍀 hergebruikt uit de bestaande Lucky-Horseshoe-context (geen nieuwe emoji verzonnen).
+- **2e afbeelding (image2) op gems** — `gem_slot` toont nu de optionele `image2` onder de titel
+  (`.thumb2`), net als de shop-kaart en `booster_slot` al deden.
+- **Basic Gems + Trinkets in een vast 6-koloms grid** (`.shelf.gems6`) i.p.v. de flex-wrap-strip;
+  kaders rekken in hoogte mee zodat alle tekst past. Responsive terugval: **3 kol ≤820px, 2 ≤480px**
+  (anders onleesbaar smal op telefoon).
+
+Verificatie: `cargo build` schoon (enkel bestaande warnings), lokaal `MARKET_WEB_ONLY=1` → CSS +
+markup uitgeleverd, prod-curl bevestigt `repeat(6,minmax(0,1fr))` live.
+
+**Nog geparkeerd (blijft open):** ① Lucky-Horseshoe-omschrijving (user-tekst met "Foruna"-typo →
+eerst navragen), ② "jaar niet actief member" (nog te specificeren).
+
+---
+
 ## ⏭️ Sessie (2026-07-18e) — weekly-cadeau-feature, affordability-knop, inventory-preview + polish
 
 **Alles LIVE op prod + gecommit + gepusht** (`6163a87` → `7a28ecb`; subtree t/m `3ebfc34`).
@@ -58,12 +81,12 @@ als emoji uploaden. De user maakte zelf **`<:MM_party:1522596802874835014>`** (M
 zit in 2 guilds: **WaldsteinDevZone** (`652452615879262220`, waar dev-coins zit) + **Magic Meadow**
 (`1296469405651435592`, prod). Emoji uit Magic Meadow rendert overal waar de bot post.
 
-### 📌 Nog geparkeerd (uit de grote batch die de weekly onderbrak — NIET gedaan)
-- **"Boosts" → "Trinkets"** hernoemen (inventory-tab + titel in de Basic-Gems-sierfont).
-- **image2 (2e afbeelding) tonen in de inventory** (staat wel in de shop-kaart, niet in `gem_slot`).
+### 📌 Nog geparkeerd (uit de grote batch die de weekly onderbrak)
+- ✅ ~~"Boosts" → "Trinkets"~~ — **gedaan in 18f**.
+- ✅ ~~image2 (2e afbeelding) tonen in de inventory~~ — **gedaan in 18f**.
+- ✅ ~~Gems 6-per-rij in de inventory~~ — **gedaan in 18f**.
 - **Lucky Horseshoe-omschrijving** wijzigen — user-tekst: *"You will have twice as much chance to
   open Foruna's Favor"* (⚠️ "Foruna" = vermoedelijk typo voor **Fortuna**; vragen vóór live).
-- **Gems 6-per-rij** in de inventory (grid), kaders desnoods hoger voor alle tekst.
 - **"jaar niet actief member"** — TODO (nog te specificeren met user).
 
 ---
