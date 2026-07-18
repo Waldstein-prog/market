@@ -78,13 +78,26 @@ mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). B
   Settings-units, ∞-tooltip, "Nobody has bought anything yet"). Server-logs (`tracing`), panics
   en code-comments blijven NL (niet speler-zichtbaar). **Regel: alle buitenwereld-tekst = Engels.**
 
-### 📌 Open TODO — horseshoe-testprotocol (voor later, user-keuze 2026-07-18c)
-De Lucky Horseshoe (permanente booster, bezit = 2 loten i.p.v. 1 bij chest-trekking) moet eerst
-**apart getest** worden vóór hij terug in de dagrotatie mag. Voorstel lag klaar: in de dev-guild
-op testaccounts kopen (Admin shop toont alles), een reeks chests draaien, checken dat de houder
-~2× wint + de 🍀-regel verschijnt + permanent/éénmalig, dan balans-oordeel (2× / prijs 120 /
-zeldzaamheid). **Uitgesteld op verzoek** — pas als dit gebeurd is `horseshoe_shop_odds_days`
-terug op N zetten.
+### 📌 Open TODO — horseshoe-testprotocol (voor later; verfijnd 2026-07-18d)
+De Lucky Horseshoe (permanente booster, bezit = **2 loten** i.p.v. 1 bij een chest-trekking →
+`db::chest_weight` = 2 via `owns_horseshoe`) moet eerst getest worden vóór hij terug in de
+dagrotatie mag (`horseshoe_shop_odds_days` weer op N). **Geparkeerd op verzoek.** Twee valkuilen
+die het naïeve "één live-chest in dev" plan ondermijnen:
+- **Dev-guild draait op de prod-`coins.db`** (zelfde bot-instance). Een echte dev-chest schrijft
+  dus in prod (join-records, uitbetaling, Faybelle's horseshoe-inventory-rij). "Niks verstoren"
+  vergt dus terugdraaien achteraf.
+- **Eén trekking bewíjst de 2× niet** (met 2 spelers = 33/67; één sample).
+
+**Afgesproken protocol (klaar om uit te voeren):**
+1. **Odds-bewijs = simulatie** (nul risico, al één keer gedraaid 2026-07-18d): replica van de
+   draw-logica (`total=Σweights; roll∈[0,total); walk`) over 500k trekkingen → houder wint in élk
+   scenario **exact 2×** een niet-houder (2-,3-,5-speler getest). Dít is de echte 2×-toets.
+2. **Hands-on e2e (optioneel, voor de flow + de "🍀 Their Lucky Horseshoe doubled the odds!"-regel):**
+   `!chest` (bestaat, **dev-guild-only**, spawnt meteen in het huidige kanaal). Reversibel doen:
+   vooraf Faybelle de horseshoe geven (DB-insert), Waldstein+Faybelle joinen, ná de trekking
+   **alles terugdraaien** (horseshoe weg, uitbetaalde coins + `total_earned` terug, test-logrijen
+   wissen) → prod exact ongewijzigd. Per trekking de exacte kansen rapporteren.
+3. Daarna balans-oordeel (2× / prijs 120 / zeldzaamheid) → dan pas `horseshoe_shop_odds_days` weer aan.
 
 ### 📌 Open TODO — verjaardagen + birthday-chest (geparkeerd 2026-07-18c)
 - **Verjaardagen overnemen van MEE6**: de birthday-data die de MEE6-bot bijhoudt opvragen en
