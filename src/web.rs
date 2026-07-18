@@ -1242,7 +1242,7 @@ async fn market(
 
     // Lopende pas? Dan toont de dagpas als "Bought" tot de timer afloopt (één tegelijk).
     let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
-    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass);
+    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass, coins);
 
     // Volledig shop-ontwerp (zoals de Admin shop preview): dagrotatie + Hytale-passen.
     // Twee onderdelen zijn nog niet vrijgegeven en staan grijs (zie de flags bovenaan).
@@ -1352,7 +1352,7 @@ async fn admin_shop(
         .map(|(sid, title)| {
             let slots: String = db::shelf_items(&st.pool, *sid)
                 .iter()
-                .map(|it| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass))
+                .map(|it| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass, coins))
                 .collect();
             if slots.is_empty() {
                 return String::new();
@@ -1399,7 +1399,7 @@ async fn admin_shop_preview(
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
     let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
-    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass);
+    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass, coins);
 
     let offers: String =
         db::shop_offers(
@@ -1522,7 +1522,7 @@ fn item_thumb(it: &db::Item) -> String {
 
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
-fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pass: bool) -> String {
+fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pass: bool, coins: i64) -> String {
     // Lopende dagpas (boost mét looptijd + een actieve pas): zolang de timer loopt koop je
     // geen tweede. Toon de kaart dan als "Bought" (grijs + ✓ + Bought-knop), niet als
     // "Out of Stock" — er ís voorraad, jíj hebt er gewoon al een lopen.
@@ -1538,6 +1538,10 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
     // Item blijft wél staan: je ziet wát er te koop is. De échte rem zit in buy()/purchase() —
     // een grijze knop houdt niemand tegen die zelf een POST stuurt.
     let dicht = it.sold_out || it.stock == 0;
+    // Te weinig coins → Buy-knop grijs/uitgeschakeld (dan hoeft de "not enough coins"-banner
+    // niet meer te verschijnen in de normale flow). buy()/purchase() blijft server-side de
+    // rem als vangnet (race of handmatige POST).
+    let cant_afford = coins < it.price;
     let action = if day_pass_active {
         // Eigen "Bought"-knop (grijs, niet klikbaar) i.p.v. de lege owned-actie, zodat
         // duidelijk is dat je pas loopt.
@@ -1546,6 +1550,8 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
         "<button class=\"buy\" type=\"button\" disabled>Out of Stock</button>".to_string()
     } else if bought {
         String::new()
+    } else if cant_afford {
+        "<button class=\"buy\" type=\"button\" disabled>Buy</button>".to_string()
     } else {
         // Eerste pas-aankoop: vraag de Hytale-naam mee in het koopformulier.
         // Zodra die bewaard is (has_name) verdwijnt het veld voorgoed.
