@@ -1,4 +1,4 @@
-# Handover — Meadow Market (2026-07-15)
+# Handover — Meadow Market (2026-07-20)
 
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
@@ -13,6 +13,40 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 (2026-07-13, met nadruk). Alle feedback = **publiek kanaalbericht** of een **ephemeral** (enkel
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
+
+## ⏭️ Sessie (2026-07-19/20) — diepe code-review + volledige fix-inhaalslag (5 ronden)
+
+**Alles LIVE op prod + gecommit + gepusht.** Op vraag een **diepe code review** gedaan van de
+hele market-codebase (~10,3k regels Rust, 8 modules) via 4 parallelle review-agents (db/web/bot/
+twitch+rest+settings), daarna elke topbevinding zélf in de bron geverifieerd en in **5 ronden**
+gefixt-getest-gedeployd-gepusht. Van **0 → 23 tests** (concurrency- + security-regressievangnet).
+
+**Rode draad van de bugs:** check-then-write over de gedeelde r2d2/SQLite-pool → races tussen de
+bot-, web- en twitch-taak. Fix-patroon overal: **atomische DB-guard of `IMMEDIATE`-transactie**,
+geholpen door de `busy_timeout` uit ronde 1.
+
+| Ronde | Commit | Niveau | Fixes |
+|---|---|---|---|
+| 1 | `ce5a527` | KRITIEK | daily dubbel-claim (atomische `WHERE last_daily<=guard`) · `busy_timeout=5000` |
+| 2 | `ea8a939` | HOOG | `maybe_levelup`-race (CAS `advance_gifted_level`) · bericht-cooldown (`award_if_ready`) · `admin_adjust` lost-update (IMMEDIATE-tx) |
+| 3 | `a6ce24b` | HOOG/MIDDEL | open redirect (`\`-bypass) · sessie-TTL server-side + `Secure`-cookie · Twitch dedup (message_id) · Twitch WS-keepalive · `claim_level_gift` claim+credit in één tx · discord_rest 15s-timeout |
+| 4 | `9fc83d3` | MIDDEL | `add_stock` (IMMEDIATE-tx) · `shop_offers` geserialiseerd (lockless read + IMMEDIATE-tx, canonieke set) · weekly-inhaal na herstart (kv-marker `weekly_last_fired`) |
+| 5 | `e0ea4d2` | LAAG | `/logout` GET→POST (CSRF) · `esc()` escapet `'` · `leaderboard_week` tie-break (`COALESCE AS username`) · `settings.rs` `clamp_bounds` (min>max) · Twitch mock enkel bij vlag/loopback |
+
+Subtree `market-gh` bijgewerkt t/m `40c9164`. Elke deploy geverifieerd: service active, geen
+panics, home 200, en gerichte checks (Secure-cookie live, `GET /logout`→405).
+
+**⚠️ Belangrijke architectuur-vondst (memory [[market-db-no-wal]]):** `coins.db` blijft bewust op
+**rollback-journal + busy_timeout, GEEN WAL**. Het Hytale-panel (`lab/tale/panel/panel.py`, user
+`hytale`) **leest `coins.db` rechtstreeks read-only** (`?mode=ro`) uit `/opt/market/` — een map
+waar het niet kan schrijven. Onder WAL faalt die read tijdens het deploy-venster (empirisch
+gereproduceerd). Alleen het *schrijven* (pas intrekken) gaat via `/internal/pass/revoke`. WAL kan
+pas als de panel-read óók achter `/internal/*` verhuist (kleine ingreep: `/internal/passes`-route
+in market + HTTP-call in panel.py — panel-kant is tale-domein, met de tale-kant af te stemmen).
+
+**Nog open uit de review:** niets — alle KRITIEK/HOOG/MIDDEL/LAAG-bevindingen zijn afgewerkt.
+Losse latente noten leven in de code-comments (bv. `list_members` cap 1000 zonder paginatie —
+by-design bij ~33 leden).
 
 ## ⏭️ Sessie (2026-07-19a) — Absent-tab (rename) + kanaal-backfill van afwezigheid
 
