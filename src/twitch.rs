@@ -55,6 +55,11 @@ fn clean_name(raw: &str) -> Option<String> {
     }
 }
 
+/// Wijst een EventSub-URL naar een loopback-adres? (→ de lokale Twitch CLI-mock.)
+fn is_loopback_ws(url: &str) -> bool {
+    url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]")
+}
+
 /// Verloopmoment als lokale-ish HH:MM (best-effort, UTC) voor de chatbevestiging.
 fn fmt_hm(expires: f64) -> String {
     let secs = expires as i64;
@@ -560,8 +565,16 @@ async fn subscribe_redemptions(ctx: &Ctx, session_id: &str) -> Result<(), String
 pub async fn run(pool: DbPool, cfg: Config) {
     // Test-hook: wijs naar de Twitch CLI EventSub-mock (bv. ws://127.0.0.1:8080/ws).
     // Gezet ⇒ mock-modus (geen echte Helix/token nodig).
-    let start_url = std::env::var("TWITCH_EVENTSUB_URL").unwrap_or_else(|_| EVENTSUB_WS.to_string());
-    let mock = std::env::var("TWITCH_EVENTSUB_URL").is_ok();
+    let url_override = std::env::var("TWITCH_EVENTSUB_URL").ok();
+    let start_url = url_override.clone().unwrap_or_else(|| EVENTSUB_WS.to_string());
+    // Mock-modus enkel bij een EXPLICIETE vlag, of als de override een loopback-adres is (de
+    // Twitch CLI EventSub-mock draait op ws://127.0.0.1). Zo forceert een override naar een écht/
+    // alternatief endpoint géén mock meer — dat schreef anders wél echte grants naar coins.db maar
+    // fulfillde de redemptions nooit (punten niet verrekend).
+    let mock = std::env::var("MARKET_TWITCH_MOCK")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+        || url_override.as_deref().map(is_loopback_ws).unwrap_or(false);
 
     let ctx = match bootstrap(&cfg, pool, mock).await {
         Ok(c) => std::sync::Arc::new(c),
@@ -611,7 +624,15 @@ pub async fn run(pool: DbPool, cfg: Config) {
 
 #[cfg(test)]
 mod dedup {
-    use super::{Seen, SEEN_CAP};
+    use super::{is_loopback_ws, Seen, SEEN_CAP};
+
+    /// Mock-detectie: enkel een loopback-URL telt als de lokale Twitch-mock (footgun-fix).
+    #[test]
+    fn loopback_ws_detection() {
+        assert!(is_loopback_ws("ws://127.0.0.1:8080/ws"));
+        assert!(is_loopback_ws("ws://localhost:8080/ws"));
+        assert!(!is_loopback_ws("wss://eventsub.wss.twitch.tv/ws"));
+    }
 
     /// #5 — een reeds geziene message_id is een dubbel; een lege id wordt niet gededupt.
     #[test]

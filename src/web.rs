@@ -277,7 +277,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/info", get(info_page))
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
-        .route("/logout", get(logout))
+        .route("/logout", post(logout))
         .route("/admin", get(admin))
         .route("/api/status", get(api_status))
         .route("/api/toggle", post(api_toggle))
@@ -382,6 +382,7 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
@@ -390,7 +391,10 @@ fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
     let logout = if nav.is_empty() {
         String::new()
     } else {
-        "<a class=\"tb-logout\" href=\"/logout\">↪ Log out</a>".to_string()
+        // POST (niet GET) zodat een cross-site <img src=/logout> niemand kan uitloggen (CSRF).
+        "<form class=\"logout-form\" method=\"post\" action=\"/logout\">\
+           <button class=\"tb-logout\" type=\"submit\">↪ Log out</button></form>"
+            .to_string()
     };
     // Live-refresh: pol elke 5s /api/balance en werk de getagde elementen bij
     // (saldo, all-time, level). Enkel op ingelogde pagina's met zo'n element.
@@ -424,8 +428,10 @@ body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
   display:flex;align-items:center;justify-content:space-between;gap:1rem}}
 .brand{{font-weight:700;font-size:1.1rem;letter-spacing:.02em}}
 .tb-logout{{color:#0e1510;text-decoration:none;font-weight:700;font-size:.9rem;
-  background:rgba(14,21,16,.12);padding:.35rem .8rem;border-radius:999px;white-space:nowrap}}
+  background:rgba(14,21,16,.12);padding:.35rem .8rem;border-radius:999px;white-space:nowrap;
+  border:0;cursor:pointer;font-family:inherit}}
 .tb-logout:hover{{background:rgba(14,21,16,.22)}}
+.logout-form{{display:inline;margin:0}}
 .uname{{font-weight:800;font-size:1.25rem;letter-spacing:.01em;margin:0 0 .7rem}}
 .nav{{display:flex;gap:.3rem;margin:0 0 1.3rem;flex-wrap:wrap}}
 .nav a{{flex:1 1 auto;text-align:center;padding:.5rem .7rem;border-radius:11px;
@@ -484,7 +490,7 @@ a.btn,button.btn{{display:inline-block;margin-top:1rem;padding:.7rem 1.15rem;
 a.btn:hover,button.btn:hover{{filter:brightness(1.06)}}
 a.btn:active,button.btn:active{{transform:translateY(3px);box-shadow:0 0 0 #3a5a28}}
 button.btn:disabled{{box-shadow:none;transform:none;filter:none}}
-a.link{{color:{MEADOW}}}
+a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:pointer;font:inherit;text-decoration:underline}}
 .statrow{{display:flex;justify-content:space-between;align-items:center;
   padding:.7rem .1rem;border-top:1px solid #22301f}}
 .statrow .k{{color:#9db095;font-size:.92rem}}
@@ -1742,7 +1748,7 @@ fn rules_body(name: &str) -> String {
         "<h1>🌼 Hi, {name}</h1>\
          <p>You're logged in, but you don't have the <b>Flowerborn</b> role (yet). \
          A Meadow Market account is only for Flowerborns.</p>\
-         <a class=\"link\" href=\"/logout\">Log out</a>",
+         <form method=\"post\" action=\"/logout\"><button class=\"link\" type=\"submit\">Log out</button></form>",
         name = esc(name)
     )
 }
@@ -4442,5 +4448,14 @@ mod redirect_and_cookie {
     fn secure_attr_only_on_https() {
         assert_eq!(secure_attr("https://magicmeadow.org"), "; Secure");
         assert_eq!(secure_attr("http://localhost:8700"), "");
+    }
+
+    /// esc() escapet alle HTML-specials, incl. de single quote (attribuut-breakout in '…').
+    #[test]
+    fn esc_escapes_single_quote_too() {
+        assert_eq!(
+            esc("<a href=\"x\" onclick='y'>&"),
+            "&lt;a href=&quot;x&quot; onclick=&#39;y&#39;&gt;&amp;"
+        );
     }
 }

@@ -1192,7 +1192,7 @@ pub fn leaderboard_week(pool: &DbPool, since: f64, limit: i64) -> Vec<(String, S
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT e.user_id, COALESCE(c.username, e.user_id), SUM(e.amount) AS total
+            "SELECT e.user_id, COALESCE(c.username, e.user_id) AS username, SUM(e.amount) AS total
              FROM earn_log e LEFT JOIN coins c ON c.user_id = e.user_id
              WHERE e.ts >= ?1
              GROUP BY e.user_id

@@ -208,8 +208,15 @@ pub fn f64_of(pool: &DbPool, key: &str) -> f64 {
     db::setting_get(pool, key)
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| v.is_finite())
-        .map(|v| v.clamp(sp.min, sp.max))
+        .map(|v| clamp_bounds(v, sp.min, sp.max))
         .unwrap_or(sp.default)
+}
+
+/// Klem `v` binnen [min,max]. Verdraagt een omgekeerde spec (min>max) zonder te paniceren
+/// (std `f64::clamp` paniekt als min>max) door de grenzen te ordenen.
+fn clamp_bounds(v: f64, min: f64, max: f64) -> f64 {
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+    v.clamp(lo, hi)
 }
 
 pub fn i64_of(pool: &DbPool, key: &str) -> i64 {
@@ -239,7 +246,7 @@ pub fn set(pool: &DbPool, key: &str, raw: &str) -> bool {
         Kind::Int => raw.trim().replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite()),
     };
     let Some(v) = parsed else { return false };
-    let v = v.clamp(sp.min, sp.max);
+    let v = clamp_bounds(v, sp.min, sp.max);
     let out = if sp.kind == Kind::Bool || v.fract() == 0.0 {
         format!("{}", v.round() as i64)
     } else {
@@ -247,4 +254,21 @@ pub fn set(pool: &DbPool, key: &str, raw: &str) -> bool {
     };
     db::setting_set(pool, key, &out);
     true
+}
+
+#[cfg(test)]
+mod clamp_tests {
+    use super::clamp_bounds;
+
+    /// clamp_bounds klemt normaal én verdraagt een omgekeerde spec (min>max) zonder panic.
+    #[test]
+    fn clamp_bounds_handles_reversed_spec() {
+        assert_eq!(clamp_bounds(5.0, 0.0, 10.0), 5.0);
+        assert_eq!(clamp_bounds(-1.0, 0.0, 10.0), 0.0);
+        assert_eq!(clamp_bounds(99.0, 0.0, 10.0), 10.0);
+        // Omgekeerd (min>max): std clamp zou paniceren — clamp_bounds ordent en klemt gewoon.
+        assert_eq!(clamp_bounds(5.0, 10.0, 0.0), 5.0);
+        assert_eq!(clamp_bounds(99.0, 10.0, 0.0), 10.0);
+        assert_eq!(clamp_bounds(-5.0, 10.0, 0.0), 0.0);
+    }
 }
