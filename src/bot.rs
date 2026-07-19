@@ -199,9 +199,17 @@ async fn handle_message(
         .unwrap_or_else(|| msg.author.name.clone());
 
     let cooldown = settings::f64_of(&data.pool, "msg_cooldown_sec");
-    if elapsed >= cooldown {
+    // Fast-path Rust-check voor de normale flow; de échte guard zit atomisch in `award_if_ready`
+    // (WHERE last_award <= guard_ts) en vangt twee snelle berichten die beide deze check passeren
+    // vóór er iets geschreven is → geen dubbele award. `None` = race verloren (of net op cooldown).
+    let awarded = if elapsed >= cooldown {
         let amount = coin_amount(&data.pool);
-        let total = db::award(&data.pool, &uid, &name, amount, now);
+        db::award_if_ready(&data.pool, &uid, &name, amount, now, now - cooldown)
+            .map(|total| (amount, total))
+    } else {
+        None
+    };
+    if let Some((amount, total)) = awarded {
         tracing::info!("{name}: +{amount} coins (totaal {total})");
         // Een award van 0 is een geldige uitkomst (rij `0` in coin_weights) en wordt
         // gelogd als elke andere: stilte las als een bug, niet als pech.
@@ -213,7 +221,7 @@ async fn handle_message(
                 .await?;
         }
     } else {
-        let remaining = (cooldown - elapsed) as i64 + 1;
+        let remaining = ((cooldown - elapsed) as i64 + 1).max(1);
         tracing::info!("{name}: cooldown, nog {remaining}s");
         if DEV_FEEDBACK {
             msg.reply(
@@ -514,10 +522,12 @@ fn claim_button_row(custom_id: String) -> serenity::CreateActionRow {
 async fn maybe_levelup(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, name: &str) {
     let (coins, _max, _pub, earned) = db::get_stats(pool, uid);
     let cur = db::level_of(earned);
-    let gifted = db::get_gifted_level(pool, uid);
-    if cur <= gifted {
+    // Claim de range [prev+1, cur] atomisch (compare-and-swap op de marker). Een gelijktijdige
+    // 2e aanroep (bv. bericht + daily tegelijk) krijgt None → post niets → geen dubbele
+    // cadeaus/embeds. `prev` is de marker-waarde op het claim-moment, niet een losse read.
+    let Some(gifted) = db::advance_gifted_level(pool, uid, cur) else {
         return;
-    }
+    };
     let now = now_secs();
     for level in (gifted + 1)..=cur {
         let amount = ((coins as f64) * 0.015).round() as i64;
@@ -539,7 +549,7 @@ async fn maybe_levelup(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, nam
                 .await;
         }
     }
-    db::set_gifted_level(pool, uid, cur);
+    // Marker is al vooraf gezet door advance_gifted_level (atomische claim) — niets meer te doen.
 }
 
 /// Klik op een 🎁-claim-knop: keert het cadeau eenmalig uit aan de eigenaar en post een

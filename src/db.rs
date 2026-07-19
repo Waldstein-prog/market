@@ -1,7 +1,7 @@
 //! SQLite-persistentie voor de coin-economy (rusqlite + r2d2, zoals cyd).
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 pub type DbPool = Pool<SqliteConnectionManager>;
 
@@ -697,6 +697,48 @@ pub fn award(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64)
     .expect("query totaal")
 }
 
+/// Bericht-award met **atomische cooldown-guard**: boekt enkel als `last_award <= guard_ts`
+/// (= de cooldown is écht verstreken). Vangt de race van twee snelle berichten die beide de
+/// Rust-cooldowncheck passeren vóór er geschreven is → geen dubbele award. `guard_ts` =
+/// `now - cooldown`. Voor een gloednieuw lid vuurt de INSERT (geen conflict) → eerste bericht
+/// boekt altijd. Returnt `Some(nieuw_saldo)` bij een geboekte award, `None` als de guard weigerde.
+pub fn award_if_ready(
+    pool: &DbPool,
+    user_id: &str,
+    username: &str,
+    amount: i64,
+    ts: f64,
+    guard_ts: f64,
+) -> Option<i64> {
+    let conn = pool.get().expect("db");
+    let changed = conn
+        .execute(
+            "INSERT INTO coins (user_id, username, coins, last_award, max_balance, total_earned)
+         VALUES (?1, ?2, ?3, ?4, ?3, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET
+             coins        = coins + excluded.coins,
+             username     = excluded.username,
+             last_award   = excluded.last_award,
+             max_balance  = MAX(max_balance, coins + excluded.coins),
+             total_earned = total_earned + excluded.coins
+         WHERE last_award <= ?5",
+            params![user_id, username, amount, ts, guard_ts],
+        )
+        .expect("insert award");
+    if changed == 0 {
+        return None; // race verloren: een gelijktijdig bericht boekte net vóór dit
+    }
+    log_earn_event(&conn, user_id, amount, ts);
+    let total = conn
+        .query_row(
+            "SELECT coins FROM coins WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .expect("query totaal");
+    Some(total)
+}
+
 /// Voeg coins toe die **als verdienste** meetellen: `coins` + `total_earned` + `earn_log`,
 /// maar **zonder** `last_award` aan te raken (dat is enkel de chat-cooldown — een cadeau
 /// mag die niet resetten). Zo tellen deze coins mee voor de level-up (all-time saldo) én
@@ -885,8 +927,14 @@ pub fn admin_adjust(
     current: bool,
     alltime: bool,
 ) -> (i64, i64) {
-    let conn = pool.get().expect("db");
-    let (pc, pe): (i64, i64) = conn
+    let mut conn = pool.get().expect("db");
+    // IMMEDIATE: neem de write-lock meteen zodat de read-modify-write (SELECT → bereken → UPDATE)
+    // atomisch is. Zonder deze transactie gaat een gelijktijdige award tussen de SELECT en de
+    // UPDATE verloren (lost update): de absolute write zou het net-verdiende bedrag overschrijven.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("tx adjust");
+    let (pc, pe): (i64, i64) = tx
         .query_row(
             "SELECT coins, total_earned FROM coins WHERE user_id = ?1",
             params![user_id],
@@ -905,7 +953,7 @@ pub fn admin_adjust(
     } else {
         pe
     };
-    conn.execute(
+    tx.execute(
         "INSERT INTO coins (user_id, username, coins, total_earned, max_balance) VALUES (?1, ?2, ?3, ?4, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
              coins = ?3, total_earned = ?4,
@@ -914,6 +962,7 @@ pub fn admin_adjust(
         params![user_id, username, coins, earned],
     )
     .expect("admin adjust");
+    tx.commit().expect("commit adjust");
     (pc, pe)
 }
 
@@ -1246,26 +1295,39 @@ pub fn level_of(earned: i64) -> i64 {
 // --- level-up-cadeaus ---------------------------------------------------
 
 /// Hoogste level waarvoor dit lid al een cadeau-embed kreeg (0 = nog nooit).
-pub fn get_gifted_level(pool: &DbPool, uid: &str) -> i64 {
-    let conn = pool.get().expect("db");
-    conn.query_row(
-        "SELECT gifted_level FROM coins WHERE user_id = ?1",
-        params![uid],
-        |r| r.get(0),
-    )
-    .optional()
-    .expect("q gifted_level")
-    .unwrap_or(0)
-}
-
-/// Zet de marker "hoogst uitgekeerde level" (na het posten van de embed(s)).
-pub fn set_gifted_level(pool: &DbPool, uid: &str, level: i64) {
-    let conn = pool.get().expect("db");
-    conn.execute(
+/// **Atomische compare-and-swap** van de level-marker `gifted_level`: zet ze naar `cur` als die
+/// hoger is dan de huidige waarde, en returnt de VORIGE marker zodat de aanroeper exact de range
+/// `[prev+1, cur]` post. `None` = niets te doen (marker al ≥ `cur`) óf een gelijktijdige aanroep
+/// claimde de range net eerder → de aanroeper post dan **niets** → geen dubbele cadeaus/embeds.
+///
+/// De marker gaat vóór het posten omhoog (self-healing blijft: een gemiste level-up wordt bij de
+/// volgende verdienste alsnog opgepikt). Crasht het proces ná de swap maar vóór het cadeau
+/// aangemaakt is, dan mist dat ene cadeau — bewust die kant op (geen dubbele uitbetaling), zoals
+/// bij de daily-guard. IMMEDIATE-tx: de read en de write kunnen niet met een 2e aanroep verweven.
+pub fn advance_gifted_level(pool: &DbPool, uid: &str, cur: i64) -> Option<i64> {
+    let mut conn = pool.get().expect("db");
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("tx gifted_level");
+    let prev: i64 = tx
+        .query_row(
+            "SELECT gifted_level FROM coins WHERE user_id = ?1",
+            params![uid],
+            |r| r.get(0),
+        )
+        .optional()
+        .expect("q gifted_level")
+        .unwrap_or(0);
+    if cur <= prev {
+        return None; // niets te claimen (tx rolt terug bij drop)
+    }
+    tx.execute(
         "UPDATE coins SET gifted_level = ?2 WHERE user_id = ?1",
-        params![uid, level],
+        params![uid, cur],
     )
-    .expect("set gifted_level");
+    .expect("advance gifted_level");
+    tx.commit().expect("commit gifted_level");
+    Some(prev)
 }
 
 /// Registreer een openstaand cadeau (claimed = 0) en geef het rij-id terug — dat komt
@@ -3033,6 +3095,78 @@ mod daily_atomic_guard {
         let t3 = award_daily(&pool, uid, "Tester", 50, 2, later, later - cooldown);
         assert_eq!(t3, Some(100), "ná de cooldown boekt de volgende daily weer");
 
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod concurrency_guards {
+    use super::*;
+
+    fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-guardtest-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (init_pool(p.to_str().unwrap()), p)
+    }
+
+    /// #3 — tweede bericht binnen de cooldown wordt door de WHERE-guard geweigerd (geen dubbele award).
+    #[test]
+    fn award_if_ready_refuses_second_within_cooldown() {
+        let (pool, path) = fresh("award");
+        let uid = "9";
+        let now = 1_000_000.0;
+        let cooldown = 30.0;
+        let guard = now - cooldown;
+
+        assert_eq!(award_if_ready(&pool, uid, "T", 3, now, guard), Some(3), "eerste bericht boekt");
+        assert_eq!(award_if_ready(&pool, uid, "T", 3, now, guard), None, "tweede binnen cooldown geweigerd");
+        let (coins, _m, _p, earned) = get_stats(&pool, uid);
+        assert_eq!((coins, earned), (3, 3), "geen dubbele coins/total_earned");
+
+        let later = now + cooldown + 1.0;
+        assert_eq!(
+            award_if_ready(&pool, uid, "T", 3, later, later - cooldown),
+            Some(6),
+            "ná de cooldown boekt het volgende bericht weer"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #2 — advance_gifted_level is een idempotente CAS: claimt de range één keer, daarna None.
+    #[test]
+    fn advance_gifted_level_claims_range_once() {
+        let (pool, path) = fresh("levelup");
+        let uid = "10";
+        award(&pool, uid, "T", 100, 0.0); // maakt de coins-rij aan (marker start op 0)
+
+        assert_eq!(advance_gifted_level(&pool, uid, 3), Some(0), "claimt [1,3], vorige marker 0");
+        assert_eq!(advance_gifted_level(&pool, uid, 3), None, "zelfde doel → niets (al geclaimd)");
+        assert_eq!(advance_gifted_level(&pool, uid, 2), None, "lager doel → niets");
+        assert_eq!(advance_gifted_level(&pool, uid, 5), Some(3), "hoger doel → claimt [4,5], vorige 3");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #4 — admin_adjust: add accumuleert, set overschrijft, current/alltime los, prev correct terug.
+    #[test]
+    fn admin_adjust_add_set_and_returns_prev() {
+        let (pool, path) = fresh("adjust");
+        let uid = "11";
+        award(&pool, uid, "T", 100, 0.0); // coins 100, total_earned 100
+
+        // +50 op coins (current), earned ongemoeid; prev = (100,100).
+        assert_eq!(admin_adjust(&pool, uid, "T", 50, false, true, false), (100, 100));
+        let (c, _m, _p, e) = get_stats(&pool, uid);
+        assert_eq!((c, e), (150, 100), "add telt bij coins, earned blijft");
+
+        // set coins → 10.
+        admin_adjust(&pool, uid, "T", 10, true, true, false);
+        let (c, _m, _p, e) = get_stats(&pool, uid);
+        assert_eq!((c, e), (10, 100), "set overschrijft coins");
+
+        // +5 op alltime (earned), coins ongemoeid.
+        admin_adjust(&pool, uid, "T", 5, false, false, true);
+        let (c, _m, _p, e) = get_stats(&pool, uid);
+        assert_eq!((c, e), (10, 105), "add op alltime raakt coins niet");
         let _ = std::fs::remove_file(path);
     }
 }
