@@ -411,7 +411,20 @@ async fn handle_daily(
     // `gen_range` zou daarop paniekeren. Ondergrens wint — nooit een leeg bereik.
     let hi = hi.max(lo);
     let amount = rand::thread_rng().gen_range(lo..=hi);
-    let total = db::award_daily(&data.pool, &uid, &name, amount, streak, now);
+    // Atomische guard tegen de dubbelklik-race: enkel boeken als de cooldown écht verstreken
+    // is (last_daily <= guard_ts). De Rust-check hierboven is de normale flow; deze guard vangt
+    // twee interactie-tasks die beide die check passeren vóór er iets geschreven is.
+    let guard_ts = now - daily_cooldown;
+    let Some(total) = db::award_daily(&data.pool, &uid, &name, amount, streak, now, guard_ts)
+    else {
+        // Race verloren: een gelijktijdige claim was net eerder → toon dezelfde "too soon".
+        let last = db::get_last_daily(&data.pool, &uid);
+        let left = (daily_cooldown - (now - last)).max(0.0);
+        let hrs = (left / 3600.0).floor() as i64;
+        let mins = ((left % 3600.0) / 60.0).floor() as i64;
+        respond_ephemeral(ctx, mc, &format!("⏳ Too soon! Come back in **{hrs}h {mins}m**.")).await?;
+        return Ok(());
+    };
     let day_word = if streak == 1 { "day" } else { "days" };
     tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
     // Daily kan je over een levelgrens tillen → level-up-check.

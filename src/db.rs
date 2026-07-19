@@ -6,7 +6,18 @@ use rusqlite::{OptionalExtension, params};
 pub type DbPool = Pool<SqliteConnectionManager>;
 
 pub fn init_pool(path: &str) -> DbPool {
-    let manager = SqliteConnectionManager::file(path);
+    // Elke pooled verbinding krijgt `busy_timeout` (per-connectie, vandaar via `with_init` en
+    // niet één keer na Pool::new): wacht tot 5s op de write-lock i.p.v. meteen SQLITE_BUSY (=
+    // panic) te geven wanneer bot-, web- en twitch-taak gelijktijdig in dezelfde DB schrijven.
+    //
+    // BEWUST GEEN WAL: het Hytale-panel (user `hytale`) leest `coins.db` RECHTSTREEKS read-only
+    // uit `/opt/market/`, een map waar het niet kan schrijven. Onder WAL faalt zo'n read tijdens
+    // het deploy-venster — na een clean shutdown ruimt SQLite `-wal`/`-shm` op maar houdt de
+    // header op WAL, en de read-only opener kan de `-shm` niet heraanmaken → "attempt to write a
+    // readonly database" (empirisch gereproduceerd, 2026-07-19). Het rollback-journal laat read-
+    // only-lezers altijd door; `busy_timeout` volstaat om de panics weg te nemen.
+    let manager = SqliteConnectionManager::file(path)
+        .with_init(|c| c.execute_batch("PRAGMA busy_timeout = 5000;"));
     let pool = Pool::new(manager).expect("kan SQLite-pool niet aanmaken");
     let conn = pool.get().expect("kan DB-verbinding niet ophalen");
     conn.execute_batch(
@@ -1359,6 +1370,11 @@ pub fn get_daily_streak(pool: &DbPool, user_id: &str) -> i64 {
 
 /// Daily-beloning: tel `amount` bij, zet last_daily (eigen 24u-cooldown) en de
 /// nieuwe `streak`, houd max_balance bij. Returnt het nieuwe totaal.
+/// Boekt de daily **atomisch**: de `WHERE last_daily <= ?guard_ts` op de upsert zorgt dat
+/// enkel de eerste van twee gelijktijdige claims (dubbelklik-race op de knop) doorkomt — de
+/// tweede raakt een no-op (0 rijen) omdat de winnaar `last_daily` al vooruit zette.
+/// `guard_ts` = `now - cooldown`. Retourneert `Some(nieuw_saldo)` bij een geboekte claim,
+/// `None` als de race verloren is (niets geboekt).
 pub fn award_daily(
     pool: &DbPool,
     user_id: &str,
@@ -1366,10 +1382,14 @@ pub fn award_daily(
     amount: i64,
     streak: i64,
     ts: f64,
-) -> i64 {
+    guard_ts: f64,
+) -> Option<i64> {
     let conn = pool.get().expect("db");
-    conn.execute(
-        "INSERT INTO coins (user_id, username, coins, last_daily, daily_streak, max_balance, total_earned)
+    // De WHERE bindt aan de BESTAANDE rij-waarde (niet `excluded`). Voor een gloednieuw lid
+    // vuurt de INSERT (geen conflict, WHERE niet van toepassing) → eerste daily werkt altijd.
+    let changed = conn
+        .execute(
+            "INSERT INTO coins (user_id, username, coins, last_daily, daily_streak, max_balance, total_earned)
          VALUES (?1, ?2, ?3, ?4, ?5, ?3, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
              coins        = coins + excluded.coins,
@@ -1377,17 +1397,23 @@ pub fn award_daily(
              last_daily   = excluded.last_daily,
              daily_streak = excluded.daily_streak,
              max_balance  = MAX(max_balance, coins + excluded.coins),
-             total_earned = total_earned + excluded.coins",
-        params![user_id, username, amount, ts, streak],
-    )
-    .expect("insert daily");
+             total_earned = total_earned + excluded.coins
+         WHERE last_daily <= ?6",
+            params![user_id, username, amount, ts, streak, guard_ts],
+        )
+        .expect("insert daily");
+    if changed == 0 {
+        return None; // race verloren: gelijktijdige claim was net eerder
+    }
     log_earn_event(&conn, user_id, amount, ts);
-    conn.query_row(
-        "SELECT coins FROM coins WHERE user_id = ?1",
-        params![user_id],
-        |r| r.get(0),
-    )
-    .expect("query totaal")
+    let total = conn
+        .query_row(
+            "SELECT coins FROM coins WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .expect("query totaal");
+    Some(total)
 }
 
 /// (saldo, hoogste saldo ooit, publiek?, ooit verdiend) voor de Coins-tab.
@@ -2949,6 +2975,63 @@ mod horseshoe_dryrun {
         let mut again: Vec<i64> = shop_offers(&pool, 1, 4, 1).iter().map(|it| it.id).collect();
         again.sort();
         assert_eq!(a, again, "dagselectie is stabiel");
+
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod daily_atomic_guard {
+    use super::*;
+
+    fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-dailytest-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (init_pool(p.to_str().unwrap()), p)
+    }
+
+    /// #7 — init_pool zet `busy_timeout` per verbinding (bewust GEEN WAL: zie init_pool-comment,
+    /// het read-only panel leest coins.db rechtstreeks uit een niet-schrijfbare map).
+    #[test]
+    fn pool_sets_busy_timeout_and_no_wal() {
+        let (pool, path) = fresh("pragma");
+        let conn = pool.get().unwrap();
+        let bt: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+        assert!(bt >= 5000, "busy_timeout moet gezet zijn (>=5000ms), was {bt}");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(mode.to_lowercase(), "wal", "WAL bewust NIET aan (panel-read-compat)");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #1 — een tweede daily binnen de cooldown (de dubbelklik-race) wordt geweigerd
+    /// door de WHERE-guard: geen dubbele uitbetaling, saldo blijft na één claim staan.
+    #[test]
+    fn second_daily_within_cooldown_is_refused() {
+        let (pool, path) = fresh("guard");
+        let uid = "42";
+        let now = 1_000_000.0;
+        let cooldown = 24.0 * 3600.0;
+        let guard_ts = now - cooldown;
+
+        // Eerste claim (gloednieuw lid) → geboekt.
+        let t1 = award_daily(&pool, uid, "Tester", 50, 1, now, guard_ts);
+        assert_eq!(t1, Some(50), "eerste daily boekt 50");
+
+        // Tweede claim op exact hetzelfde moment (race, cooldown niet verstreken) → geweigerd.
+        let t2 = award_daily(&pool, uid, "Tester", 50, 1, now, guard_ts);
+        assert_eq!(t2, None, "tweede daily binnen cooldown wordt geweigerd");
+
+        // Saldo staat nog op één claim: geen dubbele uitbetaling.
+        let (coins, _m, _p, earned) = get_stats(&pool, uid);
+        assert_eq!(coins, 50, "geen dubbele uitbetaling van coins");
+        assert_eq!(earned, 50, "geen dubbele total_earned");
+
+        // Ná de cooldown (nieuwe guard_ts) mag het weer.
+        let later = now + cooldown + 1.0;
+        let t3 = award_daily(&pool, uid, "Tester", 50, 2, later, later - cooldown);
+        assert_eq!(t3, Some(100), "ná de cooldown boekt de volgende daily weer");
 
         let _ = std::fs::remove_file(path);
     }
