@@ -1345,16 +1345,41 @@ async fn hourly_shoutouts(http: Arc<serenity::Http>, pool: DbPool) {
 /// Post elke zaterdag 15:00 (Brusselse tijd) het weekly leaderboard als embed in
 /// het prod #general. Geen bericht als niemand deze week iets verdiende.
 async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
+    // Marker met het tijdstip van de laatst-gevuurde zaterdag-15:00, zodat een gemiste fire
+    // (bot lag plat rond za 15:00) na herstart alsnog wordt ingehaald i.p.v. overgeslagen.
+    const MARKER: &str = "weekly_last_fired";
     loop {
         let now = now_secs();
-        let fire = db::next_saturday_1500_brussels(now);
-        tokio::time::sleep(std::time::Duration::from_secs_f64((fire - now).max(1.0))).await;
+        let last_sat = db::last_saturday_1500_brussels(now);
+        let last_fired = db::kv_get(&pool, MARKER)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        if last_fired <= 0.0 {
+            // Eerste run met deze marker: niet met terugwerkende kracht posten — markeer de
+            // huidige occurrence als afgehandeld zodat we enkel vooruit vuren.
+            db::kv_set(&pool, MARKER, &last_sat.to_string());
+        } else if last_fired < last_sat {
+            // Gemiste (of net-nu aangebroken) zaterdag-15:00 → inhalen: post het venster van
+            // `last_sat`. Ook bij een lege week zetten we de marker, zodat we niet blijven retryen.
+            post_weekly_leaderboard(&http, &pool, last_sat).await;
+            db::kv_set(&pool, MARKER, &last_sat.to_string());
+        }
+        // Slaap tot de volgende zaterdag 15:00 (Brussel).
+        let now = now_secs();
+        let next = db::next_saturday_1500_brussels(now);
+        tokio::time::sleep(std::time::Duration::from_secs_f64((next - now).max(1.0))).await;
+    }
+}
 
+/// Bouw + post het weekly-embed voor het venster van zaterdag-15:00 `sat` (venster = de week
+/// ervóór). Geen bericht als niemand deze week iets verdiende.
+async fn post_weekly_leaderboard(http: &Arc<serenity::Http>, pool: &DbPool, sat: f64) {
+    {
         // Venster = de net afgelopen week: sinds de vorige zaterdag 15:00.
-        let since = db::last_saturday_1500_brussels(now_secs()) - 7.0 * 86400.0;
-        let top = db::leaderboard_week(&pool, since, 20);
+        let since = sat - 7.0 * 86400.0;
+        let top = db::leaderboard_week(pool, since, 20);
         if top.is_empty() {
-            continue;
+            return;
         }
         // Plaats 1-3 = medailles; plaats 4-9 = cijfer-emoji (4️⃣…9️⃣); vanaf 10 = gewoon het getal.
         let medal = |i: usize| match i {
@@ -1390,7 +1415,7 @@ async fn weekly_leaderboard(http: Arc<serenity::Http>, pool: DbPool) {
         let mut gids: Vec<String> = Vec::new();
         for (rank, amount) in [(0usize, 300i64), (1, 200), (2, 100)] {
             if let Some((uid, _n, _t)) = top.get(rank) {
-                let gid = db::create_level_gift(&pool, uid, amount, 0, "weekly", now2);
+                let gid = db::create_level_gift(pool, uid, amount, 0, "weekly", now2);
                 gids.push(gid.to_string());
             }
         }

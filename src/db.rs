@@ -415,70 +415,94 @@ fn seed_horseshoe(pool: &DbPool) {
 /// valt, wordt willekeurig (gelijke kans) één booster uit de hele pot gekozen; nieuwe
 /// boosteritems delen dus automatisch in dezelfde 1-per-N-dagen-kans. De selectie is voor
 /// iedereen dezelfde — dat maakt verzamelen spannender.
+/// De opgeslagen dagselectie voor `day`, in trekkingsvolgorde. ORDER BY rowid = insertie- =
+/// (random) trekkingsvolgorde; zonder dit gebruikt SQLite de PK-index (day, item_id) → gesorteerd
+/// op item_id, waardoor de shop bij elke her-lees "geherordend" lijkt i.p.v. random.
+fn daily_ids(conn: &rusqlite::Connection, day: i64) -> Vec<i64> {
+    let mut stmt = conn
+        .prepare("SELECT item_id FROM daily_shop WHERE day = ?1 ORDER BY rowid")
+        .expect("prepare daily_shop");
+    stmt.query_map(params![day], |r| r.get::<_, i64>(0))
+        .expect("query daily_shop")
+        .filter_map(Result::ok)
+        .collect()
+}
+
 pub fn shop_offers(pool: &DbPool, day: i64, n: i64, booster_odds_days: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
-    let mut ids: Vec<i64> = {
-        // ORDER BY rowid = insertie-volgorde = de (random) trekkingsvolgorde. Zonder dit
-        // gebruikt SQLite de PK-index (day, item_id) en komen de items gesorteerd op item_id
-        // terug — dan lijkt de shop bij elke her-lees "geherordend" i.p.v. random.
-        let mut stmt = conn
-            .prepare("SELECT item_id FROM daily_shop WHERE day = ?1 ORDER BY rowid")
-            .expect("prepare daily_shop");
-        stmt.query_map(params![day], |r| r.get::<_, i64>(0))
-            .expect("query daily_shop")
-            .filter_map(Result::ok)
-            .collect()
-    };
-    if ids.is_empty() {
-        // Rol één keer of de zeldzame booster vandaag een plek krijgt: 1/N-kans.
-        // `RANDOM() % N` blijft in (-N, N) → ABS overloopt nooit (anders dan ABS(RANDOM())).
-        let show_booster = booster_odds_days > 0
-            && conn
-                .query_row(
-                    "SELECT ABS(RANDOM() % ?1) = 0",
-                    params![booster_odds_days],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map(|v| v != 0)
-                .unwrap_or(false);
-        if show_booster {
-            if let Some(bid) = conn
-                .query_row(
-                    "SELECT id FROM items WHERE category = 'booster' ORDER BY RANDOM() LIMIT 1",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .optional()
-                .unwrap_or(None)
-            {
-                ids.push(bid);
-            }
-        }
-        // Vul de resterende slots met willekeurige gems.
-        let need = (n - ids.len() as i64).max(0);
-        if need > 0 {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id FROM items
-                     WHERE category = 'inventory' ORDER BY RANDOM() LIMIT ?1",
-                )
-                .expect("prepare pick");
-            let gems: Vec<i64> = stmt
-                .query_map(params![need], |r| r.get::<_, i64>(0))
-                .expect("query pick")
-                .filter_map(Result::ok)
-                .collect();
-            ids.extend(gems);
-        }
-        for id in &ids {
-            conn.execute(
-                "INSERT OR IGNORE INTO daily_shop (day, item_id) VALUES (?1, ?2)",
-                params![day, id],
-            )
-            .expect("insert daily_shop");
-        }
+    // Snelle weg: bestaat de dagselectie al, lees ze lockloos (de shop wordt vaak herladen).
+    let ids = daily_ids(&conn, day);
+    if !ids.is_empty() {
+        return ids.iter().filter_map(|id| get_item(pool, *id)).collect();
     }
-    ids.iter().filter_map(|id| get_item(pool, *id)).collect()
+    drop(conn);
+
+    // Trage weg: nieuwe dag → trek + schrijf ONDER een write-lock, zodat twee gelijktijdige
+    // eerste-bezoekers niet elk een eigen set rollen en er een mengeling (mogelijk > n items)
+    // gepersisteerd wordt. Her-check binnen de lock: won een ander net de race, neem díe set over.
+    let mut conn = pool.get().expect("db");
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("tx daily_shop");
+    let final_ids = {
+        let existing = daily_ids(&tx, day);
+        if !existing.is_empty() {
+            existing // een gelijktijdige aanroep was ons voor
+        } else {
+            let mut ids: Vec<i64> = Vec::new();
+            // Rol of de zeldzame booster vandaag een plek krijgt: 1/N-kans.
+            // `RANDOM() % N` blijft in (-N, N) → ABS overloopt nooit (anders dan ABS(RANDOM())).
+            let show_booster = booster_odds_days > 0
+                && tx
+                    .query_row(
+                        "SELECT ABS(RANDOM() % ?1) = 0",
+                        params![booster_odds_days],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map(|v| v != 0)
+                    .unwrap_or(false);
+            if show_booster {
+                if let Some(bid) = tx
+                    .query_row(
+                        "SELECT id FROM items WHERE category = 'booster' ORDER BY RANDOM() LIMIT 1",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .unwrap_or(None)
+                {
+                    ids.push(bid);
+                }
+            }
+            // Vul de resterende slots met willekeurige gems.
+            let need = (n - ids.len() as i64).max(0);
+            if need > 0 {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT id FROM items
+                         WHERE category = 'inventory' ORDER BY RANDOM() LIMIT ?1",
+                    )
+                    .expect("prepare pick");
+                let gems: Vec<i64> = stmt
+                    .query_map(params![need], |r| r.get::<_, i64>(0))
+                    .expect("query pick")
+                    .filter_map(Result::ok)
+                    .collect();
+                ids.extend(gems);
+            }
+            for id in &ids {
+                tx.execute(
+                    "INSERT OR IGNORE INTO daily_shop (day, item_id) VALUES (?1, ?2)",
+                    params![day, id],
+                )
+                .expect("insert daily_shop");
+            }
+            // Lees de canoniek opgeslagen set terug (wat getoond wordt == wat opgeslagen is).
+            daily_ids(&tx, day)
+        }
+    };
+    tx.commit().expect("commit daily_shop");
+    final_ids.iter().filter_map(|id| get_item(pool, *id)).collect()
 }
 
 /// Gooi de dagselectie van `day` weg; de eerstvolgende `shop_offers` trekt opnieuw.
@@ -1719,14 +1743,22 @@ pub fn update_item(
 /// onbeperkt (-1) staat, begint bij 0 — anders zou "+1" bij -1 op 0 uitkomen en dus
 /// meteen uitverkocht zijn. Returnt de nieuwe voorraad.
 pub fn add_stock(pool: &DbPool, id: i64, n: i64) -> i64 {
-    let conn = pool.get().expect("db");
-    let cur: i64 = conn
+    // IMMEDIATE-tx: de read-modify-write is atomisch, zodat een gelijktijdige verkoop (die
+    // `stock = stock - 1` relatief decrementeert) niet overschreven wordt door deze absolute
+    // write. Zonder dit las een "+5" de oude voorraad en schreef die + 5 terug, waardoor een
+    // net-verkocht exemplaar terug in de voorraad "verscheen" (voorraad-inflatie).
+    let mut conn = pool.get().expect("db");
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("tx stock");
+    let cur: i64 = tx
         .query_row("SELECT stock FROM items WHERE id = ?1", params![id], |r| r.get(0))
         .unwrap_or(-1);
     let base = if cur < 0 { 0 } else { cur };
     let new = (base + n).max(0);
-    conn.execute("UPDATE items SET stock = ?2 WHERE id = ?1", params![id, new])
+    tx.execute("UPDATE items SET stock = ?2 WHERE id = ?1", params![id, new])
         .expect("add stock");
+    tx.commit().expect("commit stock");
     new
 }
 
@@ -3217,6 +3249,48 @@ mod concurrency_guards {
         assert_eq!(get_session(&pool, "tok", now + max_age + 1.0, max_age), None, "verlopen sessie geweigerd");
         // Opgeruimd: ook binnen de TTL bevraagd is ze nu weg.
         assert_eq!(get_session(&pool, "tok", now, max_age), None, "verlopen sessie is verwijderd");
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn insert_gem(pool: &DbPool, name: &str) -> i64 {
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO items (zone, name, price, color, category, description, position)
+             VALUES ('shelf', ?1, 100, '#fff', 'inventory', '', 0)",
+            params![name],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// #11 — add_stock bouwt voort op de huidige voorraad, behandelt -1 (onbeperkt) als 0 en vloert op 0.
+    #[test]
+    fn add_stock_accumulates_and_floors() {
+        let (pool, path) = fresh("stock");
+        let id = insert_gem(&pool, "Widget");
+        set_stock_unlimited(&pool, id); // -1
+        assert_eq!(add_stock(&pool, id, 5), 5, "onbeperkt(-1) + 5 → base 0 → 5");
+        assert_eq!(add_stock(&pool, id, 3), 8, "5 + 3 → 8");
+        assert_eq!(add_stock(&pool, id, -100), 0, "vloer op 0, nooit negatief");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #12 — shop_offers persisteert de dagselectie stabiel; getoonde set == opgeslagen set.
+    #[test]
+    fn shop_offers_is_stable_and_canonical() {
+        let (pool, path) = fresh("shop");
+        for nm in ["Ruby", "Sapphire", "Topaz"] {
+            insert_gem(&pool, nm);
+        }
+        let day = 100;
+        let ids1: Vec<i64> = shop_offers(&pool, day, 2, 0).iter().map(|it| it.id).collect();
+        assert_eq!(ids1.len(), 2, "twee gems getrokken (0 = geen booster)");
+        // Zelfde dag opnieuw = exact dezelfde set en volgorde (stabiel gebufferd).
+        let ids2: Vec<i64> = shop_offers(&pool, day, 2, 0).iter().map(|it| it.id).collect();
+        assert_eq!(ids1, ids2, "dagselectie is stabiel");
+        // Wat getoond wordt == wat opgeslagen staat (canoniek, geen lokaal-gerolde mengeling).
+        let stored = daily_ids(&pool.get().unwrap(), day);
+        assert_eq!(stored, ids1, "opgeslagen set == getoonde set");
         let _ = std::fs::remove_file(path);
     }
 }
