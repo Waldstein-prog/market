@@ -367,6 +367,16 @@ fn set_cookies(pairs: &[&str]) -> HeaderMap {
     h
 }
 
+/// `; Secure` op een HTTPS-basis-URL (prod), leeg op http (lokaal dev) zodat de cookie daar
+/// blijft werken. Verhindert dat het sessietoken ooit over platte HTTP mee-gestuurd wordt.
+fn secure_attr(base_url: &str) -> &'static str {
+    if base_url.starts_with("https") {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -791,7 +801,8 @@ async fn is_flowerborn(st: &AppState, uid: &str) -> bool {
 
 /// (uid, naam) van de ingelogde Flowerborn, of None (niet ingelogd / geen rol).
 async fn require_flowerborn(st: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
-    let (uid, name) = cookie(headers, "session").and_then(|t| db::get_session(&st.pool, &t))?;
+    let (uid, name) = cookie(headers, "session")
+        .and_then(|t| db::get_session(&st.pool, &t, now_secs(), SESSION_MAX_AGE as f64))?;
     if is_flowerborn(st, &uid).await {
         Some((uid, name))
     } else {
@@ -892,7 +903,8 @@ pub(crate) fn is_admin(uid: &str) -> bool {
 
 /// (uid, naam) uit de sessie, zonder rolcheck.
 fn session_user(st: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
-    cookie(headers, "session").and_then(|t| db::get_session(&st.pool, &t))
+    cookie(headers, "session")
+        .and_then(|t| db::get_session(&st.pool, &t, now_secs(), SESSION_MAX_AGE as f64))
 }
 
 /// (uid, naam) als de ingelogde gebruiker admin is, anders None.
@@ -912,7 +924,8 @@ async fn index(
     headers: HeaderMap,
     Query(q): Query<HomeQuery>,
 ) -> Html<String> {
-    let session = cookie(&headers, "session").and_then(|t| db::get_session(&st.pool, &t));
+    let session = cookie(&headers, "session")
+        .and_then(|t| db::get_session(&st.pool, &t, now_secs(), SESSION_MAX_AGE as f64));
 
     let (nav, body, wide) = match session {
         None => (String::new(), login_body(&st.cfg), false),
@@ -1467,10 +1480,7 @@ async fn admin_shop_reroll(
     }
     // Terug naar de pagina die de reroll aanvroeg (preview blijft op preview); de publieke
     // shop-knop stuurt geen `next` mee → default `/market` (ongewijzigd gedrag).
-    let dest = match q.next.as_deref() {
-        Some(p) if p.starts_with('/') && !p.starts_with("//") => p.to_string(),
-        _ => "/market".to_string(),
-    };
+    let dest = safe_next_or(q.next.as_deref(), "/market");
     Redirect::to(&dest).into_response()
 }
 
@@ -1754,13 +1764,19 @@ struct LoginQuery {
     next: Option<String>,
 }
 
-/// Sta enkel eigen-site-paden toe als post-login-bestemming (open-redirect-guard):
-/// moet met één `/` beginnen en niet met `//` (dat is een protocol-relatieve URL).
-fn safe_next(next: Option<&str>) -> String {
+/// Sta enkel eigen-site-paden toe als redirect-bestemming (open-redirect-guard): moet met één
+/// `/` beginnen, niet met `//` (protocol-relatieve URL) en **geen backslash** bevatten — browsers
+/// normaliseren `\`→`/`, dus `/\evil.com` zou anders als `//evil.com` naar een externe host leiden.
+fn safe_next_or(next: Option<&str>, default: &str) -> String {
     match next {
-        Some(p) if p.starts_with('/') && !p.starts_with("//") => p.to_string(),
-        _ => "/".to_string(),
+        Some(p) if p.starts_with('/') && !p.starts_with("//") && !p.contains('\\') => p.to_string(),
+        _ => default.to_string(),
     }
+}
+
+/// Post-login-bestemming; valt terug op de homepage.
+fn safe_next(next: Option<&str>) -> String {
+    safe_next_or(next, "/")
 }
 
 async fn login(
@@ -1789,8 +1805,9 @@ async fn login(
     );
     // Bewaar zowel de CSRF-state als de gewenste eindbestemming over de OAuth-roundtrip.
     let next = safe_next(q.next.as_deref());
-    let state_cookie = format!("oauth_state={state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600");
-    let next_cookie = format!("oauth_next={next}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600");
+    let sec = secure_attr(&st.cfg.base_url);
+    let state_cookie = format!("oauth_state={state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600{sec}");
+    let next_cookie = format!("oauth_next={next}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600{sec}");
     (set_cookies(&[&state_cookie, &next_cookie]), Redirect::to(&url)).into_response()
 }
 
@@ -1875,22 +1892,22 @@ async fn callback(
     let sess = rand_token();
     db::create_session(&st.pool, &sess, &uid, &name, now_secs());
     tracing::info!("Login: {name} ({uid})");
-    let c = format!(
-        "session={sess}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE}"
-    );
+    let sec = secure_attr(&st.cfg.base_url);
+    let c = format!("session={sess}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE}{sec}");
     // Terug naar de gewenste bestemming (bv. /market voor admins), met open-redirect-guard.
     // De gate laat non-admins alsnog naar /info lopen; enkel admins raken echt in /market.
     let dest = safe_next(cookie(&headers, "oauth_next").as_deref());
-    let clear_next = "oauth_next=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
-    (set_cookies(&[&c, clear_next]), Redirect::to(&dest)).into_response()
+    let clear_next = format!("oauth_next=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{sec}");
+    (set_cookies(&[&c, &clear_next]), Redirect::to(&dest)).into_response()
 }
 
 async fn logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(t) = cookie(&headers, "session") {
         db::delete_session(&st.pool, &t);
     }
-    let c = "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
-    (set_cookie(c), Redirect::to("/")).into_response()
+    let sec = secure_attr(&st.cfg.base_url);
+    let c = format!("session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{sec}");
+    (set_cookie(&c), Redirect::to("/")).into_response()
 }
 
 // --- /admin : Fase-I rol-toggle (ongewijzigd) ---------------------------
@@ -4399,5 +4416,31 @@ mod gem_swap_dryrun {
         let held: HashSet<String> = ["10"].iter().map(|s| s.to_string()).collect();
         let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "sapphire");
         assert_eq!(strip, vec!["10".to_string()], "Ruby weg; Sapphire niet gedragen → niet geraakt");
+    }
+}
+
+#[cfg(test)]
+mod redirect_and_cookie {
+    use super::*;
+
+    /// #8 — safe_next laat enkel eigen-site-paden door en weert de backslash-open-redirect.
+    #[test]
+    fn safe_next_rejects_external_and_backslash() {
+        assert_eq!(safe_next(Some("/market")), "/market", "gewoon intern pad ok");
+        assert_eq!(safe_next(Some("//evil.com")), "/", "protocol-relatief geweerd");
+        assert_eq!(safe_next(Some("/\\evil.com")), "/", "backslash-bypass geweerd");
+        assert_eq!(safe_next(Some("/a\\b")), "/", "backslash ergens in het pad geweerd");
+        assert_eq!(safe_next(Some("https://evil.com")), "/", "absolute URL geweerd");
+        assert_eq!(safe_next(None), "/", "geen next → home");
+        // Custom default (reroll gebruikt /market).
+        assert_eq!(safe_next_or(Some("/\\x"), "/market"), "/market", "bypass → default");
+        assert_eq!(safe_next_or(Some("/admin/shop/preview"), "/market"), "/admin/shop/preview");
+    }
+
+    /// #9b — Secure enkel op een https-basis-URL (prod), niet op lokaal http.
+    #[test]
+    fn secure_attr_only_on_https() {
+        assert_eq!(secure_attr("https://magicmeadow.org"), "; Secure");
+        assert_eq!(secure_attr("http://localhost:8700"), "");
     }
 }

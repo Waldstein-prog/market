@@ -13,8 +13,14 @@ pub struct Discord {
 
 impl Discord {
     pub fn new(token: String, guild: String) -> Self {
+        // Timeout zodat een stallende Discord-call niet eeuwig blokkeert (o.a. de kanaal-backfill
+        // doet veel opeenvolgende requests — één hangende request zou anders de hele taak bevriezen).
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            client: reqwest::Client::new(),
+            client,
             token,
             guild,
         }

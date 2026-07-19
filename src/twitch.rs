@@ -15,6 +15,7 @@
 //! De reward wordt door DEZE app aangemaakt/beheerd (via Helix), want enkel de app die
 //! de reward maakte mag redemptions fulfillen/annuleren (anders 403, geen refund).
 
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -101,6 +102,35 @@ fn save_tokens(path: &PathBuf, t: &Tokens) {
     }
 }
 
+/// Begrensde set van reeds verwerkte EventSub-`message_id`'s, voor de-duplicatie. Twitch levert
+/// **at-least-once**: dezelfde notificatie kan meer dan eens binnenkomen (met hetzelfde
+/// `message_id`). Zonder dedup zou een redelivery `grant_day_whitelist` een tweede keer stapelen
+/// → 48u pas i.p.v. 24u. Houdt de laatste `cap` id's bij (FIFO-eviction).
+#[derive(Default)]
+struct Seen {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl Seen {
+    /// `true` als `id` nieuw was (en nu onthouden); `false` als het al gezien was (→ dubbel).
+    fn insert_new(&mut self, id: &str, cap: usize) -> bool {
+        if id.is_empty() || self.set.contains(id) {
+            return id.is_empty(); // lege id: niet dedupen (behandel als "nieuw"), maar niet bewaren
+        }
+        self.set.insert(id.to_string());
+        self.order.push_back(id.to_string());
+        if self.order.len() > cap {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        true
+    }
+}
+
+const SEEN_CAP: usize = 512;
+
 // --- Gedeelde runtime-context ----------------------------------------------
 struct Ctx {
     http: reqwest::Client,
@@ -115,6 +145,8 @@ struct Ctx {
     pool: DbPool,
     /// Mock-modus (Twitch CLI EventSub-mock): sla alle echte Helix/token-calls over.
     mock: bool,
+    /// Reeds verwerkte EventSub-message-id's (dedup tegen at-least-once redelivery).
+    seen: Mutex<Seen>,
 }
 
 impl Ctx {
@@ -331,6 +363,7 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
             announce: cfg.twitch_announce(),
             pool,
             mock: true,
+            seen: Mutex::new(Seen::default()),
         });
     }
 
@@ -347,6 +380,7 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
         announce: cfg.twitch_announce(),
         pool,
         mock: false,
+        seen: Mutex::new(Seen::default()),
     };
     // Meteen verversen zodat we met een gegarandeerd geldig token starten.
     ctx.refresh().await?;
@@ -426,9 +460,24 @@ async fn ws_session(ctx: &Ctx, url: &str) -> Result<Option<String>, String> {
         .map_err(|e| format!("ws-connect faalde: {e}"))?;
     let (mut write, mut read) = ws.split();
     let mut subscribed = false;
+    // Read-deadline: Twitch stuurt periodiek `session_keepalive`. Komt er binnen het keepalive-
+    // venster (uit `session_welcome`, Twitch-default ~10s) niets binnen, dan is de verbinding dood
+    // (bv. half-open TCP) → reconnecten i.p.v. eeuwig blijven hangen. +5s speling voor jitter.
+    // Ruime startwaarde tot het welcome de echte timeout aanreikt.
+    let mut keepalive = Duration::from_secs(30);
 
-    while let Some(msg) = read.next().await {
-        let msg = msg.map_err(|e| format!("ws-lees fout: {e}"))?;
+    loop {
+        let msg = match tokio::time::timeout(keepalive + Duration::from_secs(5), read.next()).await {
+            Ok(Some(m)) => m.map_err(|e| format!("ws-lees fout: {e}"))?,
+            Ok(None) => return Ok(None), // stream netjes gesloten
+            Err(_) => {
+                tracing::warn!(
+                    "Twitch EventSub: geen keepalive binnen {}s — herverbinden",
+                    keepalive.as_secs() + 5
+                );
+                return Ok(None);
+            }
+        };
         let text = match msg {
             Message::Text(t) => t.to_string(),
             Message::Ping(p) => {
@@ -449,6 +498,10 @@ async fn ws_session(ctx: &Ctx, url: &str) -> Result<Option<String>, String> {
                 if session_id.is_empty() {
                     return Err("session_welcome zonder session-id".into());
                 }
+                // Echte keepalive-timeout overnemen zodat onze read-deadline klopt.
+                if let Some(k) = v["payload"]["session"]["keepalive_timeout_seconds"].as_u64() {
+                    keepalive = Duration::from_secs(k.max(1));
+                }
                 if ctx.mock {
                     tracing::info!("[mock] EventSub verbonden — session-id: {session_id}");
                 } else if !subscribed {
@@ -467,16 +520,23 @@ async fn ws_session(ctx: &Ctx, url: &str) -> Result<Option<String>, String> {
             "notification" => {
                 let sub_type = v["metadata"]["subscription_type"].as_str().unwrap_or("");
                 if sub_type == "channel.channel_points_custom_reward_redemption.add" {
-                    on_redeem(ctx, &v["payload"]["event"]).await;
+                    // Dedup op message_id: Twitch levert at-least-once, een redelivery mag geen
+                    // tweede whitelist-grant (= 48u i.p.v. 24u) geven.
+                    let mid = v["metadata"]["message_id"].as_str().unwrap_or("");
+                    let fresh = ctx.seen.lock().unwrap().insert_new(mid, SEEN_CAP);
+                    if fresh {
+                        on_redeem(ctx, &v["payload"]["event"]).await;
+                    } else {
+                        tracing::info!("Twitch EventSub: dubbele notificatie genegeerd (message_id={mid})");
+                    }
                 }
             }
             "revocation" => {
                 tracing::warn!("Twitch EventSub: abonnement ingetrokken: {}", text);
             }
-            _ => {} // session_keepalive e.d. negeren
+            _ => {} // session_keepalive e.d. resetten enkel de read-deadline
         }
     }
-    Ok(None)
 }
 
 async fn subscribe_redemptions(ctx: &Ctx, session_id: &str) -> Result<(), String> {
@@ -546,5 +606,35 @@ pub async fn run(pool: DbPool, cfg: Config) {
                 backoff = (backoff * 2).min(60);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dedup {
+    use super::{Seen, SEEN_CAP};
+
+    /// #5 — een reeds geziene message_id is een dubbel; een lege id wordt niet gededupt.
+    #[test]
+    fn seen_deduplicates_message_ids() {
+        let mut s = Seen::default();
+        assert!(s.insert_new("m1", SEEN_CAP), "eerste keer m1 = nieuw");
+        assert!(!s.insert_new("m1", SEEN_CAP), "tweede keer m1 = dubbel");
+        assert!(s.insert_new("m2", SEEN_CAP), "andere id = nieuw");
+        // Lege id: nooit dedupen (altijd verwerken), en niet bewaren.
+        assert!(s.insert_new("", SEEN_CAP), "lege id = altijd verwerken");
+        assert!(s.insert_new("", SEEN_CAP), "lege id blijft verwerken");
+    }
+
+    /// De set is begrensd (FIFO-eviction): de oudste id valt eruit voorbij de cap.
+    #[test]
+    fn seen_evicts_oldest_beyond_cap() {
+        let mut s = Seen::default();
+        let cap = 3;
+        for id in ["a", "b", "c"] {
+            assert!(s.insert_new(id, cap));
+        }
+        assert!(s.insert_new("d", cap), "d nieuw → a wordt geëvict");
+        assert!(s.insert_new("a", cap), "a was geëvict → weer als nieuw gezien");
+        assert!(!s.insert_new("d", cap), "d nog vers → dubbel");
     }
 }

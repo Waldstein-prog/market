@@ -517,7 +517,7 @@ fn claim_button_row(custom_id: String) -> serenity::CreateActionRow {
 /// Level-up-check: post een embed + claim-knop voor élk nieuw level boven de marker.
 /// Zelfhelend — een level-up die via daily/chest/admin/gift liep, wordt hier alsnog opgepikt
 /// zodra het lid weer coins verdient. Cadeau = 1,5% van het huidige saldo, half naar boven.
-/// De claim boekt de coins als échte verdienste (`credit_earned` → `total_earned` + `earn_log`):
+/// De claim boekt de coins als échte verdienste (`total_earned` + `earn_log`):
 /// álle coins tellen mee voor de level-up, ongeacht bron. Geen op-hol-slaan: 1,5% < een levelgat.
 async fn maybe_levelup(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, name: &str) {
     let (coins, _max, _pub, earned) = db::get_stats(pool, uid);

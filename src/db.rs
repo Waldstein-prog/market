@@ -641,16 +641,28 @@ pub fn create_session(pool: &DbPool, token: &str, user_id: &str, username: &str,
     .expect("insert session");
 }
 
-/// (user_id, username) horend bij een sessie-token, indien geldig.
-pub fn get_session(pool: &DbPool, token: &str) -> Option<(String, String)> {
+/// (user_id, username) horend bij een sessie-token, mits ze niet verlopen is: `created` moet
+/// binnen `max_age` seconden van `now` liggen. Een verlopen sessie wordt meteen opgeruimd
+/// (server-side TTL — een gelekt token blijft zo niet eeuwig bruikbaar, i.t.t. een cookie-Max-Age
+/// die enkel de client stuurt).
+pub fn get_session(pool: &DbPool, token: &str, now: f64, max_age: f64) -> Option<(String, String)> {
     let conn = pool.get().expect("db");
-    conn.query_row(
-        "SELECT user_id, username FROM sessions WHERE token = ?1",
-        params![token],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    )
-    .optional()
-    .expect("query session")
+    let row: Option<(String, String, f64)> = conn
+        .query_row(
+            "SELECT user_id, username, created FROM sessions WHERE token = ?1",
+            params![token],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?)),
+        )
+        .optional()
+        .expect("query session");
+    match row {
+        Some((uid, name, created)) if created >= now - max_age => Some((uid, name)),
+        Some(_) => {
+            let _ = conn.execute("DELETE FROM sessions WHERE token = ?1", params![token]);
+            None
+        }
+        None => None,
+    }
 }
 
 pub fn delete_session(pool: &DbPool, token: &str) {
@@ -737,33 +749,6 @@ pub fn award_if_ready(
         )
         .expect("query totaal");
     Some(total)
-}
-
-/// Voeg coins toe die **als verdienste** meetellen: `coins` + `total_earned` + `earn_log`,
-/// maar **zonder** `last_award` aan te raken (dat is enkel de chat-cooldown — een cadeau
-/// mag die niet resetten). Zo tellen deze coins mee voor de level-up (all-time saldo) én
-/// verschijnen ze in het uurlijkse "Earners"-overzicht. Gebruikt voor level-up-cadeaus.
-/// Returnt het nieuwe saldo.
-pub fn credit_earned(pool: &DbPool, user_id: &str, username: &str, amount: i64, ts: f64) -> i64 {
-    let conn = pool.get().expect("db");
-    conn.execute(
-        "INSERT INTO coins (user_id, username, coins, max_balance, total_earned)
-         VALUES (?1, ?2, ?3, ?3, ?3)
-         ON CONFLICT(user_id) DO UPDATE SET
-             coins        = coins + excluded.coins,
-             username     = excluded.username,
-             max_balance  = MAX(max_balance, coins + excluded.coins),
-             total_earned = total_earned + excluded.coins",
-        params![user_id, username, amount],
-    )
-    .expect("credit earned");
-    log_earn_event(&conn, user_id, amount, ts);
-    conn.query_row(
-        "SELECT coins FROM coins WHERE user_id = ?1",
-        params![user_id],
-        |r| r.get(0),
-    )
-    .expect("query totaal")
 }
 
 /// Log één verdienste in earn_log (voor het "≥100 coins dit uur"-overzicht).
@@ -1352,41 +1337,62 @@ pub enum GiftClaim {
 
 /// Claim een cadeau: atomisch (claimed 0→1) zodat dubbelklikken nooit dubbel uitbetaalt.
 /// Enkel de eigenaar (`uid`) kan claimen. Bij succes komen de coins meteen op het saldo
-/// **als verdienste** (via `credit_earned` → verhoogt `total_earned` en logt in `earn_log`):
+/// **als verdienste** (verhoogt `total_earned` en logt in `earn_log`, in dezelfde transactie):
 /// álle coins tellen mee voor de level-up, ongeacht de bron, en de gift verschijnt in het
 /// uurlijkse overzicht. Geen op-hol-slaan: een gift is 1,5 % van het saldo, terwijl een
 /// levelgat altijd ~30-40 % is → een cadeau kan nooit zélf een volgend level ontgrendelen.
 /// (De caller draait na de claim alsnog `maybe_levelup` voor het randgeval + directe consistentie.)
 pub fn claim_level_gift(pool: &DbPool, gift_id: i64, uid: &str, username: &str, ts: f64) -> GiftClaim {
-    let amount = {
-        let conn = pool.get().expect("db");
-        let row: Option<(String, i64, i64)> = conn
-            .query_row(
-                "SELECT uid, amount, claimed FROM level_gifts WHERE id = ?1",
-                params![gift_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()
-            .expect("q level_gift");
-        match row {
-            None => return GiftClaim::NotFound,
-            Some((owner, _, _)) if owner != uid => return GiftClaim::NotYours,
-            Some((_, _, claimed)) if claimed != 0 => return GiftClaim::AlreadyClaimed,
-            Some((_, amount, _)) => {
-                let n = conn
-                    .execute(
-                        "UPDATE level_gifts SET claimed = 1 WHERE id = ?1 AND claimed = 0",
-                        params![gift_id],
-                    )
-                    .expect("claim update");
-                if n == 0 {
-                    return GiftClaim::AlreadyClaimed;
-                }
-                amount
+    let mut conn = pool.get().expect("db");
+    // IMMEDIATE-tx: de claim-vlag én de uitbetaling zitten in ÉÉN transactie. Zonder dit liep de
+    // uitbetaling op een aparte connectie ná de commit van `claimed=1` → een crash daartussen liet
+    // het cadeau als geclaimd achter zónder gestorte coins (stille data-loss). Nu: alles of niets.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("tx claim");
+    let row: Option<(String, i64, i64)> = tx
+        .query_row(
+            "SELECT uid, amount, claimed FROM level_gifts WHERE id = ?1",
+            params![gift_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .expect("q level_gift");
+    let amount = match row {
+        None => return GiftClaim::NotFound, // tx rolt terug bij drop (geen writes gedaan)
+        Some((owner, _, _)) if owner != uid => return GiftClaim::NotYours,
+        Some((_, _, claimed)) if claimed != 0 => return GiftClaim::AlreadyClaimed,
+        Some((_, amount, _)) => {
+            let n = tx
+                .execute(
+                    "UPDATE level_gifts SET claimed = 1 WHERE id = ?1 AND claimed = 0",
+                    params![gift_id],
+                )
+                .expect("claim update");
+            if n == 0 {
+                return GiftClaim::AlreadyClaimed;
             }
+            amount
         }
     };
-    credit_earned(pool, uid, username, amount, ts);
+    // Boek als échte verdienste (coins + total_earned + earn_log), zonder `last_award` aan te
+    // raken (dat is enkel de chat-cooldown — een cadeau mag die niet resetten).
+    tx.execute(
+        "INSERT INTO coins (user_id, username, coins, max_balance, total_earned)
+         VALUES (?1, ?2, ?3, ?3, ?3)
+         ON CONFLICT(user_id) DO UPDATE SET
+             coins        = coins + excluded.coins,
+             username     = excluded.username,
+             max_balance  = MAX(max_balance, coins + excluded.coins),
+             total_earned = total_earned + excluded.coins",
+        params![uid, username, amount],
+    )
+    .expect("credit earned");
+    let _ = tx.execute(
+        "INSERT INTO earn_log (user_id, amount, ts) VALUES (?1, ?2, ?3)",
+        params![uid, amount, ts],
+    );
+    tx.commit().expect("commit claim");
     GiftClaim::Granted(amount)
 }
 
@@ -3167,6 +3173,50 @@ mod concurrency_guards {
         admin_adjust(&pool, uid, "T", 5, false, false, true);
         let (c, _m, _p, e) = get_stats(&pool, uid);
         assert_eq!((c, e), (10, 105), "add op alltime raakt coins niet");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #10 — claim_level_gift betaalt éénmalig uit (claim + credit in één tx), en enkel aan de eigenaar.
+    #[test]
+    fn claim_level_gift_pays_once_to_owner() {
+        let (pool, path) = fresh("gift");
+        let uid = "20";
+        award(&pool, uid, "T", 100, 0.0); // coins 100, total_earned 100
+        let gid = create_level_gift(&pool, uid, 40, 5, "levelup", 0.0);
+
+        // Verkeerde gebruiker → NotYours, niets uitbetaald.
+        assert!(matches!(claim_level_gift(&pool, gid, "999", "X", 1.0), GiftClaim::NotYours));
+        // Eigenaar claimt → Granted(40), coins+40 en total_earned+40 (verdienste).
+        assert!(matches!(claim_level_gift(&pool, gid, uid, "T", 1.0), GiftClaim::Granted(40)));
+        let (c, _m, _p, e) = get_stats(&pool, uid);
+        assert_eq!((c, e), (140, 140), "cadeau geboekt als verdienste");
+        // Tweede claim → AlreadyClaimed, geen dubbele uitbetaling.
+        assert!(matches!(claim_level_gift(&pool, gid, uid, "T", 1.0), GiftClaim::AlreadyClaimed));
+        let (c, _m, _p, e) = get_stats(&pool, uid);
+        assert_eq!((c, e), (140, 140), "geen dubbele uitbetaling");
+        // Onbestaand id → NotFound.
+        assert!(matches!(claim_level_gift(&pool, 9999, uid, "T", 1.0), GiftClaim::NotFound));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #9a — get_session weigert (en ruimt) een sessie ouder dan max_age.
+    #[test]
+    fn get_session_expires_after_ttl() {
+        let (pool, path) = fresh("session");
+        let now = 1_000_000.0;
+        let max_age = 100.0;
+        create_session(&pool, "tok", "u1", "Name", now);
+
+        // Binnen de TTL → geldig.
+        assert_eq!(
+            get_session(&pool, "tok", now + 50.0, max_age),
+            Some(("u1".to_string(), "Name".to_string())),
+            "verse sessie is geldig"
+        );
+        // Voorbij de TTL → geweigerd + opgeruimd.
+        assert_eq!(get_session(&pool, "tok", now + max_age + 1.0, max_age), None, "verlopen sessie geweigerd");
+        // Opgeruimd: ook binnen de TTL bevraagd is ze nu weg.
+        assert_eq!(get_session(&pool, "tok", now, max_age), None, "verlopen sessie is verwijderd");
         let _ = std::fs::remove_file(path);
     }
 }
