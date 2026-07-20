@@ -14,6 +14,46 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
 
+## ⏭️ Sessie (2026-07-20) — Twitch permanente-pas-redeem gebouwd + verjaardag-rol-ID vastgelegd
+
+**Gecommit + gepusht, NIET gedeployd** (commit `8be4ef9`; subtree `market-gh` → `512264d`). Bewust
+géén prod-deploy: de code is inert zonder `[twitch]`-config (net geverifieerd: prod `secrets.json`
+heeft géén twitch-blok → `twitch_ready()`=false). Live-test met een echte streamer volgt later.
+
+### Twitch: permanente-pas-redeem naast de dagpas
+Er bestond al één channel-points-reward (dagpas, 24u → `grant_day_whitelist`). Nu erbij: een **2e
+reward** voor een **permanente** pas (`db::grant_perma_whitelist`, `expires = NULL`, geen afteller).
+`grant_perma_whitelist` bestond al in db.rs — de rest van de machinerie is nieuw:
+- **`config.rs`**: `twitch_perma_reward_title` + `twitch_perma_reward_cost` (secrets.json/env
+  `TWITCH_PERMA_REWARD_TITLE`), helpers `twitch_perma_enabled()` (= titel ingevuld) +
+  `twitch_perma_reward_cost()` (dev 0 / prod **5000 = placeholder**). **Leeg titel ⇒ perma-redeem
+  UIT** — bewust géén verzonnen speler-zichtbare tekst (huisregel [[geen-eigen-publieke-teksten]]).
+- **`twitch.rs`**: `ensure_reward()`-helper (dag+perma zoeken/aanmaken/kost-syncen, ontdubbeld uit
+  bootstrap), EventSub abonneert op **beide** reward-ids, `pass_kind_for(event.reward.id)` routet
+  dag→24u vs perma→NULL (onbekend/leeg → veilige val Day), perma-tak met eigen log
+  (`whitelist-perma`) + chat. `Ctx` kreeg `perma_reward_id`.
+- **Tests**: unit-test `pass_kind_routing` (24/24 groen) + **mock-e2e `docs/perma_e2e.sh`** — start
+  de Twitch-CLI EventSub-mock + market in mock/web-only en injecteert een dag- én perma-redeem;
+  **bewezen** dag→`expires=now+24u`, perma→`expires=NULL`. Doc `docs/twitch-setup.md` bijgewerkt.
+
+**⚠️ Openstaande user-beslissingen vóór de live-test** (alle speler-zichtbaar → user levert):
+1. **Exacte reward-titel(s)** in het channel-points-menu (perma-titel is nu leeg = feature uit).
+2. **Kost** permanente pas in channel points (code-default 5000 is placeholder).
+3. **Chat-bevestigingsteksten** — nu **NL**, gespiegeld op de dagpas ("✅ permanente toegang voor
+   Hytale-naam '…'"). Rest van market is Engels → evt. deze twee ook naar Engels.
+
+Daarna is de live-test enkel nog: `[twitch]`-creds + `twitch_tokens.json` van de streamer +
+`twitch_perma_reward_title`/`_cost` in prod `secrets.json` → `systemctl restart market`. De
+whitelist-keten (grant → tale-bot `reconcile_market` → `whitelist.json`) staat al klaar. Overweeg
+de ooit-gelekte Client Secret te roteren. Volledige status: memory [[tale-twitch-tickets]].
+
+### Verjaardagen: birthday-rol-ID vastgelegd
+De verjaardag wordt op prod (Magic Meadow, guild `1296469405651435592`) getriggerd door de
+**MEE6-rol `🎂Birthday!🎂` = ID `1422232059815919697`** (opgezocht via de bot-token op de VPS).
+Detectie-plan = `GuildMemberUpdate`-handler die kijkt of die rol-id net is **toegevoegd**. Vastgelegd
+in memory [[market-birthday-role]]. Nog te beslissen: cadeaubedrag (handover noemt 500 coins) +
+birthday-chest-ontwerp. **Nog niets gebouwd.**
+
 ## ⏭️ Sessie (2026-07-19/20) — diepe code-review + volledige fix-inhaalslag (5 ronden)
 
 **Alles LIVE op prod + gecommit + gepusht.** Op vraag een **diepe code review** gedaan van de
