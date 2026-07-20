@@ -44,6 +44,14 @@ pub struct Config {
     /// Kost in channel points. Leeg ⇒ env-default (dev 0 / prod 1500).
     #[serde(default)]
     pub twitch_reward_cost: Option<u32>,
+    /// Titel van de PERMANENTE-pas channel-points-reward. **Leeg ⇒ perma-redeem UIT**
+    /// (enkel de dagpas-reward draait). De user levert de exacte, zichtbare titel — we
+    /// verzinnen hier bewust géén default speler-zichtbare tekst.
+    #[serde(default)]
+    pub twitch_perma_reward_title: String,
+    /// Kost van de permanente-pas-reward in channel points. Leeg ⇒ env-default (dev 0 / prod 5000).
+    #[serde(default)]
+    pub twitch_perma_reward_cost: Option<u32>,
     /// Duur van één pas in uren (default 24).
     #[serde(default)]
     pub twitch_pass_hours: Option<u32>,
@@ -80,6 +88,7 @@ pub fn load() -> Config {
     env_override(&mut cfg.twitch_app_id, "TWITCH_APP_ID");
     env_override(&mut cfg.twitch_app_secret, "TWITCH_APP_SECRET");
     env_override(&mut cfg.twitch_reward_title, "TWITCH_REWARD_TITLE");
+    env_override(&mut cfg.twitch_perma_reward_title, "TWITCH_PERMA_REWARD_TITLE");
     if let Ok(v) = std::env::var("TWITCH_ENABLED") {
         cfg.twitch_enabled = v != "0" && !v.is_empty() && v.to_lowercase() != "false";
     }
@@ -134,6 +143,25 @@ impl Config {
             0
         } else {
             1500
+        }
+    }
+
+    /// Perma-redeem actief? Enkel als de user een reward-titel heeft ingevuld — zonder
+    /// titel géén tweede reward (en dus geen verzonnen speler-zichtbare tekst).
+    pub fn twitch_perma_enabled(&self) -> bool {
+        !self.twitch_perma_reward_title.trim().is_empty()
+    }
+
+    /// Kost van de permanente-pas-reward. Expliciete config wint; anders env-default
+    /// (dev → 0, prod → 5000 als voorlopige placeholder — het echte getal beslist de user).
+    pub fn twitch_perma_reward_cost(&self) -> u32 {
+        if let Some(c) = self.twitch_perma_reward_cost {
+            return c;
+        }
+        if self.environment.eq_ignore_ascii_case("dev") {
+            0
+        } else {
+            5000
         }
     }
 }

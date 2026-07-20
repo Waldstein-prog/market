@@ -12,7 +12,11 @@
 //!   * volgende keer → getypte tekst negeren, gewoon 24u erbij (stapelt, reset niet).
 //!   * lege/ongeldige naam → redemption CANCELED ⇒ punten terug + uitleg in de chat.
 //!
-//! De reward wordt door DEZE app aangemaakt/beheerd (via Helix), want enkel de app die
+//! Naast de **dagpas**-reward is er een optionele **permanente-pas**-reward: dezelfde
+//! naam-vastzet-flow, maar de grant is permanent (`expires = NULL`). Hij draait enkel als
+//! de user een reward-titel invult (`twitch_perma_reward_title`) — anders bestaat hij niet.
+//!
+//! De reward(s) worden door DEZE app aangemaakt/beheerd (via Helix), want enkel de app die
 //! de reward maakte mag redemptions fulfillen/annuleren (anders 403, geen refund).
 
 use std::collections::{HashSet, VecDeque};
@@ -145,6 +149,8 @@ struct Ctx {
     tok: Mutex<Tokens>,
     broadcaster_id: String,
     reward_id: String,
+    /// Reward-id van de permanente-pas-reward; leeg ⇒ perma-redeem uit.
+    perma_reward_id: String,
     pass_hours: u32,
     announce: bool,
     pool: DbPool,
@@ -276,10 +282,33 @@ impl Ctx {
 }
 
 // --- De kern: reageren op een redeem ---------------------------------------
+/// Welke pas hoort bij het reward-id van deze redemption? Pure functie zodat de
+/// branch-keuze los te testen is. Onbekend/leeg → Day (veilige val: een tijdelijke pas
+/// die vanzelf verloopt, nooit per ongeluk permanent).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum PassKind {
+    Day,
+    Perma,
+}
+
+fn pass_kind_for(reward_id: &str, day_id: &str, perma_id: &str) -> PassKind {
+    if !perma_id.is_empty() && reward_id == perma_id {
+        PassKind::Perma
+    } else {
+        let _ = day_id; // day is de default; day_id enkel voor de leesbaarheid/symmetrie
+        PassKind::Day
+    }
+}
+
 async fn on_redeem(ctx: &Ctx, event: &Value) {
     let tid = event.get("user_id").and_then(|x| x.as_str()).unwrap_or("");
     let login = event.get("user_login").and_then(|x| x.as_str()).unwrap_or("");
     let redemption_id = event.get("id").and_then(|x| x.as_str()).unwrap_or("");
+    let reward_id = event
+        .get("reward")
+        .and_then(|r| r.get("id"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
     let user_input = event
         .get("user_input")
         .and_then(|x| x.as_str())
@@ -288,6 +317,7 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
         tracing::warn!("Twitch-redeem zonder user_id/id — genegeerd");
         return;
     }
+    let kind = pass_kind_for(reward_id, &ctx.reward_id, &ctx.perma_reward_id);
     let uid = format!("twitch:{tid}");
 
     // Naam vastzetten: bestaat er al een naam voor deze Twitch-id, dan die gebruiken
@@ -318,30 +348,56 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
     };
 
     let now = now_epoch();
-    let add_secs = ctx.pass_hours as f64 * 3600.0;
-    let expires = db::grant_day_whitelist(&ctx.pool, &uid, &name, add_secs, now);
-    ctx.set_redemption_status(redemption_id, true).await;
-
-    // Logboek: Twitch-pas toegekend (whitelist-grant) — bindt kijker aan Hytale-naam.
-    db::log_event(
-        &ctx.pool,
-        now,
-        &db::LogEntry::new("twitch", "whitelist")
-            .actor(&uid, &name)
-            .detail(format!("{login} → {name} · {}h", ctx.pass_hours)),
-    );
-
     let reg = if first_time { " (naam nu vastgezet)" } else { "" };
-    ctx.chat(&format!(
-        "@{login} ✅ {}u toegang voor Hytale-naam '{name}'{reg}. Actief tot ~{}. Veel plezier!",
-        ctx.pass_hours,
-        fmt_hm(expires)
-    ))
-    .await;
-    tracing::info!(
-        "Twitch-pas: {name} ({login}){reg} — {}u, grant in hytale_whitelist als {uid}",
-        ctx.pass_hours
-    );
+
+    match kind {
+        PassKind::Perma => {
+            db::grant_perma_whitelist(&ctx.pool, &uid, &name);
+            ctx.set_redemption_status(redemption_id, true).await;
+
+            // Logboek: permanente Twitch-pas toegekend — bindt kijker aan Hytale-naam.
+            db::log_event(
+                &ctx.pool,
+                now,
+                &db::LogEntry::new("twitch", "whitelist-perma")
+                    .actor(&uid, &name)
+                    .detail(format!("{login} → {name} · permanent")),
+            );
+
+            ctx.chat(&format!(
+                "@{login} ✅ permanente toegang voor Hytale-naam '{name}'{reg}. Veel plezier!"
+            ))
+            .await;
+            tracing::info!(
+                "Twitch-pas (PERMANENT): {name} ({login}){reg} — grant in hytale_whitelist als {uid}"
+            );
+        }
+        PassKind::Day => {
+            let add_secs = ctx.pass_hours as f64 * 3600.0;
+            let expires = db::grant_day_whitelist(&ctx.pool, &uid, &name, add_secs, now);
+            ctx.set_redemption_status(redemption_id, true).await;
+
+            // Logboek: Twitch-dagpas toegekend (whitelist-grant) — bindt kijker aan Hytale-naam.
+            db::log_event(
+                &ctx.pool,
+                now,
+                &db::LogEntry::new("twitch", "whitelist")
+                    .actor(&uid, &name)
+                    .detail(format!("{login} → {name} · {}h", ctx.pass_hours)),
+            );
+
+            ctx.chat(&format!(
+                "@{login} ✅ {}u toegang voor Hytale-naam '{name}'{reg}. Actief tot ~{}. Veel plezier!",
+                ctx.pass_hours,
+                fmt_hm(expires)
+            ))
+            .await;
+            tracing::info!(
+                "Twitch-pas: {name} ({login}){reg} — {}u, grant in hytale_whitelist als {uid}",
+                ctx.pass_hours
+            );
+        }
+    }
 }
 
 // --- Opstarten: token, broadcaster, reward ----------------------------------
@@ -364,6 +420,13 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
             tok: Mutex::new(Tokens { access: String::new(), refresh: String::new() }),
             broadcaster_id: "mock_broadcaster".into(),
             reward_id: "mock_reward".into(),
+            // In mock-modus stuurt de CLI de reward-id niet betrouwbaar mee → on_redeem valt
+            // terug op Day. Een perma-mocktest zet de reward-id expliciet gelijk aan deze.
+            perma_reward_id: if cfg.twitch_perma_enabled() {
+                "mock_perma_reward".into()
+            } else {
+                String::new()
+            },
             pass_hours: cfg.twitch_pass_hours(),
             announce: cfg.twitch_announce(),
             pool,
@@ -381,6 +444,7 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
         tok: Mutex::new(tokens),
         broadcaster_id: String::new(),
         reward_id: String::new(),
+        perma_reward_id: String::new(),
         pass_hours: cfg.twitch_pass_hours(),
         announce: cfg.twitch_announce(),
         pool,
@@ -400,32 +464,65 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
         return Err("kon broadcaster-id niet ophalen (get_users leeg)".into());
     }
 
-    // Reward zoeken tussen de door-deze-app-beheerbare rewards; anders aanmaken.
+    // Dagpas-reward: zoeken/aanmaken/kost-syncen.
     let reward_title = cfg.twitch_reward_title.clone();
-    let reward_cost = cfg.twitch_reward_cost();
+    let reward_id = ensure_reward(&ctx, &broadcaster_id, &reward_title, cfg.twitch_reward_cost()).await?;
+
+    // Permanente-pas-reward: enkel als de user een titel invulde (anders bewust geen
+    // tweede reward + geen verzonnen speler-zichtbare tekst).
+    let perma_reward_id = if cfg.twitch_perma_enabled() {
+        let title = cfg.twitch_perma_reward_title.clone();
+        ensure_reward(&ctx, &broadcaster_id, &title, cfg.twitch_perma_reward_cost()).await?
+    } else {
+        String::new()
+    };
+
+    tracing::info!(
+        "Twitch-luik actief — kanaal={broadcaster_login}, dagpas-reward='{reward_title}', pas={}u, \
+         perma-reward={}, chat={}",
+        ctx.pass_hours,
+        if perma_reward_id.is_empty() {
+            "uit".to_string()
+        } else {
+            format!("'{}'", cfg.twitch_perma_reward_title)
+        },
+        if ctx.announce { "aan" } else { "uit" }
+    );
+
+    Ok(Ctx { broadcaster_id, reward_id, perma_reward_id, ..ctx })
+}
+
+/// Vind de door-deze-app-beheerbare reward met deze titel, of maak ze aan. Synchroniseert
+/// de kost met de config (onze app beheert 'm → grijs in de Twitch-UI). Retourneert het
+/// reward-id.
+async fn ensure_reward(
+    ctx: &Ctx,
+    broadcaster_id: &str,
+    title: &str,
+    cost: u32,
+) -> Result<String, String> {
     let list_url = format!(
         "{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={broadcaster_id}&only_manageable_rewards=true"
     );
     let rewards = ctx.helix(reqwest::Method::GET, &list_url, None).await?;
     let existing = rewards["data"]
         .as_array()
-        .and_then(|arr| arr.iter().find(|r| r["title"].as_str() == Some(&reward_title)));
+        .and_then(|arr| arr.iter().find(|r| r["title"].as_str() == Some(title)));
 
-    let reward_id = if let Some(r) = existing {
+    let id = if let Some(r) = existing {
         let id = r["id"].as_str().unwrap_or("").to_string();
         let cur_cost = r["cost"].as_u64().unwrap_or(0) as u32;
-        tracing::info!("Twitch-reward gevonden: '{reward_title}' ({cur_cost} punten, id={id})");
-        // Onze app beheert de kost (grijs in de UI) → synchroniseren met de config/omgeving.
-        if cur_cost != reward_cost {
+        tracing::info!("Twitch-reward gevonden: '{title}' ({cur_cost} punten, id={id})");
+        if cur_cost != cost {
             let upd = format!(
                 "{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={broadcaster_id}&id={id}"
             );
             match ctx
-                .helix(reqwest::Method::PATCH, &upd, Some(&json!({ "cost": reward_cost })))
+                .helix(reqwest::Method::PATCH, &upd, Some(&json!({ "cost": cost })))
                 .await
             {
-                Ok(_) => tracing::info!("Twitch-reward kost bijgewerkt: {cur_cost} → {reward_cost}"),
-                Err(e) => tracing::warn!("kon reward-kost niet bijwerken: {e}"),
+                Ok(_) => tracing::info!("Twitch-reward '{title}' kost bijgewerkt: {cur_cost} → {cost}"),
+                Err(e) => tracing::warn!("kon reward-kost '{title}' niet bijwerken: {e}"),
             }
         }
         id
@@ -433,27 +530,20 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
         let create_url =
             format!("{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={broadcaster_id}");
         let body = json!({
-            "title": reward_title,
-            "cost": reward_cost,
+            "title": title,
+            "cost": cost,
             "prompt": "Typ je exacte Hytale-naam (enkel de 1e keer belangrijk; wordt daarna vastgezet).",
             "is_user_input_required": true,
         });
         let created = ctx.helix(reqwest::Method::POST, &create_url, Some(&body)).await?;
         let id = created["data"][0]["id"].as_str().unwrap_or("").to_string();
-        tracing::info!("Twitch-reward aangemaakt: '{reward_title}' ({reward_cost} punten, id={id})");
+        tracing::info!("Twitch-reward aangemaakt: '{title}' ({cost} punten, id={id})");
         id
     };
-    if reward_id.is_empty() {
-        return Err("geen reward-id (aanmaken/zoeken faalde)".into());
+    if id.is_empty() {
+        return Err(format!("geen reward-id voor '{title}' (aanmaken/zoeken faalde)"));
     }
-
-    tracing::info!(
-        "Twitch-luik actief — kanaal={broadcaster_login}, reward='{reward_title}', pas={}u, chat={}",
-        ctx.pass_hours,
-        if ctx.announce { "aan" } else { "uit" }
-    );
-
-    Ok(Ctx { broadcaster_id, reward_id, ..ctx })
+    Ok(id)
 }
 
 // --- EventSub-WebSocket-loop ------------------------------------------------
@@ -546,17 +636,24 @@ async fn ws_session(ctx: &Ctx, url: &str) -> Result<Option<String>, String> {
 
 async fn subscribe_redemptions(ctx: &Ctx, session_id: &str) -> Result<(), String> {
     let url = format!("{HELIX}/helix/eventsub/subscriptions");
-    let body = json!({
-        "type": "channel.channel_points_custom_reward_redemption.add",
-        "version": "1",
-        "condition": {
-            "broadcaster_user_id": ctx.broadcaster_id,
-            "reward_id": ctx.reward_id,
-        },
-        "transport": { "method": "websocket", "session_id": session_id },
-    });
-    ctx.helix(reqwest::Method::POST, &url, Some(&body)).await?;
-    tracing::info!("Twitch EventSub: geabonneerd op reward-redemptions");
+    // Eén abonnement per (niet-lege) reward — zo krijgen we enkel ónze redemptions binnen,
+    // en on_redeem weet aan de reward-id welke pas (dag/permanent) het is.
+    for reward_id in [ctx.reward_id.as_str(), ctx.perma_reward_id.as_str()] {
+        if reward_id.is_empty() {
+            continue;
+        }
+        let body = json!({
+            "type": "channel.channel_points_custom_reward_redemption.add",
+            "version": "1",
+            "condition": {
+                "broadcaster_user_id": ctx.broadcaster_id,
+                "reward_id": reward_id,
+            },
+            "transport": { "method": "websocket", "session_id": session_id },
+        });
+        ctx.helix(reqwest::Method::POST, &url, Some(&body)).await?;
+        tracing::info!("Twitch EventSub: geabonneerd op reward-redemptions (reward_id={reward_id})");
+    }
     Ok(())
 }
 
@@ -624,7 +721,20 @@ pub async fn run(pool: DbPool, cfg: Config) {
 
 #[cfg(test)]
 mod dedup {
-    use super::{is_loopback_ws, Seen, SEEN_CAP};
+    use super::{is_loopback_ws, pass_kind_for, PassKind, Seen, SEEN_CAP};
+
+    /// De reward-id bepaalt dag vs. permanent; onbekend/leeg → veilige val Day.
+    #[test]
+    fn pass_kind_routing() {
+        // Perma enkel bij een exacte, niet-lege match op de perma-reward-id.
+        assert_eq!(pass_kind_for("perma", "day", "perma"), PassKind::Perma);
+        assert_eq!(pass_kind_for("day", "day", "perma"), PassKind::Day);
+        // Onbekende reward → Day (verloopt vanzelf; nooit per ongeluk permanent).
+        assert_eq!(pass_kind_for("xyz", "day", "perma"), PassKind::Day);
+        // Perma uitgeschakeld (lege perma-id): nooit Perma, ook niet bij een lege reward-id.
+        assert_eq!(pass_kind_for("", "day", ""), PassKind::Day);
+        assert_eq!(pass_kind_for("day", "day", ""), PassKind::Day);
+    }
 
     /// Mock-detectie: enkel een loopback-URL telt als de lokale Twitch-mock (footgun-fix).
     #[test]

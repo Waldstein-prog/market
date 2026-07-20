@@ -35,6 +35,20 @@ Voeg deze top-level velden toe aan `market/secrets.json`:
 ```
 (De bestaande Discord-velden laat je staan.) `environment: "dev"` → reward-kost 0.
 
+### Optioneel: permanente-pas-reward (naast de dagpas)
+De bot maakt standaard één **dagpas**-reward (`twitch_reward_title`, default "Hytale-ticket
+(24u)"). Wil je óók een **permanente-pas**-redeem, voeg dan een titel toe — **zonder titel
+bestaat die tweede reward niet** (we verzinnen bewust geen speler-zichtbare tekst):
+```json
+{
+  "twitch_perma_reward_title": "JOUW EXACTE TITEL",   // bv. "Hytale-pas (permanent)"
+  "twitch_perma_reward_cost": 5000                     // channel points; leeg ⇒ dev 0 / prod 5000
+}
+```
+Een perma-redeem geeft dezelfde naam-vastzet-flow, maar de whitelist-grant is **permanent**
+(`expires = NULL`, geen afteller). Redeem-je later een dagpas terwijl je al permanent bent,
+dan blijft permanent staan (geen downgrade).
+
 ## 3. OAuth-token aanmaken (eenmalig, browser + één curl)
 Ingelogd op **jouw** Twitch-account. Doe dit zelf in een terminal zodat je secret
 nergens gedeeld wordt.
@@ -89,7 +103,17 @@ De reward **"Hytale-ticket (24u)"** verschijnt nu in je kanaalpunten-menu (kost 
 5. Redeem met een lege/rare naam → redemption **Canceled** in Twitch (punten terug) + uitleg
    in de chat.
 
+### Permanente-pas testen (indien `twitch_perma_reward_title` gezet)
+Naast de dagpas verschijnt de tweede reward. Redeem ze (met je vastgezette naam):
+- Verwacht: chatbevestiging `✅ permanente toegang voor Hytale-naam '<naam>'`.
+- In de DB staat `expires = NULL` voor `twitch:<id>` (permanent, geen afteller).
+
+Snelle mock-check zonder Affiliate (dev): `bash docs/perma_e2e.sh` — start de Twitch-CLI
+EventSub-mock + market in mock-modus en injecteert een dag- én perma-redeem (`-i mock_reward`
+resp. `-i mock_perma_reward`). Bewijst de routing dag→24u vs. perma→NULL end-to-end.
+
 ## Wat verandert er voor prod later
 Op de VPS: `secrets.json` met de **prod-streamer**-creds + `environment: "prod"`
 (reward-kost 1500), `twitch_tokens.json` van de streamer, en één keer `systemctl restart market`.
-De tale-bot pikt de grants read-only op (staat al klaar).
+Zet `twitch_perma_reward_title` (+ `twitch_perma_reward_cost`) als je de permanente-pas-redeem
+live wil. De tale-bot pikt de grants read-only op (staat al klaar).
