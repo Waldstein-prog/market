@@ -489,7 +489,8 @@ a.btn,button.btn{{display:inline-block;margin-top:1rem;padding:.7rem 1.15rem;
   box-shadow:0 3px 0 #3a5a28;transition:transform .05s,box-shadow .05s,filter .1s}}
 a.btn:hover,button.btn:hover{{filter:brightness(1.06)}}
 a.btn:active,button.btn:active{{transform:translateY(3px);box-shadow:0 0 0 #3a5a28}}
-button.btn:disabled{{box-shadow:none;transform:none;filter:none}}
+button.btn:disabled{{box-shadow:none;transform:none;filter:none;opacity:.4;cursor:default}}
+button.btn:disabled:hover{{filter:none}}
 a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:pointer;font:inherit;text-decoration:underline}}
 .statrow{{display:flex;justify-content:space-between;align-items:center;
   padding:.7rem .1rem;border-top:1px solid #22301f}}
@@ -2388,11 +2389,14 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         } else {
             format!("<b>{}</b> in stock", it.stock)
         };
+        // ∞-knop blijft altíjd staan; is het item al onbeperkt, dan grijs + disabled
+        // (geen wegspringende knop — enkel een visuele "already unlimited"-staat).
         let inf = if it.stock >= 0 {
             "<button class=\"btn small ghost\" type=\"submit\" name=\"unlimited\" value=\"1\" \
                title=\"Stop counting: unlimited, always for sale\">∞</button>"
         } else {
-            ""
+            "<button class=\"btn small ghost\" type=\"button\" disabled \
+               title=\"Already unlimited — add stock to count again\">∞</button>"
         };
         format!(
             "<form method=\"post\" action=\"/admin/item/stock\" class=\"stockbox\">\
