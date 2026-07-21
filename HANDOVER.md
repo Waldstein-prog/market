@@ -1,4 +1,4 @@
-# Handover — Meadow Market (2026-07-20)
+# Handover — Meadow Market (2026-07-21)
 
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
@@ -13,6 +13,23 @@ De bot mag **NOOIT** een Direct Message naar een lid sturen — expliciete, abso
 (2026-07-13, met nadruk). Alle feedback = **publiek kanaalbericht** of een **ephemeral** (enkel
 mogelijk als antwoord op een interactie, bv. een knopklik zoals bij de chest). Bij een level-up
 (message-event, geen interactie) → publiek bericht in het kanaal + prod #coins, géén DM.
+
+## ⏭️ Sessie (2026-07-21) — ∞-voorraadknop grijst uit i.p.v. te verdwijnen
+
+**LIVE op prod + gecommit + gepusht + gedeployd** (commit `75a4788`; subtree `market-gh` →
+`77c6dae`; deploy geverifieerd: `market.service` active, home HTTP 200).
+
+Kleine admin-UX-fix op **Manage → shop** (item-editor, voorraadblokje). De **∞-knop** (voorraad
+op *unlimited* = niet meer tellen) **verdween** volledig zodra een item al onbeperkt was — dat
+oogde alsof er iets weg/kapot was (user-melding). Nu blijft de knop staan maar wordt hij
+**grijs + disabled**:
+- `web.rs` `admin_item()` (bij de `let inf`): rendert nu áltijd een ∞-knop; bij `stock >= 0` de
+  echte submit-knop, bij `stock < 0` een `type="button" disabled` variant met tooltip
+  *"Already unlimited — add stock to count again"*.
+- `web.rs` CSS `button.btn:disabled`: grijst nu écht uit (`opacity:.4;cursor:default` + geen
+  hover-filter) — voorheen haalde die regel enkel de schaduw/transform weg.
+- Terugweg ongewijzigd: `+ Add stock N` op een unlimited item begint weer bij 0 (`add_stock`
+  behandelt `cur<0` als base 0) → knop wordt weer actief. Geen DB-wijziging, puur render/CSS.
 
 ## ⏭️ Sessie (2026-07-20) — Twitch permanente-pas-redeem gebouwd + verjaardag-rol-ID vastgelegd
 
