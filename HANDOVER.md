@@ -1,47 +1,47 @@
 # Handover — Meadow Market (2026-07-21)
 
-## ⏭️ Sessie (2026-07-21b) — BUG: threads leverden geen coins op + retroactieve inhaalslag
+## ⏭️ Sessie (2026-07-21b) — BUG opgelost: threads leverden geen coins op (retro-payout AFGEBLAZEN)
 
-**Forward-fix LIVE + gepusht + gedeployd** (`bc25a77`, subtree `6975c01`). **Inhaalslag-tooling
-LIVE + gepusht + gedeployd** (`b774c15`, subtree `c4129a3`) — **maar nog NIET uitgevoerd op prod**
-(wacht op user-goedkeuring van de preview).
+**Forward-fix LIVE + gepusht + gedeployd + IN-GAME GEVERIFIEERD** (`bc25a77` → gepolijst in
+`21e076f`, subtree t/m `21e076f`). Threads onder een coin-kanaal leveren nu coins op. De
+**retroactieve inhaalslag is bewust NIET uitbetaald** (user-beslissing, zie onder) — de
+`thread_backfill`-tabel op prod is **leeggemaakt**, dus `!threadfix_commit` betaalt niets.
 
-### De bug (user-melding)
-Berichten in een **thread** in een coin-kanaal (bv. Arts & crafts) leverden **geen coins** op. Oorzaak:
-`handle_message` checkte `db::is_coin_channel(msg.channel_id)`, en bij een thread is `msg.channel_id`
-de **thread zelf**, niet het bovenliggende kanaal → niet op de lijst → niks.
+### De bug (user-melding) + fix
+Berichten in een **thread** in een coin-kanaal (bv. arts-crafts) leverden **geen coins** op:
+`handle_message` checkte `is_coin_channel(msg.channel_id)`, en bij een thread is `msg.channel_id`
+de **thread zelf**, niet het parent-kanaal → niet op de lijst → niks. Fix = helper `thread_parent()`
+in `bot.rs`: bij een thread telt het **parent-kanaal** voor de coin-check. **Valkuil dichtgezet**:
+een gewoon kanaal heeft óók een `parent_id` (categorie) → strikt gate op de thread-types
+(`PublicThread`/`PrivateThread`/`NewsThread`). **Live bewezen** op prod: een bericht in een
+arts-crafts-thread kende +1 coin toe (via tijdelijke DIAG-log, nadien verwijderd).
+- **Perf**: `to_channel` is in serenity 0.12 GÉÉN cache-lookup maar een echte `get_channel`-HTTP-call.
+  Daarom `thread_parent` **gememoïseerd** (`Data.parent_cache`: channel_id → Some(parent)/None);
+  fouten worden bewust niet gecachet (transiënte rate-limit sluit geen thread permanent uit).
+- **NB coins zijn stil**: per-bericht-coins geven geen zichtbare feedback (enkel #fortuna-log), dus
+  "het lijkt niks te doen" ≠ kapot. Enkel level-ups/aankopen posten in #coins.
 
-### Forward-fix (`bc25a77`)
-Nieuwe helper `thread_parent()` in `bot.rs`: bij een thread wordt het **parent-kanaal** gebruikt voor
-de coin-check (cache-first via `to_channel`, HTTP-fallback). **Valkuil dichtgezet**: een gewoon kanaal
-heeft óók een `parent_id` (zijn categorie) → strikt gate op de thread-types (`PublicThread`/
-`PrivateThread`/`NewsThread`) zodat een categorie nooit als coin-kanaal telt. Threads onder een
-niet-coin-kanaal blijven terecht leeg; forum-kanalen (elke post = thread) werken nu mee.
+### ⚠️ 5 coin-kanalen zijn ONZICHTBAAR voor de bot (openstaand!)
+Tijdens de scan bleek: de bot mist **View Channel** op **5 coin-kanalen** → `403 Missing Access` bij
+`GET /channels/{id}`: **☀️hychat, ☀️parachat, 🌄hypics, 👋introductions, 📔style-magazine**. Gevolg:
+daar vallen **live óók geen coins** (bot ziet de berichten niet, thread of niet). **Fix = de bot
+View Channel + Read Message History geven op die 5 kanalen** (Discord-rechten, user-actie). Nog open.
 
-### Retroactieve inhaalslag (`b774c15`) — 3 admin-commando's (patroon zoals het oude `!levelfix`)
-User wil **alle** gemiste thread-berichten terugbetalen, **per bericht een roll**, eerst een **preview
-in dev-coins**, dan pas uitbetalen op prod na akkoord.
-- **`!threadfix_preview`** (admin, dev-coins) → scant alle threads onder de coin-kanalen (actief +
-  gearchiveerd publiek/private), rolt **per bericht** een bedrag (`coin_weights`, **géén cooldown**),
-  bevriest dat in nieuwe tabel **`thread_backfill`** (PK = message_id ⇒ her-scan rolt nooit opnieuw),
-  post een per-lid-overzicht "wie krijgt hoeveel" + totaal. **Betaalt niets uit.**
-- **`!threadfix_commit`** (admin) → betaalt de openstaande som per lid uit als **verdienste**
-  (`coins` + `total_earned`, telt mee voor leveling) in één IMMEDIATE-tx, markeert de rijen `applied=1`.
-  **Idempotent** (dubbel draaien betaalt niks extra). **Bewust GEEN `earn_log`** → vervuilt het
-  weekly/uur-overzicht niet. **Geen level-up-embed-burst**: leveling zelf-heelt bij de volgende activiteit.
-- **`!threadfix_reset`** (admin) → wist de openstaande (niet-uitbetaalde) rijen om opnieuw te rollen.
-- **Uitgesloten** bij de scan: bots, `!`-commando's, en **oud-leden** (wie de server verliet).
-- `discord_rest`: nieuwe `active_threads`, `archived_threads` (publiek+private, paginatie via
-  `archive_timestamp`), `get_messages_detailed` (met content voor de `!`-filter).
-- **Tests**: `thread_backfill_test` (record-idempotentie, som/uitbetaling-één-keer, reset enkel onbetaald).
-  Totaal **26 tests** groen.
+### Retroactieve inhaalslag — gebouwd maar AFGEBLAZEN (user-beslissing)
+Tooling staat LIVE (`b774c15`, `c4129a3`): 3 admin-commando's `!threadfix_preview` / `_commit` /
+`_reset` (patroon zoals oud `!levelfix`) + tabel `thread_backfill` + `discord_rest` helpers
+(`active_threads`, `archived_threads`, `get_messages_detailed`) + `thread_backfill_test` (2 tests,
+26 totaal groen). De scan is **buiten de binary om** (Python + bot-token) meermaals gedraaid als
+preview in dev-coins. Belangrijke bevinding onderweg: berichten **ná** de fix-deploy leverden live al
+coins op → een correcte backfill vereist een **cutoff op de fix-deploytijd** (anders dubbel). Gecorrigeerde
+preview = ~160 coins / 89 berichten / 6 leden (FayBelle leeuwendeel). Dekking bleef **niet 100%**
+(5 onzichtbare kanalen + private threads → Manage Threads nodig).
+**User-beslissing: NIET uitbetalen** — "voor de toekomst is het nu correct; liever niks dan iets fout."
+→ `thread_backfill` leeggemaakt (0 rijen). De commando's + tabel blijven dormant in de code (geen
+kwaad; lege tabel = commit doet niks). Eventueel later op te ruimen als ze nooit gebruikt worden.
 
-**→ Volgende stap (user):** typ `!threadfix_preview` in dev-coins → beoordeel de lijst → bij akkoord
-`!threadfix_commit`. Niet blij met de rolls? `!threadfix_reset` en opnieuw previewen.
-
-**⚠️ Bevestigde aannames (in de preview vermeld, user kan bijsturen vóór commit):** géén cooldown
-(elk bericht rolt), retro-coins tellen mee voor leveling maar niet voor weekly/uur, oud-leden overgeslagen,
-geen publieke prod-aankondiging (enkel saldi stijgen + admin-bevestiging in dev-coins).
+**→ Open follow-up:** de 5 onzichtbare coin-kanalen (View Channel voor de bot) — puur een Discord-
+rechtenkwestie, geen code. Zolang dat niet gebeurt, verdienen leden daar helemaal geen coins.
 
 ---
 
