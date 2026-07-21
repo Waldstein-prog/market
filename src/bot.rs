@@ -26,6 +26,7 @@ const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 0; // saldo-log uit op prod (fortuna-lo
 const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
 const PROD_GENERAL_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow ☀️general (weekly zaterdag 15u)
 const PROD_GUILD_ID: u64 = 1296469405651435592; // Magic Meadow — leave/rejoin-archief triggert enkel hier
+const DEV_COINS_CHANNEL_ID: u64 = 1525189157104648343; // dev "coins"-kanaal: previews/admin-rapporten (bv. thread-inhaalslag)
 // Weekly leaderboard aan: vuurt elke zaterdag 15:00 (Brussel) in prod #general.
 const WEEKLY_LEADERBOARD_ENABLED: bool = true;
 const HOURLY_SHOUTOUT_MIN: i64 = 1; // drempel: minstens 1 coin verdiend in het afgelopen uur
@@ -849,6 +850,238 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Retroactieve thread-inhaalslag (!threadfix_preview / _commit / _reset)
+//
+// Threads leverden vroeger geen coins op (msg.channel_id = de thread, niet het
+// coin-kanaal — zie thread_parent). Deze inhaalslag scant alle threads onder de
+// coin-kanalen, rolt PER BERICHT een bedrag (coin_weights, géén cooldown), bevriest
+// dat in `thread_backfill` en toont in dev-coins wie hoeveel krijgt. Pas na
+// `!threadfix_commit` worden de saldi op prod echt bijgewerkt. Idempotent + resumable.
+// ---------------------------------------------------------------------------
+
+/// Post tekst naar een kanaal in blokken < 2000 tekens (Discord-limiet).
+async fn post_chunks(dc: &crate::discord_rest::Discord, channel: &str, header: &str, lines: &[String]) {
+    let mut buf = header.to_string();
+    for line in lines {
+        if buf.len() + line.len() + 1 > 1900 {
+            let _ = dc.send_channel_message(channel, &buf).await;
+            buf.clear();
+        }
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        buf.push_str(line);
+    }
+    if !buf.is_empty() {
+        let _ = dc.send_channel_message(channel, &buf).await;
+    }
+}
+
+async fn run_thread_backfill_preview(pool: DbPool, cfg: Config) {
+    let dc = crate::discord_rest::Discord::new(cfg.bot_token.clone(), PROD_GUILD_ID.to_string());
+    let guild = PROD_GUILD_ID.to_string();
+    let ch = DEV_COINS_CHANNEL_ID.to_string();
+
+    let coin_chs = db::coin_channels(&pool); // Vec<(channel_id, naam)>
+    if coin_chs.is_empty() {
+        let _ = dc
+            .send_channel_message(&ch, "⚠️ Thread-inhaalslag: er zijn geen coin-kanalen ingesteld.")
+            .await;
+        return;
+    }
+    let _ = dc
+        .send_channel_message(
+            &ch,
+            &format!("⏳ Thread-inhaalslag gestart — {} coin-kanalen worden gescand…", coin_chs.len()),
+        )
+        .await;
+
+    let coin_set: HashSet<String> = coin_chs.iter().map(|(id, _)| id.clone()).collect();
+    let members: HashMap<String, String> = match dc.list_members(&guild).await {
+        Ok(v) => v.into_iter().collect(),
+        Err(e) => {
+            let _ = dc.send_channel_message(&ch, &format!("❌ Kan de ledenlijst niet ophalen: {e}")).await;
+            return;
+        }
+    };
+
+    // Alle threads verzamelen: actief (guild-breed, gefilterd op coin-parent) + gearchiveerd
+    // (per kanaal, publiek + private). Dedup op thread-id.
+    let mut threads: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut warns: Vec<String> = Vec::new();
+    match dc.active_threads(&guild).await {
+        Ok(list) => {
+            for (tid, parent) in list {
+                if coin_set.contains(&parent) && seen.insert(tid.clone()) {
+                    threads.push(tid);
+                }
+            }
+        }
+        Err(e) => warns.push(format!("actieve threads: {e}")),
+    }
+    for (cid, cname) in &coin_chs {
+        for private in [false, true] {
+            match dc.archived_threads(cid, private).await {
+                Ok(ids) => {
+                    for tid in ids {
+                        if seen.insert(tid.clone()) {
+                            threads.push(tid);
+                        }
+                    }
+                }
+                // 403 op private threads is normaal zonder Manage Threads — enkel loggen.
+                Err(e) => warns.push(format!(
+                    "#{cname} gearchiveerd ({}): {e}",
+                    if private { "private" } else { "publiek" }
+                )),
+            }
+        }
+    }
+
+    // Berichten per thread aflopen en per bericht rollen (enkel nieuwe berichten).
+    let now = now_secs();
+    let mut new_msgs = 0i64;
+    let mut left_skipped = 0i64;
+    for tid in &threads {
+        let mut before: Option<String> = None;
+        loop {
+            let batch = match dc.get_messages_detailed(tid, before.as_deref(), 100).await {
+                Ok(b) => b,
+                Err(e) => {
+                    warns.push(format!("thread {tid}: {e}"));
+                    break;
+                }
+            };
+            if batch.is_empty() {
+                break;
+            }
+            let mut oldest = u64::MAX;
+            for (aid, mid, is_bot, content) in &batch {
+                if *mid < oldest {
+                    oldest = *mid;
+                }
+                if *is_bot || content.starts_with(PREFIX) {
+                    continue;
+                }
+                let name = match members.get(aid) {
+                    Some(n) => n.clone(),
+                    None => {
+                        left_skipped += 1; // auteur verliet de server → niks uit te keren
+                        continue;
+                    }
+                };
+                let amount = coin_amount(&pool);
+                if db::backfill_record(&pool, &mid.to_string(), aid, &name, amount, now) {
+                    new_msgs += 1;
+                }
+            }
+            before = Some(oldest.to_string());
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+    }
+
+    // Rapport samenstellen.
+    let (coins, msgs, users) = db::backfill_totals(&pool);
+    let pending = db::backfill_pending(&pool);
+    let header = format!(
+        "🧵 **Thread-inhaalslag — PREVIEW** (nog niets uitbetaald)\n\
+         Threads gescand: **{}** · nieuwe berichten deze scan: **{}**\n\
+         Regels: per bericht gerold (géén cooldown); bots, `!`-commando's en oud-leden ({} berichten) uitgesloten.\n\
+         De coins tellen mee voor leveling (total_earned) maar komen NIET in het weekly/uur-overzicht.\n\
+         ────────────",
+        threads.len(),
+        new_msgs,
+        left_skipped
+    );
+    if pending.is_empty() {
+        let _ = dc
+            .send_channel_message(&ch, &format!("{header}\n_Niets te vergoeden — geen thread-berichten gevonden._"))
+            .await;
+    } else {
+        let mut lines: Vec<String> = pending
+            .iter()
+            .map(|(_, name, sum, cnt)| format!("**{name}** — {sum} {COIN_EMOJI}  ({cnt} berichten)"))
+            .collect();
+        lines.push("────────────".to_string());
+        lines.push(format!("**Totaal: {coins} {COIN_EMOJI}** · {users} leden · {msgs} berichten"));
+        lines.push("▶️ Akkoord? `!threadfix_commit` betaalt uit op prod. Opnieuw rollen? `!threadfix_reset` → `!threadfix_preview`.".to_string());
+        post_chunks(&dc, &ch, &header, &lines).await;
+    }
+    if !warns.is_empty() {
+        let shown: Vec<String> = warns.iter().take(10).cloned().collect();
+        let extra = if warns.len() > 10 { format!(" (+{} meer)", warns.len() - 10) } else { String::new() };
+        let _ = dc
+            .send_channel_message(
+                &ch,
+                &format!("⚠️ Overgeslagen (leesrecht/403){extra}:\n{}", shown.join("\n")),
+            )
+            .await;
+    }
+}
+
+/// `!threadfix_preview` — scan alle threads onder de coin-kanalen, rol per bericht en toon
+/// in dev-coins wie hoeveel alsnog krijgt. Betaalt NIETS uit. Admin-only, draait in de
+/// achtergrond (kan even duren bij veel threads).
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn threadfix_preview(ctx: Context<'_>) -> Result<(), Error> {
+    let pool = ctx.data().pool.clone();
+    let cfg = ctx.data().cfg.clone();
+    tokio::spawn(async move { run_thread_backfill_preview(pool, cfg).await });
+    Ok(())
+}
+
+/// `!threadfix_commit` — betaal de getoonde inhaalslag echt uit op prod (idempotent).
+/// Admin-only.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn threadfix_commit(ctx: Context<'_>) -> Result<(), Error> {
+    let pool = ctx.data().pool.clone();
+    let cfg = ctx.data().cfg.clone();
+    tokio::spawn(async move {
+        let dc = crate::discord_rest::Discord::new(cfg.bot_token.clone(), PROD_GUILD_ID.to_string());
+        let ch = DEV_COINS_CHANNEL_ID.to_string();
+        let (_, msgs, users) = db::backfill_totals(&pool);
+        if users == 0 {
+            let _ = dc
+                .send_channel_message(&ch, "ℹ️ Niets openstaand — draai eerst `!threadfix_preview`.")
+                .await;
+            return;
+        }
+        let done = db::backfill_apply(&pool);
+        let paid: i64 = done.iter().map(|(_, _, a)| *a).sum();
+        let _ = dc
+            .send_channel_message(
+                &ch,
+                &format!(
+                    "✅ **Thread-inhaalslag uitbetaald op prod** — {paid} {COIN_EMOJI} over {} leden ({msgs} berichten). \
+                     Saldi bijgewerkt; een eventuele level-up volgt vanzelf bij de volgende activiteit.",
+                    done.len()
+                ),
+            )
+            .await;
+    });
+    Ok(())
+}
+
+/// `!threadfix_reset` — gooi de openstaande (nog niet uitbetaalde) inhaalslag weg om
+/// opnieuw te rollen. Raakt al uitbetaalde rijen niet aan. Admin-only.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn threadfix_reset(ctx: Context<'_>) -> Result<(), Error> {
+    let n = db::backfill_reset_pending(&ctx.data().pool);
+    let dc = crate::discord_rest::Discord::new(
+        ctx.data().cfg.bot_token.clone(),
+        PROD_GUILD_ID.to_string(),
+    );
+    let _ = dc
+        .send_channel_message(
+            &DEV_COINS_CHANNEL_ID.to_string(),
+            &format!("🧹 {n} openstaande rijen gewist — `!threadfix_preview` rolt opnieuw."),
+        )
+        .await;
+    Ok(())
+}
+
 /// Bouw de chest-embed voor het huidige aantal deelnemers. Onder de drempel
 /// (`chest_min_joiners`) toont hij "It will despawn <t:R>." + "Needs N more
 /// participant(s)."; zodra er genoeg deelnemers zijn verdwijnt die regel en
@@ -1584,6 +1817,9 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
                 chest(),
                 chestodds(),
                 chestrescue(),
+                threadfix_preview(),
+                threadfix_commit(),
+                threadfix_reset(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(PREFIX.to_string()),

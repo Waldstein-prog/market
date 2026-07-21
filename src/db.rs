@@ -107,6 +107,19 @@ pub fn init_pool(path: &str) -> DbPool {
             k TEXT PRIMARY KEY,
             v TEXT NOT NULL
         );
+        -- Retroactieve inhaalslag voor gemiste coins in THREADS (threads leverden vroeger
+        -- niks op, zie thread_parent-fix). Eén rij per gescand bericht: het gerolde bedrag
+        -- wordt hier bevroren zodat de preview exact overeenkomt met de uitbetaling. PK op
+        -- message_id ⇒ een preview her-scannen rolt nooit opnieuw en betaalt nooit dubbel.
+        CREATE TABLE IF NOT EXISTS thread_backfill (
+            message_id TEXT PRIMARY KEY,   -- Discord-bericht in een thread
+            user_id    TEXT NOT NULL,      -- auteur
+            name       TEXT NOT NULL,      -- weergavenaam bij de scan
+            amount     INTEGER NOT NULL,   -- gerold bedrag (coin_weights, per bericht)
+            applied    INTEGER NOT NULL DEFAULT 0, -- 1 = al uitbetaald (idempotent)
+            ts         REAL NOT NULL        -- epoch-seconden van de scan-rol
+        );
+        CREATE INDEX IF NOT EXISTS idx_thread_backfill_applied ON thread_backfill(applied);
         CREATE TABLE IF NOT EXISTS admin_undo (
             id         INTEGER PRIMARY KEY CHECK(id = 1), -- max één rij: de laatste ingreep
             user_id    TEXT NOT NULL,
@@ -2924,6 +2937,109 @@ pub fn chest_tier_delete(pool: &DbPool, id: i64) {
 }
 
 // ---------------------------------------------------------------------------
+// Retroactieve thread-inhaalslag (thread_backfill)
+// ---------------------------------------------------------------------------
+
+/// Leg het gerolde bedrag voor één thread-bericht vast. `INSERT OR IGNORE` op de
+/// message_id: een bericht dat al gerold is (of al uitbetaald) blijft ongewijzigd —
+/// zo rolt een her-scan nooit opnieuw. Geeft `true` als dit bericht nieuw was.
+pub fn backfill_record(pool: &DbPool, message_id: &str, user_id: &str, name: &str, amount: i64, ts: f64) -> bool {
+    let conn = pool.get().expect("db");
+    let n = conn
+        .execute(
+            "INSERT OR IGNORE INTO thread_backfill (message_id, user_id, name, amount, applied, ts)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+            params![message_id, user_id, name, amount, ts],
+        )
+        .expect("backfill_record");
+    n > 0
+}
+
+/// Nog-niet-uitbetaalde inhaalslag, per lid: (user_id, naam, som, aantal berichten).
+/// Aflopend op som. Voedt de preview in dev-coins.
+pub fn backfill_pending(pool: &DbPool) -> Vec<(String, String, i64, i64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT user_id, MAX(name), SUM(amount), COUNT(*)
+             FROM thread_backfill WHERE applied = 0
+             GROUP BY user_id ORDER BY SUM(amount) DESC, MAX(name)",
+        )
+        .expect("prepare backfill_pending");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .expect("query backfill_pending")
+        .filter_map(|r| r.ok())
+        .collect()
+}
+
+/// Totalen van de openstaande inhaalslag: (coins, berichten, leden).
+pub fn backfill_totals(pool: &DbPool) -> (i64, i64, i64) {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT COALESCE(SUM(amount),0), COUNT(*), COUNT(DISTINCT user_id)
+         FROM thread_backfill WHERE applied = 0",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap_or((0, 0, 0))
+}
+
+/// Betaal de openstaande inhaalslag uit. Per lid in ÉÉN IMMEDIATE-transactie: de som
+/// als échte verdienste boeken (coins + total_earned, net als een level-cadeau) én de
+/// betreffende rijen op `applied = 1` zetten — alles of niets. Bewust GÉÉN `earn_log`:
+/// retro-coins mogen het weekly-/uur-overzicht niet vervuilen alsof ze deze week verdiend
+/// zijn. Idempotent: al-uitbetaalde rijen tellen niet meer mee. Geeft (user_id, naam, som)
+/// per uitbetaald lid terug.
+pub fn backfill_apply(pool: &DbPool) -> Vec<(String, String, i64)> {
+    let pending = backfill_pending(pool);
+    let mut done = Vec::new();
+    for (uid, name, sum, _cnt) in pending {
+        if sum == 0 {
+            // Niks te storten, maar wél afvinken zodat de preview leegloopt.
+            let conn = pool.get().expect("db");
+            conn.execute(
+                "UPDATE thread_backfill SET applied = 1 WHERE user_id = ?1 AND applied = 0",
+                params![uid],
+            )
+            .expect("backfill mark-zero");
+            done.push((uid, name, 0));
+            continue;
+        }
+        let mut conn = pool.get().expect("db");
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("tx backfill_apply");
+        tx.execute(
+            "INSERT INTO coins (user_id, username, coins, max_balance, total_earned)
+             VALUES (?1, ?2, ?3, ?3, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET
+                 coins        = coins + excluded.coins,
+                 username     = excluded.username,
+                 max_balance  = MAX(max_balance, coins + excluded.coins),
+                 total_earned = total_earned + excluded.coins",
+            params![uid, name, sum],
+        )
+        .expect("credit backfill");
+        tx.execute(
+            "UPDATE thread_backfill SET applied = 1 WHERE user_id = ?1 AND applied = 0",
+            params![uid],
+        )
+        .expect("mark applied");
+        tx.commit().expect("commit backfill_apply");
+        done.push((uid, name, sum));
+    }
+    done
+}
+
+/// Gooi de openstaande (nog niet uitbetaalde) inhaalslag weg — om opnieuw te rollen.
+/// Raakt al-uitbetaalde rijen (applied=1) niet aan. Geeft het aantal gewiste rijen.
+pub fn backfill_reset_pending(pool: &DbPool) -> usize {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM thread_backfill WHERE applied = 0", [])
+        .expect("backfill_reset_pending")
+}
+
+// ---------------------------------------------------------------------------
 // Dry-run: gem → naamkleur (DB-kant). Speelt exact na wat use_gem/unequip_gem
 // aan de databank doen (set_name_color + set_equipped_gem), plus de "Equipped"-
 // match uit de render (color.eq_ignore_ascii_case(&name_color)). De Discord-rol
@@ -3291,6 +3407,77 @@ mod concurrency_guards {
         // Wat getoond wordt == wat opgeslagen staat (canoniek, geen lokaal-gerolde mengeling).
         let stored = daily_ids(&pool.get().unwrap(), day);
         assert_eq!(stored, ids1, "opgeslagen set == getoonde set");
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod thread_backfill_test {
+    use super::*;
+
+    fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-tbf-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (init_pool(p.to_str().unwrap()), p)
+    }
+
+    fn balance(pool: &DbPool, uid: &str) -> (i64, i64) {
+        let conn = pool.get().unwrap();
+        conn.query_row(
+            "SELECT coins, total_earned FROM coins WHERE user_id = ?1",
+            params![uid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap()
+        .unwrap_or((0, 0))
+    }
+
+    #[test]
+    fn record_is_idempotent_pending_sums_and_apply_pays_once() {
+        let (pool, path) = fresh("apply");
+
+        // Twee leden, meerdere thread-berichten met bevroren rol-bedragen.
+        assert!(backfill_record(&pool, "m1", "u1", "Alice", 3, 0.0));
+        assert!(backfill_record(&pool, "m2", "u1", "Alice", 2, 0.0));
+        assert!(backfill_record(&pool, "m3", "u2", "Bob", 5, 0.0));
+        // Zelfde message_id opnieuw (her-scan) → geen nieuwe rij, geen dubbele coins.
+        assert!(!backfill_record(&pool, "m1", "u1", "Alice", 99, 0.0));
+
+        let (coins, msgs, users) = backfill_totals(&pool);
+        assert_eq!((coins, msgs, users), (10, 3, 2));
+
+        let pending = backfill_pending(&pool);
+        // Aflopend op som: Bob (5) vóór Alice (5)? gelijk → tie-break op naam. Alice=5, Bob=5.
+        let alice = pending.iter().find(|(u, ..)| u == "u1").unwrap();
+        assert_eq!((alice.2, alice.3), (5, 2));
+
+        // Uitbetalen: saldo + total_earned stijgen met de som, precies één keer.
+        let done = backfill_apply(&pool);
+        assert_eq!(done.len(), 2);
+        assert_eq!(balance(&pool, "u1"), (5, 5));
+        assert_eq!(balance(&pool, "u2"), (5, 5));
+
+        // Niets meer openstaand; een tweede commit betaalt niets extra.
+        assert_eq!(backfill_totals(&pool), (0, 0, 0));
+        assert!(backfill_apply(&pool).is_empty());
+        assert_eq!(balance(&pool, "u1"), (5, 5), "geen dubbele uitbetaling");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reset_drops_only_unpaid_rows() {
+        let (pool, path) = fresh("reset");
+        backfill_record(&pool, "a", "u1", "Alice", 4, 0.0);
+        backfill_apply(&pool); // 'a' → applied=1
+        backfill_record(&pool, "b", "u1", "Alice", 7, 0.0); // nieuw, nog niet betaald
+
+        let removed = backfill_reset_pending(&pool);
+        assert_eq!(removed, 1, "enkel de niet-uitbetaalde rij verdwijnt");
+        assert_eq!(backfill_totals(&pool), (0, 0, 0));
+        assert_eq!(balance(&pool, "u1"), (4, 4), "reeds uitbetaalde coins blijven staan");
+
         let _ = std::fs::remove_file(path);
     }
 }

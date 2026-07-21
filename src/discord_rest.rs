@@ -350,6 +350,144 @@ impl Discord {
         Err("Rate limited (429) — te vaak achtereen, kanaal opgegeven.".to_string())
     }
 
+    /// Alle ACTIEVE threads in de guild: (thread_id, parent_id). Eén guild-brede call —
+    /// Discord geeft enkel de threads terug die de bot kan zien.
+    pub async fn active_threads(&self, guild: &str) -> Result<Vec<(String, String)>, String> {
+        let url = format!("{API}/guilds/{guild}/threads/active");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+        }
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        if let Some(threads) = v["threads"].as_array() {
+            for t in threads {
+                let id = t["id"].as_str().unwrap_or_default().to_string();
+                let parent = t["parent_id"].as_str().unwrap_or_default().to_string();
+                if !id.is_empty() && !parent.is_empty() {
+                    out.push((id, parent));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// GEARCHIVEERDE threads onder één kanaal: hun thread-ids. `private=false` → publieke,
+    /// `true` → private (kan 403 geven zonder Manage Threads/lidmaatschap → de caller vangt
+    /// dat op en slaat over). Pagineert via `before` = archive_timestamp van de laatste thread.
+    pub async fn archived_threads(&self, channel: &str, private: bool) -> Result<Vec<String>, String> {
+        let kind = if private { "private" } else { "public" };
+        let mut before: Option<String> = None;
+        let mut out = Vec::new();
+        loop {
+            let mut url = format!("{API}/channels/{channel}/threads/archived/{kind}?limit=100");
+            if let Some(b) = &before {
+                url.push_str(&format!("&before={b}"));
+            }
+            let mut got: Option<Value> = None;
+            for _ in 0..6 {
+                let resp = self
+                    .client
+                    .get(&url)
+                    .header("Authorization", self.auth())
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let status = resp.status();
+                if status.as_u16() == 429 {
+                    let body: Value = resp.json().await.unwrap_or_default();
+                    let wait = body["retry_after"].as_f64().unwrap_or(1.0);
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(wait + 0.1)).await;
+                    continue;
+                }
+                if !status.is_success() {
+                    return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+                }
+                got = Some(resp.json().await.map_err(|e| e.to_string())?);
+                break;
+            }
+            let v = match got {
+                Some(v) => v,
+                None => return Err("Rate limited (429) — threads/archived.".to_string()),
+            };
+            let has_more = v["has_more"].as_bool().unwrap_or(false);
+            let mut last_ts: Option<String> = None;
+            let mut n = 0usize;
+            if let Some(threads) = v["threads"].as_array() {
+                for t in threads {
+                    if let Some(id) = t["id"].as_str() {
+                        out.push(id.to_string());
+                        n += 1;
+                    }
+                    if let Some(ts) = t["thread_metadata"]["archive_timestamp"].as_str() {
+                        last_ts = Some(ts.to_string());
+                    }
+                }
+            }
+            before = last_ts;
+            if !has_more || n == 0 || before.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+        Ok(out)
+    }
+
+    /// Als `get_messages`, maar met de bericht-inhoud erbij: (author_id, msg_id, is_bot, content).
+    /// De inhoud dient om `!`-commando's over te slaan (die leveren live ook geen coins op).
+    pub async fn get_messages_detailed(
+        &self,
+        channel_id: &str,
+        before: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<(String, u64, bool, String)>, String> {
+        let mut url = format!("{API}/channels/{channel_id}/messages?limit={limit}");
+        if let Some(b) = before {
+            url.push_str(&format!("&before={b}"));
+        }
+        for _ in 0..6 {
+            let resp = self
+                .client
+                .get(&url)
+                .header("Authorization", self.auth())
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let status = resp.status();
+            if status.as_u16() == 429 {
+                let body: Value = resp.json().await.unwrap_or_default();
+                let wait = body["retry_after"].as_f64().unwrap_or(1.0);
+                tokio::time::sleep(std::time::Duration::from_secs_f64(wait + 0.1)).await;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(explain(status.as_u16(), &resp.text().await.unwrap_or_default()));
+            }
+            let arr: Value = resp.json().await.map_err(|e| e.to_string())?;
+            let mut out = Vec::new();
+            if let Some(msgs) = arr.as_array() {
+                for m in msgs {
+                    let aid = m["author"]["id"].as_str().unwrap_or_default().to_string();
+                    let is_bot = m["author"]["bot"].as_bool().unwrap_or(false);
+                    let mid = m["id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    let content = m["content"].as_str().unwrap_or_default().to_string();
+                    if !aid.is_empty() && mid != 0 {
+                        out.push((aid, mid, is_bot, content));
+                    }
+                }
+            }
+            return Ok(out);
+        }
+        Err("Rate limited (429) — te vaak achtereen, kanaal opgegeven.".to_string())
+    }
+
     /// Post een tekstbericht in een kanaal (bv. shop-aankoopmeldingen in #coins).
     /// Los van de gateway-bot: gewone REST-POST met het bot-token.
     pub async fn send_channel_message(&self, channel_id: &str, content: &str) -> Result<(), String> {
