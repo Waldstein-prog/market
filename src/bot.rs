@@ -161,6 +161,30 @@ async fn log_earn(http: &serenity::Http, name: &str, amount: i64, total: i64) {
     }
 }
 
+/// Bij een bericht in een **thread** is `msg.channel_id` de thread zélf, niet het
+/// bovenliggende kanaal. Voor de coin-check willen we dan het parent-kanaal gebruiken,
+/// zodat threads in een coin-kanaal (bv. Arts & crafts) óók coins opleveren.
+///
+/// Geeft de parent-id terug enkel als het kanaal écht een thread is. Let op: een
+/// gewóón kanaal heeft óók een `parent_id` (zijn categorie) — die mag hier NOOIT
+/// als coin-kanaal gelden, vandaar de kind-gate. `to_channel` is cache-first (de
+/// GUILDS-intent vult de thread-cache); enkel bij een cache-miss volgt één HTTP-call.
+async fn thread_parent(ctx: &serenity::Context, id: serenity::ChannelId) -> Option<u64> {
+    match id.to_channel(ctx).await {
+        Ok(serenity::Channel::Guild(gc))
+            if matches!(
+                gc.kind,
+                serenity::ChannelType::PublicThread
+                    | serenity::ChannelType::PrivateThread
+                    | serenity::ChannelType::NewsThread
+            ) =>
+        {
+            gc.parent_id.map(|p| p.get())
+        }
+        _ => None,
+    }
+}
+
 async fn handle_message(
     ctx: &serenity::Context,
     msg: &serenity::Message,
@@ -184,8 +208,14 @@ async fn handle_message(
         return Ok(());
     }
     // Coins per bericht enkel in kanalen op de admin-beheerde coin-kanalenlijst.
-    // Lege lijst = nergens coins (progressieve activering).
-    if !db::is_coin_channel(&data.pool, msg.channel_id.get()) {
+    // Lege lijst = nergens coins (progressieve activering). Een bericht in een
+    // thread telt mee als zijn PARENT-kanaal op de lijst staat (thread_parent).
+    let coin_here = db::is_coin_channel(&data.pool, msg.channel_id.get())
+        || match thread_parent(ctx, msg.channel_id).await {
+            Some(parent) => db::is_coin_channel(&data.pool, parent),
+            None => false,
+        };
+    if !coin_here {
         return Ok(());
     }
 
