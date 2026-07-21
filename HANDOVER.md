@@ -1,5 +1,51 @@
 # Handover — Meadow Market (2026-07-21)
 
+## ⏭️ Sessie (2026-07-21b) — BUG: threads leverden geen coins op + retroactieve inhaalslag
+
+**Forward-fix LIVE + gepusht + gedeployd** (`bc25a77`, subtree `6975c01`). **Inhaalslag-tooling
+LIVE + gepusht + gedeployd** (`b774c15`, subtree `c4129a3`) — **maar nog NIET uitgevoerd op prod**
+(wacht op user-goedkeuring van de preview).
+
+### De bug (user-melding)
+Berichten in een **thread** in een coin-kanaal (bv. Arts & crafts) leverden **geen coins** op. Oorzaak:
+`handle_message` checkte `db::is_coin_channel(msg.channel_id)`, en bij een thread is `msg.channel_id`
+de **thread zelf**, niet het bovenliggende kanaal → niet op de lijst → niks.
+
+### Forward-fix (`bc25a77`)
+Nieuwe helper `thread_parent()` in `bot.rs`: bij een thread wordt het **parent-kanaal** gebruikt voor
+de coin-check (cache-first via `to_channel`, HTTP-fallback). **Valkuil dichtgezet**: een gewoon kanaal
+heeft óók een `parent_id` (zijn categorie) → strikt gate op de thread-types (`PublicThread`/
+`PrivateThread`/`NewsThread`) zodat een categorie nooit als coin-kanaal telt. Threads onder een
+niet-coin-kanaal blijven terecht leeg; forum-kanalen (elke post = thread) werken nu mee.
+
+### Retroactieve inhaalslag (`b774c15`) — 3 admin-commando's (patroon zoals het oude `!levelfix`)
+User wil **alle** gemiste thread-berichten terugbetalen, **per bericht een roll**, eerst een **preview
+in dev-coins**, dan pas uitbetalen op prod na akkoord.
+- **`!threadfix_preview`** (admin, dev-coins) → scant alle threads onder de coin-kanalen (actief +
+  gearchiveerd publiek/private), rolt **per bericht** een bedrag (`coin_weights`, **géén cooldown**),
+  bevriest dat in nieuwe tabel **`thread_backfill`** (PK = message_id ⇒ her-scan rolt nooit opnieuw),
+  post een per-lid-overzicht "wie krijgt hoeveel" + totaal. **Betaalt niets uit.**
+- **`!threadfix_commit`** (admin) → betaalt de openstaande som per lid uit als **verdienste**
+  (`coins` + `total_earned`, telt mee voor leveling) in één IMMEDIATE-tx, markeert de rijen `applied=1`.
+  **Idempotent** (dubbel draaien betaalt niks extra). **Bewust GEEN `earn_log`** → vervuilt het
+  weekly/uur-overzicht niet. **Geen level-up-embed-burst**: leveling zelf-heelt bij de volgende activiteit.
+- **`!threadfix_reset`** (admin) → wist de openstaande (niet-uitbetaalde) rijen om opnieuw te rollen.
+- **Uitgesloten** bij de scan: bots, `!`-commando's, en **oud-leden** (wie de server verliet).
+- `discord_rest`: nieuwe `active_threads`, `archived_threads` (publiek+private, paginatie via
+  `archive_timestamp`), `get_messages_detailed` (met content voor de `!`-filter).
+- **Tests**: `thread_backfill_test` (record-idempotentie, som/uitbetaling-één-keer, reset enkel onbetaald).
+  Totaal **26 tests** groen.
+
+**→ Volgende stap (user):** typ `!threadfix_preview` in dev-coins → beoordeel de lijst → bij akkoord
+`!threadfix_commit`. Niet blij met de rolls? `!threadfix_reset` en opnieuw previewen.
+
+**⚠️ Bevestigde aannames (in de preview vermeld, user kan bijsturen vóór commit):** géén cooldown
+(elk bericht rolt), retro-coins tellen mee voor leveling maar niet voor weekly/uur, oud-leden overgeslagen,
+geen publieke prod-aankondiging (enkel saldi stijgen + admin-bevestiging in dev-coins).
+
+---
+
+
 Discord **coin-economy + verzamel-/shop-site** in **Rust** (één self-contained binary:
 serenity/poise-bot + Axum-site + gedeelde SQLite). **LIVE** op `https://magicmeadow.org`
 (Hetzner-VPS, systemd `market`) en op de **dev-guild** (WaldsteinDevZone).
