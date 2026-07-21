@@ -85,6 +85,10 @@ pub struct Data {
     // Gedeelde treasure-chest-staat (interne mutability; korte sync-secties, nooit
     // over een await vastgehouden).
     chest: Arc<Mutex<ChestTracker>>,
+    // Memo voor thread_parent: channel_id → Some(parent) als het een thread is, None
+    // als het een gewoon kanaal is. Bespaart een get_channel-HTTP-call per bericht in
+    // een niet-coin-kanaal (parent/thread-type zijn stabiel, dus veilig te cachen).
+    parent_cache: Arc<Mutex<HashMap<u64, Option<u64>>>>,
 }
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -170,19 +174,35 @@ async fn log_earn(http: &serenity::Http, name: &str, amount: i64, total: i64) {
 /// gewóón kanaal heeft óók een `parent_id` (zijn categorie) — die mag hier NOOIT
 /// als coin-kanaal gelden, vandaar de kind-gate. `to_channel` is cache-first (de
 /// GUILDS-intent vult de thread-cache); enkel bij een cache-miss volgt één HTTP-call.
-async fn thread_parent(ctx: &serenity::Context, id: serenity::ChannelId) -> Option<u64> {
+async fn thread_parent(ctx: &serenity::Context, data: &Data, id: serenity::ChannelId) -> Option<u64> {
+    let key = id.get();
+    // Memo eerst (guard valt vóór de await, nooit vastgehouden over een await).
+    if let Some(cached) = data.parent_cache.lock().unwrap().get(&key).copied() {
+        return cached;
+    }
+    // `to_channel` is in serenity 0.12 GÉÉN cache-lookup maar een echte get_channel-HTTP-call;
+    // daarom memoïseren we het resultaat zodat elk kanaal maar één keer opgevraagd wordt.
     match id.to_channel(ctx).await {
-        Ok(serenity::Channel::Guild(gc))
-            if matches!(
+        Ok(serenity::Channel::Guild(gc)) => {
+            let is_thread = matches!(
                 gc.kind,
                 serenity::ChannelType::PublicThread
                     | serenity::ChannelType::PrivateThread
                     | serenity::ChannelType::NewsThread
-            ) =>
-        {
-            gc.parent_id.map(|p| p.get())
+            );
+            let val = if is_thread { gc.parent_id.map(|p| p.get()) } else { None };
+            data.parent_cache.lock().unwrap().insert(key, val);
+            val
         }
-        _ => None,
+        Ok(_) => {
+            data.parent_cache.lock().unwrap().insert(key, None);
+            None
+        }
+        // Transiënte fout (bv. rate-limit): NIET cachen → het volgende bericht probeert opnieuw.
+        Err(e) => {
+            tracing::warn!("thread_parent: kan kanaal {key} niet ophalen ({e})");
+            None
+        }
     }
 }
 
@@ -212,7 +232,7 @@ async fn handle_message(
     // Lege lijst = nergens coins (progressieve activering). Een bericht in een
     // thread telt mee als zijn PARENT-kanaal op de lijst staat (thread_parent).
     let coin_here = db::is_coin_channel(&data.pool, msg.channel_id.get())
-        || match thread_parent(ctx, msg.channel_id).await {
+        || match thread_parent(ctx, data, msg.channel_id).await {
             Some(parent) => db::is_coin_channel(&data.pool, parent),
             None => false,
         };
@@ -1889,7 +1909,7 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
                     );
                 }
 
-                Ok(Data { pool, cfg, chest })
+                Ok(Data { pool, cfg, chest, parent_cache: Arc::new(Mutex::new(HashMap::new())) })
             })
         })
         .build();
