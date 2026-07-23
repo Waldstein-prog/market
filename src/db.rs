@@ -2094,6 +2094,24 @@ pub fn last_unresolved_chest(pool: &DbPool) -> Option<u64> {
     .and_then(|s| s.parse::<u64>().ok())
 }
 
+/// Het kanaal waarin een (verweesde) chest oorspronkelijk verscheen, opgediept uit
+/// het logboek: elk chest-event (spawn/join/…) draagt het `channel_id`. Nodig sinds
+/// chests in meerdere kanalen spawnen — `chestrescue` moet de uitslag in het júiste
+/// kanaal posten, niet blind in #general. `None` als er geen chest-log met kanaal is.
+pub fn chest_channel_from_log(pool: &DbPool, msg_id: u64) -> Option<u64> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT channel_id FROM server_log
+          WHERE category = 'chest' AND ref_id = ?1 AND channel_id <> ''
+          ORDER BY id ASC LIMIT 1",
+        params![msg_id.to_string()],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .expect("query chest_channel_from_log")
+    .and_then(|s| s.parse::<u64>().ok())
+}
+
 /// Bezit dit lid een permanente booster (Lucky Horseshoe)? Zo ja → altijd dubbele
 /// chest-kans. Eigendom = één rij in `inventory` voor een 'booster'-item (koop 1×).
 pub fn owns_horseshoe(pool: &DbPool, uid: &str) -> bool {

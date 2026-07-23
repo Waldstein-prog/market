@@ -20,7 +20,7 @@ use crate::settings;
 // en worden LIVE uit de DB gelezen. Zie `settings.rs` voor de sleutels + defaults.
 const DEV_FEEDBACK: bool = false; // cooldown-terugkoppeling per bericht (dev-only; laat uit → geen ⏳-spam in #general)
 const COIN_FEEDBACK: bool = false; // toon de speler in #general zijn coin-award ("+N coins! Total: X")
-const COIN_CHANNEL_ID: u64 = 1229046340793663488; // #general: enkel hier coins per bericht (0 = overal). De chest-detectie volgt ditzelfde kanaal.
+const COIN_CHANNEL_ID: u64 = 1229046340793663488; // dev-#general (WaldsteinDevZone): enkel gebruikt door de CHEST_SPAWN_ON_START-testpad. Prod-coins/chests volgen de `coin_channels`-tabel.
 const FORTUNA_LOG_CHANNEL_ID: u64 = 1526181603624226938; // Magic Meadow #fortuna-log: elke coin-verdienste (0 = uit)
 const MEADOWMARKET_LOG_CHANNEL_ID: u64 = 0; // saldo-log uit op prod (fortuna-log dekt de verdiensten)
 const PROD_COINS_CHANNEL_ID: u64 = 1403044480218824794; // Magic Meadow 🪙meadowcoins (shout-out + level-up + weekly)
@@ -61,7 +61,7 @@ const SITE_ACCESS_CUSTOM_ID: &str = "site_access"; // "site"-knop → under-cons
 // hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
 // chest_pop_delay_min later popt hij en wint één random klikker de getrokken prijs.
 // Die vijf staan in Settings; wat hier overblijft is niet-economisch.
-const CHEST_SPAWN_CHANNEL_ID: u64 = 1296469405651435594; // natuurlijke chests spawnen ENKEL hier (Magic Meadow #general)
+const CHEST_SPAWN_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow #general — nu enkel nog de terugval voor `chestrescue` als het logboek het originele kanaal niet kent. Natuurlijke chests volgen de coin-kanalen (zie maybe_spawn_chest).
 const CHEST_TICK_SECS: u64 = 2; // interval waarmee de M:SS-timer in de embed wordt bijgewerkt (vloeiender)
 const CHEST_SPAWN_ON_START: bool = false; // (was test) — nu vervangen door het !chest dev-commando
 const CHEST_CUSTOM_ID: &str = "chest_open"; // knop custom_id
@@ -777,7 +777,6 @@ async fn admin_only(ctx: Context<'_>) -> Result<bool, Error> {
 pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Error> {
     let pool = &ctx.data().pool;
     let http = ctx.serenity_context().http.clone();
-    let channel = serenity::ChannelId::new(CHEST_SPAWN_CHANNEL_ID);
 
     // Zonder message-id: de laatste verweesde chest automatisch opzoeken.
     let msg_id = match msg_id.or_else(|| db::last_unresolved_chest(pool)) {
@@ -787,6 +786,11 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
             return Ok(());
         }
     };
+    // Het kanaal waar de chest écht stond (chests spawnen nu in álle coin-kanalen).
+    // Terugval op #general enkel als het logboek geen kanaal kent (oude chest).
+    let channel = serenity::ChannelId::new(
+        db::chest_channel_from_log(pool, msg_id).unwrap_or(CHEST_SPAWN_CHANNEL_ID),
+    );
 
     let joiners = db::chest_joiners_from_log(pool, msg_id);
     let joiner_names = joiners.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
@@ -1249,8 +1253,18 @@ async fn maybe_spawn_chest(
     if !settings::bool_of(&data.pool, "chest_enabled") {
         return Ok(());
     }
-    // Natuurlijke chests spawnen ENKEL in het aangewezen kanaal (Magic Meadow #general).
-    if msg.channel_id.get() != CHEST_SPAWN_CHANNEL_ID {
+    // Natuurlijke chests spawnen in de coin-kanalen (en hun threads) — exact dezelfde
+    // admin-beheerde lijst die coins uitkeert (`coin_channels`). Meadowland (de in-game
+    // chat-bridge) staat niet op die lijst en krijgt dus géén chests. Een bericht in een
+    // thread telt mee als zijn PARENT-kanaal een coin-kanaal is; de chest verschijnt dan
+    // ín die thread (het venster keyt op de thread-id). Deze check is vandaag redundant
+    // met de coin-gate in `handle_message`, maar houdt `maybe_spawn_chest` zelfstandig.
+    let chest_here = db::is_coin_channel(&data.pool, msg.channel_id.get())
+        || match thread_parent(ctx, data, msg.channel_id).await {
+            Some(parent) => db::is_coin_channel(&data.pool, parent),
+            None => false,
+        };
+    if !chest_here {
         return Ok(());
     }
     let now = now_secs();
