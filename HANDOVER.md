@@ -1,4 +1,40 @@
-# Handover — Meadow Market (2026-07-21)
+# Handover — Meadow Market (2026-07-23)
+
+## ⏭️ Sessie (2026-07-23) — Treasure chests spawnen nu in ÁLLE coin-kanalen + threads (niet meadowland)
+
+**LIVE + gepusht + gedeployd** (`9546d2f`, subtree → `market-gh` `1d15d6a..8de1090`). Chests
+verschenen tot nu enkel in **#general**; nu in **elk van de 16 coin-kanalen + hun threads**.
+De **in-game chat-bridge (meadowland)** blijft chest-vrij.
+
+### Wat & waarom
+- **Kern** (`bot.rs` `maybe_spawn_chest`): de hardcoded gate `msg.channel_id != CHEST_SPAWN_CHANNEL_ID`
+  (= #general) is vervangen door **dezelfde coin-kanaal-check die coins gebruikt** —
+  `db::is_coin_channel(...)` + `thread_parent(...)` voor threads. Meadowland staat **niet** op de
+  `coin_channels`-lijst (op prod geverifieerd: 16 kanalen, geen meadowland) → automatisch uitgesloten,
+  géén expliciete blacklist nodig. Keuze bewust **"chests = coin-kanalen"** (één lijst beheren).
+- **Waarom bijna gratis**: de `ChestTracker`-boekhouding (`recent`/`active`/`cooldown_until`/`chests`)
+  was **al per-kanaal** (HashMap op channel_id). En `maybe_spawn_chest` werd sowieso enkel bereikt ná
+  de coin-gate in `handle_message`. De nieuwe check binnen `maybe_spawn_chest` is dus vandaag redundant,
+  maar houdt de functie **zelfstandig** (goedkope indexed query + gememoïseerde thread_parent).
+- **Threads**: een thread-bericht keyt op de **thread-id** → de chest verschijnt **ín de thread**.
+  Verwacht daar weinig chests (de `chest_distinct_users`-drempel wordt zelden gehaald in een stille thread).
+
+### Bonus-fix: `chestrescue` postte in het verkeerde kanaal
+`!chestrescue` (admin: verweesde chest heropenen) gebruikte hardcoded **#general** voor de uitslag,
+de cooldown én het opruimen van het dode chest-bericht. Met multi-kanaal was dat fout geworden. Nieuw:
+`db::chest_channel_from_log(msg_id)` diept het **originele kanaal** op uit `server_log` (elk chest-event
+draagt `channel_id`); #general enkel nog als **terugval** als het logboek niks kent.
+- `CHEST_SPAWN_CHANNEL_ID` blijft bestaan als die terugval; `COIN_CHANNEL_ID` (dev) enkel nog voor het
+  dode `CHEST_SPAWN_ON_START`-testpad. Comments bijgewerkt.
+
+### ⚠️ Op te volgen nu het live is
+- **Economie**: 1 → 16 kanalen = veel meer spawn-oppervlak → meer uitbetaling. Hou #coins/logs in het oog.
+  Bijsturen kan **zonder deploy** via Manage → ⚙ Settings: `chest_distinct_users`, `chest_window_min`,
+  `chest_channel_cooldown_min`, of `chest_prize`.
+- **De 5 onzichtbare coin-kanalen** (zie sessie 2026-07-21b): daar komen **geen chests** tot de bot
+  `View Channel`/`Send` krijgt — zelfde Discord-rechtenkwestie, nog steeds open.
+
+---
 
 ## ⏭️ Sessie (2026-07-21b) — BUG opgelost: threads leverden geen coins op (retro-payout AFGEBLAZEN)
 
