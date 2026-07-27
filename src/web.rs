@@ -464,8 +464,14 @@ details.acc .mc{{height:1.1em;vertical-align:-.2em}}
 .bar{{flex:1;height:14px;background:#0e1510;border:1px solid #2c3d2a;border-radius:999px;overflow:hidden}}
 .fill{{height:100%;background:linear-gradient(90deg,#3f6a2c,{MEADOW});border-radius:999px;transition:width .4s}}
 .lvlnm{{font-variant-numeric:tabular-nums;font-weight:700;color:#cfe0c8;font-size:.85rem;white-space:nowrap}}
-.content{{flex:1;display:grid;justify-items:center;align-items:start;
-  row-gap:1.1rem;padding:1.2rem 1rem}}
+/* `minmax(0,1fr)` i.p.v. de impliciete auto-kolom: een auto-track wordt op max-content
+   gesorteerd, en een `.shelf` met vaste kaartbreedtes heeft een max-content van honderden
+   pixels. Daardoor werd de kolom — en dus de kaart — bréder dan het scherm en schoof de hele
+   pagina zijwaarts (op een telefoon: alles afgesneden). Met een 0-minimum mag de track niet
+   meer groeien dan de container en scrollt de strook netjes binnen zichzelf. Op desktop is
+   dit identiek: de track vulde daar toch al de volle breedte. */
+.content{{flex:1;display:grid;grid-template-columns:minmax(0,1fr);
+  justify-items:center;align-items:start;row-gap:1.1rem;padding:1.2rem 1rem}}
 .card{{background:#182319;border:1px solid #2c3d2a;border-radius:18px;
   padding:2rem 2.25rem;max-width:28rem;width:calc(100% - 2rem);
   box-shadow:0 10px 30px rgba(0,0,0,.35)}}
@@ -782,6 +788,55 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .lb .amt{{font-weight:700;color:{MEADOW};font-variant-numeric:tabular-nums;
   text-align:right;min-width:5.5rem}}
 .lb li.me{{background:#16211590;border-radius:10px}}
+/* --- Telefoon (≤640px) -------------------------------------------------------
+   Bewust één additief blok onderaan: alles hierboven is de desktop-waarheid en
+   blijft ongemoeid. Wat op een telefoon écht stukging waren drie dingen:
+   (1) padding-op-padding — .content 1rem + .card 2.25rem at te veel van een
+       360px-scherm op, zodat er ~220px inhoud overbleef;
+   (2) de brede tabellen (accounts/coins/log/weging) duwden de héle pagina
+       zijwaarts, waardoor je moest slepen om de nav terug te vinden;
+   (3) de Settings-velden: een label van vaste 13rem + hulptekst op 13,7rem
+       marge past simpelweg niet naast een invoerveld op die breedte. */
+@media (max-width:640px){{
+  /* `align-content:start` — de grid-rijen rekten mee met de volle schermhoogte, wat op een
+     telefoon een lege kloof van ~150px tussen de nav-kaart en de inhoud gaf. */
+  .content{{padding:.7rem .45rem;row-gap:.8rem;align-content:start}}
+  .card{{padding:1.15rem 1rem;width:100%;border-radius:14px}}
+  .card.wide{{max-width:100%}}
+  .navcard{{padding:.8rem .9rem}}
+  .topbar{{padding:.55rem .8rem;gap:.5rem}}
+  .brand{{font-size:1rem}}
+  .tb-logout{{font-size:.82rem;padding:.3rem .65rem}}
+  .nav a{{font-size:.85rem;padding:.45rem .55rem}}
+  .subtab{{font-size:.85rem;padding:.35rem .6rem}}
+  .bigname{{font-size:1.5rem}}
+  .earned{{font-size:2.1rem}}
+  .coins{{font-size:2rem}}
+  h1{{font-size:1.2rem}}
+  /* Tabellen krijgen hun eigen zijwaartse schuifruimte i.p.v. de pagina te rekken. */
+  .ctable,.wtable,table.log{{display:block;width:100%;overflow-x:auto;
+    -webkit-overflow-scrolling:touch}}
+  .ctable th,.ctable td,table.log th,table.log td{{white-space:nowrap}}
+  .ctable td .coinform{{flex-wrap:nowrap}}
+  .coinform input[type=number]{{width:72px}}
+  /* Settings: label, veld en hulptekst onder elkaar i.p.v. in één rij geperst. */
+  .sfield label{{flex:1 1 100%}}
+  .sfield .shelp{{margin-left:0}}
+  /* Iets smallere kaartjes → er past een tweede naast in de schuifstrip. */
+  .shelf .slot{{width:150px}}
+  .shelf.shop .slot{{width:172px}}
+  .aitem{{width:100%}}
+  .purse-box{{font-size:1.2rem;padding:.35rem .85rem}}
+  .lb .amt{{min-width:4.2rem}}
+  .lb li{{padding:.5rem .15rem;gap:.45rem}}
+  .passbtn{{width:108px}}
+  .passtime{{font-size:1.6rem}}
+  /* Een <input> heeft een intrinsieke minimumbreedte (~20 tekens); zonder `min-width:0`
+     weigert hij te krimpen en duwt hij de rij (input + Rename + Delete) buiten beeld. */
+  .addbar{{max-width:100%;flex-wrap:wrap}}
+  .addbar input,.ashelf-head input[name=title]{{min-width:0}}
+  .ashelf-head .rn{{flex:1 1 100%}}
+}}
 </style></head><body><header class="topbar"><span class="brand">🌼 Meadow Market</span>{logout}</header>
 {content}{poller}</body></html>"#,
         content = if nav.is_empty() {

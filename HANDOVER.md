@@ -1,4 +1,87 @@
-# Handover — Meadow Market (2026-07-23)
+# Handover — Meadow Market (2026-07-27)
+
+## ⏭️ Sessie (2026-07-27) — Level-up in het juiste kanaal + tag die écht pingt + site mobile-proof
+
+**LIVE + gedeployd.** Twee user-vragen, twee bestanden (`bot.rs`, `web.rs`).
+
+### 1. Level-up-embed verhuist naar het kanaal van de uitlokker
+Het embed ging altijd naar prod #coins, ook al levelde je door te typen in een ander kanaal —
+het feestje stond dus los van het gesprek. `maybe_levelup` kreeg een **`channel`-parameter**;
+alle **6 aanroepplekken** geven nu het kanaal mee dat de level-up uitlokte:
+- chat-award → `msg.channel_id` (**de eigenlijke vraag**) · daily → `mc.channel_id` ·
+  gift-claim → `mc.channel_id` · chest-open → `channel_id` · chestrescue → `channel` ·
+  weekly-claim → `mc.channel_id`.
+- `PROD_COINS_CHANNEL_ID` blijft **enkel als terugval** (channel-id 0).
+
+### 2. De tag pingte niet — nu wel
+`<@uid>` **binnen** een embed rendert wel als naam maar **Discord stuurt er geen melding voor**.
+Dát was "de tag werkt niet". Opgelost door de mention óók als **gewone berichttekst vlak boven
+het embed** te zetten (`.content(format!("<@{uid}>"))`). De tag in de embed-beschrijving blijft
+staan (cosmetisch); de ping komt van de content-regel.
+
+### 3. Site was niet bruikbaar op een telefoon — echte oorzaak was layout, geen padding
+- **Kern (`.content`)**: het is een grid met een **impliciete auto-kolom**. Een auto-track wordt
+  op **max-content** gesorteerd, en `.shelf` (shop-strook, vaste kaartbreedtes van 170–210px)
+  heeft een max-content van honderden pixels → de kolom werd **751px** breed, dus élke kaart werd
+  breder dan het scherm en de héle pagina schoof zijwaarts. Gefixt met
+  **`grid-template-columns:minmax(0,1fr)`**. Op desktop **identiek** (de track vulde daar toch al
+  de volle breedte); op smal scherm mag hij niet meer groeien en scrollt de strook binnen zichzelf.
+- **Additief `@media (max-width:640px)`-blok** onderaan de CSS (alles erboven = desktop-waarheid,
+  ongemoeid): kleinere padding/koppen; **tabellen** (accounts · coins · log · weging) krijgen
+  `display:block;overflow-x:auto` zodat ze binnen zichzelf schuiven i.p.v. de pagina te rekken;
+  **Settings-velden stapelen** (label was `flex:0 0 13rem` + hulptekst op 13,7rem marge — past
+  niet); `.addbar`-input krijgt `min-width:0` (een `<input>` weigert anders onder ~20 tekens te
+  krimpen en duwde de rij buiten beeld); `align-content:start` haalt een **lege kloof van ~150px**
+  tussen nav-kaart en inhoud weg (de grid-rijen rekten mee met de schermhoogte).
+
+**Geverifieerd** met headless Chrome op 390px over **8 pagina's** (inventory, shop, leaderboard,
+admin coins/settings/shop/log/accounts): overal `scrollWidth == viewport`, geen pagina-overflow.
+Desktop op 1280px nagekeken → ongewijzigd. *(Caveat: headless Chrome doet geen echte mobiele
+viewport-emulatie — het rendert als een smal desktopvenster. Test op een échte telefoon blijft
+de doorslag.)*
+
+### ⚠️ Valkuil voor de volgende sessie
+**NIET `cargo fmt` draaien op dit project.** Het is niet rustfmt-conform: één `cargo fmt`
+herschreef 7 bestanden / ~1200 regels die niets met de wijziging te maken hadden. In deze sessie
+teruggedraaid (`git checkout -- src/`) en handmatig opnieuw gedaan.
+
+---
+
+## ⏭️ Sessie (2026-07-24) — Streak-reset uitgelegd + streak-venster 30→47u + Waldstein-streak hersteld
+
+**Config-fix, GEEN code/deploy.** User-melding: "gisteren streak 3, vandaag opnieuw ingecheckt en
+mijn streak staat weer op nul." Diagnose op prod → **geen bug, wél een ontwerpprobleem** in het
+streak-model. Opgelost door het **streak-venster te verruimen** (via panel/Settings) en de verloren
+streak handmatig te herstellen.
+
+### De diagnose (geen kapotte code)
+De streak telt **rollende uren tussen twee klikken**, geen kalenderdagen. Prod-instellingen:
+`daily_cooldown_hours = 20`, `daily_streak_window_hours = 30`. Klik je opnieuw **binnen** het venster
+→ streak +1; erbuiten → reset naar 1 (`bot.rs:454-462`, logica correct).
+- **Wat er gebeurde bij Waldstein**: check-in **07-23 00:51** (streak 3, heel vroeg) → volgende
+  check-in **07-24 14:00** (namiddag) = **37 u ertussen** > venster 30 u → reset naar 1.
+- **Waarom het als een bug voelt**: 20 u cooldown + 30 u venster = maar **~10 u geldig venster per
+  dag**, dat bovendien **verschuift** met het klik-uur. Vroeg de ene dag + laat de volgende → je
+  schiet er onbewust overheen. Voor de speler waren het twee opeenvolgende kalenderdagen, dus
+  verwachting = streak loopt door. Uren-model ≠ kalenderdag-verwachting.
+
+### De fix (LIVE)
+- **`daily_streak_window_hours` 30 → 47** in de prod-DB (`/opt/market/coins.db`, `settings`-tabel).
+  User zette het via het panel (eerste poging: waarde ingevuld maar **niet opgeslagen** → prod bleef
+  30; tweede poging opgeslagen → geverifieerd op **47**). **Geen deploy/herstart nodig**: de code
+  leest de setting vers per check-in (`settings::f64_of`). Nieuw geldig venster ≈ 27 u/dag → drift
+  wordt opgevangen, een échte gemiste dag (>47 u) reset nog steeds.
+- **Waldstein-streak hersteld** `1 → 3` (`UPDATE coins SET daily_streak=3 WHERE username='Waldstein'`,
+  uid `391337551543271433`). Puur de teller; `last_daily` ongemoeid.
+
+### ⚠️ Openstaand / ter overweging (niet gedaan deze sessie)
+- **Nette fix = kalenderdag-model** i.p.v. rollende uren (streak = opeenvolgende kalenderdagen met
+  een check-in). Lost de drift structureel op, matcht de speler-verwachting. Vereist een codewijziging
+  in `bot.rs` (`daily`-handler) + deploy. **Bewust NIET gedaan** — user koos de snelle config-fix (47u).
+  Als de klachten terugkomen, is dit de volgende stap.
+- Streak-teller-herstel voor andere spelers: niet gevraagd, niet gedaan (enkel Waldstein).
+
+---
 
 ## ⏭️ Sessie (2026-07-23) — Treasure chests spawnen nu in ÁLLE coin-kanalen + threads (niet meadowland)
 

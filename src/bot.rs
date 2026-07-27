@@ -266,7 +266,7 @@ async fn handle_message(
         // gelogd als elke andere: stilte las als een bug, niet als pech.
         log_earn(&ctx.http, &name, amount, total).await;
         // Level-up? → embed met claim-knop in #coins (gecentraliseerd, zie maybe_levelup).
-        maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
+        maybe_levelup(&ctx.http, &data.pool, &uid, &name, msg.channel_id).await;
         if COIN_FEEDBACK {
             msg.reply(ctx, format!("{COIN_EMOJI} +{amount} coins! Total: **{total}**"))
                 .await?;
@@ -487,7 +487,7 @@ async fn handle_daily(
     let day_word = if streak == 1 { "day" } else { "days" };
     tracing::info!("daily: {name} +{amount} (streak {streak}, totaal {total})");
     // Daily kan je over een levelgrens tillen → level-up-check.
-    maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
+    maybe_levelup(&ctx.http, &data.pool, &uid, &name, mc.channel_id).await;
     // Logboek: dagelijkse check-in (bedrag + streak) — zodat coin-instroom te volgen is.
     db::log_event(
         &data.pool,
@@ -570,7 +570,17 @@ fn claim_button_row(custom_id: String) -> serenity::CreateActionRow {
 /// zodra het lid weer coins verdient. Cadeau = 1,5% van het huidige saldo, half naar boven.
 /// De claim boekt de coins als échte verdienste (`total_earned` + `earn_log`):
 /// álle coins tellen mee voor de level-up, ongeacht bron. Geen op-hol-slaan: 1,5% < een levelgat.
-async fn maybe_levelup(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, name: &str) {
+///
+/// `channel` = wáár het embed komt: het kanaal dat de level-up uitlokte (het bericht dat de coins
+/// opleverde, de chest, de daily-knop). Vroeger ging alles naar #coins; dat haalde het feestje weg
+/// bij het gesprek waar het lid mee bezig was. Terugval op #coins als er geen kanaal is.
+async fn maybe_levelup(
+    http: &Arc<serenity::Http>,
+    pool: &DbPool,
+    uid: &str,
+    name: &str,
+    channel: serenity::ChannelId,
+) {
     let (coins, _max, _pub, earned) = db::get_stats(pool, uid);
     let cur = db::level_of(earned);
     // Claim de range [prev+1, cur] atomisch (compare-and-swap op de marker). Een gelijktijdige
@@ -591,13 +601,21 @@ async fn maybe_levelup(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, nam
                 .amount(amount)
                 .detail(format!("reached level {level}")),
         );
-        if PROD_COINS_CHANNEL_ID != 0 {
+        // Kanaal van de uitlokker; enkel als dat ontbreekt vallen we terug op #coins.
+        let target = if channel.get() != 0 {
+            channel
+        } else {
+            serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+        };
+        if target.get() != 0 {
+            // De `<@uid>` ín het embed rendert wel als naam maar pingt niet — Discord stuurt geen
+            // melding voor een mention in een embed. Daarom de mention óók als gewone berichttekst
+            // vlak boven het embed: dát is wat het lid effectief een seintje geeft.
             let builder = serenity::CreateMessage::new()
+                .content(format!("<@{uid}>"))
                 .embed(levelup_embed(uid, level))
                 .components(vec![claim_button_row(format!("lg:{gid}"))]);
-            let _ = serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
-                .send_message(http, builder)
-                .await;
+            let _ = target.send_message(http, builder).await;
         }
     }
     // Marker is al vooraf gezet door advance_gifted_level (atomische claim) — niets meer te doen.
@@ -663,7 +681,7 @@ async fn handle_level_claim(
             );
             // De gift telt nu mee voor total_earned → in het zeldzame randgeval dat ze een
             // volgend level ontgrendelt, pikt dit dat meteen op (zelfhelend, bounded).
-            maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
+            maybe_levelup(&ctx.http, &data.pool, &uid, &name, mc.channel_id).await;
         }
         db::GiftClaim::AlreadyClaimed => {
             respond_ephemeral(ctx, mc, "You already claimed this reward. 🎁").await?
@@ -821,7 +839,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
     let prize = chest_prize(pool);
     let total = db::award(pool, winner_uid, winner_name, prize, now_secs());
     log_earn(http.as_ref(), winner_name, prize, total).await;
-    maybe_levelup(&http, pool, winner_uid, winner_name).await;
+    maybe_levelup(&http, pool, winner_uid, winner_name, channel).await;
     tracing::info!(
         "chest RESCUE geopend ({msg_id}): {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
         joiners.len()
@@ -1518,7 +1536,7 @@ async fn pop_chest(
     let total = db::award(&pool, winner_uid, winner_name, prize, now_secs());
     log_earn(http.as_ref(), winner_name, prize, total).await;
     // Chest-winst kan je over een levelgrens tillen → level-up-check.
-    maybe_levelup(&http, &pool, winner_uid, winner_name).await;
+    maybe_levelup(&http, &pool, winner_uid, winner_name, channel_id).await;
     let opener_word = if joiners.len() == 1 { "opener" } else { "openers" };
     tracing::info!(
         "chest geopend: {winner_name} wint {prize} coin(s) uit {} deelnemer(s)",
@@ -1819,7 +1837,7 @@ async fn handle_weekly_claim(
                 .amount(amount)
                 .detail("weekly leaderboard reward".to_string()),
         );
-        maybe_levelup(&ctx.http, &data.pool, &uid, &name).await;
+        maybe_levelup(&ctx.http, &data.pool, &uid, &name, mc.channel_id).await;
     } else if owns_but_claimed {
         // Winnaar die al claimde → stil acken, geen bericht.
         let _ = mc
