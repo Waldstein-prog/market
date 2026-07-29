@@ -1,5 +1,68 @@
 # Handover — Meadow Market (2026-07-29)
 
+## ⏭️ Sessie (2026-07-29b) — Twee mobiele bugs: strook sprong terug naar links + naamkleur week af
+
+**LIVE + gedeployd.** Twee user-meldingen, allebei enkel op een telefoon zichtbaar, allebei in
+`web.rs`. De kleurmechaniek zelf is **niet** aangeraakt (uitdrukkelijke user-instructie).
+
+### 1. Schuif je een strook naar rechts, dan sprong ze vanzelf terug naar links
+Oorzaak: `auto_refresh_js` herlaadt de hele pagina periodiek — op de **Shop elke 5s**
+(`AUTO_REFRESH_SHOP_MS`), op admin Coins/Log/Channels elke 20s. Een browser herstelt bij een
+reload wél de scrollpositie van het *venster*, maar **nooit** die van een element met eigen
+`overflow-x`. En sinds de mobile-fix van 07-27 schuiven precies de shop-strook (`.shelf`) en de
+brede tabellen (`.ctable`/`.wtable`/`table.log`) binnen zichzelf. Dus: naar rechts schuiven →
+enkele tellen later stond je weer links. Op desktop viel het amper op omdat de hele strook daar
+meestal past.
+
+Twee maatregelen in `auto_refresh_js`, samen:
+1. **Niet herladen terwijl je bezig bent** — `scroll`/`touchstart`/`touchmove`/`pointerdown`/
+   `wheel`/`keydown` (capture, passive) zetten een teller terug; pas na **8s rust** mag er
+   herladen worden. De bestaande "niet herladen terwijl je in een veld typt"-gate blijft.
+2. **Zijwaartse posities overleven de reload** — vlak vóór het herladen gaan alle `scrollLeft`-
+   waarden in `sessionStorage` (sleutel `mmX:<pad>`, volgorde = DOM-volgorde), na de load worden
+   ze teruggezet en meteen gewist (geen stale positie bij een verse navigatie).
+
+De verversing zelf blijft dus intact (een admin ziet voorraad landen), ze wacht enkel haar beurt
+af. Nieuwe test `web::auto_refresh_script` bewaakt de `format!`-escaping van het script (accolade-
+balans + de markers); de gegenereerde JS is los met `node --check` gevalideerd. **27/27 groen.**
+
+### 2. De naamkleur-preview week op mobiel af van de gekozen gem
+User: je kiest een gem (bv. een rood), die gem hoort bij een Discord-rol met een kleur — op
+desktop toont het previewveld exact die kleur, **op mobiel een andere tint**. Zelfde HTML, zelfde
+hex, zelfde CSS: de afwijking komt dus van de telefoonbrowser zelf.
+
+Diagnose: `:root` stond op **`color-scheme:light dark`**, terwijl de site één vast donker ontwerp
+is en helemaal geen lichte variant heeft. Daarmee vertelt de pagina de browser "ik kan beide aan".
+Staat de telefoon in lichte modus, dan is het *gebruikte* schema licht → een force-dark-modus
+(Chrome's **Auto Dark Theme**, Samsung Internet's donkere modus) beschouwt de pagina als een
+lichte pagina en hertint ze zelf. Zo'n algoritme herrekent precies **tekstkleuren** → de naam in
+de preview kreeg een andere tint dan de rol-hex, terwijl de rest ongeveer goed bleef.
+
+Fix (drie regels, géén wijziging aan de kleurmechaniek):
+- `<meta name="color-scheme" content="dark">` in de `<head>` (wordt gelezen vóór de CSS geparsed
+  is, en door sommige mobiele browsers als enige).
+- `:root{color-scheme:only dark}` — `only` is de gestandaardiseerde manier om te zeggen: deze
+  pagina is al donker, geen UA-override.
+- `.swatch.light{…;color-scheme:only light}` — dat vakje is met opzet wit (het toont hoe je naam
+  op Discord's lichte thema oogt), dus ook dáár mag force-dark niet ingrijpen; anders klopt de
+  vergelijking dark/light niet meer.
+
+**Verificatie:** de Gems-tab op 390px gerenderd met een echte sessie tegen de lokale server,
+vóór en na → **pixel-identiek** (zelfde md5), dus aan de al goede weergave verandert niets.
+⚠️ Het mobiele effect zélf is **niet lokaal te bewijzen**: headless Chrome op Linux kent
+force-dark niet (met `--force-dark-mode` én `--enable-features=WebContentsForceDark` bleef de
+render byte-identiek). Bevestiging moet van een echte telefoon komen. Helpt het niet, dan is de
+volgende verdachte geen browser-force-dark maar een **OS-kleurfilter/inversie** op het toestel.
+
+### 🔎 Wat onderweg geverifieerd is (en dus géén oorzaak was)
+De gem-kleuren komen wél degelijk correct uit Discord: bij élke start logt de app
+`gem-kleuren gesynct: 12 items (19 rollen, guild 1296469405651435592)` — **12 van 12** gems
+matchten een gelijknamige rol, dus geen enkele gem viel terug op een oude seed-kleur. De hexen in
+`items.color` op prod zijn letterlijk wat de Discord-API teruggaf, en de `.swatch`-CSS zet die hex
+ongewijzigd op de tekst (geen `opacity`/`filter`/`text-shadow`). De sync-kant is dus gezond.
+
+---
+
 ## ⏭️ Sessie (2026-07-29) — Level-up-embed enkel in coin-kanalen (correctie op 07-27)
 
 **LIVE + gepusht + gedeployd** (`1192c0d`; subtree `market-gh` → `74dd720`).

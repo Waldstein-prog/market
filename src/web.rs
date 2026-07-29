@@ -66,10 +66,39 @@ const DEV_COINS_CHANNEL_ID: &str = "1525189157104648343";
 // Auto-refresh voor admin-pagina's: herlaad elke 20s, tenzij je in een veld typt/kiest.
 /// Herlaadt de pagina periodiek, maar **niet** terwijl je in een veld staat — anders
 /// verdwijnt een half ingetypte waarde onder je handen. Scrollpositie: zie KEEP_SCROLL_JS.
+///
+/// ⚠️ **Mobiel-valkuil (user-melding 2026-07-29):** een browser herstelt bij een reload wél
+/// de scrollpositie van het venster, maar **nooit** die van een element met z'n eigen
+/// `overflow-x` — en sinds de mobile-fix van 07-27 schuiven de shop-strook (`.shelf`) en de
+/// brede tabellen (`.ctable`/`.wtable`/`table.log`) binnen zichzelf. Op een telefoon schoof je
+/// dus een strook naar rechts en sprong ze een paar tellen later vanzelf terug naar links
+/// (op de Shop elke 5s!). Twee maatregelen, samen:
+///   1. **Niet herladen terwijl je bezig bent** — elke aanraking/scroll/toetsaanslag zet de
+///      teller terug; pas na `IDLE_MS` rust mag er herladen worden.
+///   2. **Zijwaartse posities overleven de reload** — vlak vóór het herladen worden alle
+///      `scrollLeft`-waarden in sessionStorage gezet en na de load teruggezet.
+/// De verversing zelf blijft dus intact (admin ziet voorraad landen), ze wacht enkel netjes
+/// haar beurt af.
 fn auto_refresh_js(ms: u32) -> String {
+    // Rustperiode vóór een herlaadbeurt. Ruim genoeg om een strook door te bladeren of een
+    // tabel te lezen, kort genoeg dat een neergelegde telefoon toch bijwerkt.
+    const IDLE_MS: u32 = 8_000;
+    // Elk element dat binnen zichzelf zijwaarts schuift; volgorde in de DOM = de sleutel.
+    const BOXES: &str = ".shelf,.ctable,.wtable,table.log";
     format!(
-        "<script>setInterval(function(){{var a=document.activeElement;\
-           if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'))return;location.reload();}},{ms});</script>"
+        "<script>(function(){{\
+var K='mmX:'+location.pathname,last=Date.now();\
+function boxes(){{return document.querySelectorAll('{BOXES}');}}\
+try{{var s=JSON.parse(sessionStorage.getItem(K)||'[]');sessionStorage.removeItem(K);\
+boxes().forEach(function(b,i){{if(s[i])b.scrollLeft=s[i];}});}}catch(e){{}}\
+function save(){{try{{var a=[];boxes().forEach(function(b){{a.push(b.scrollLeft);}});\
+sessionStorage.setItem(K,JSON.stringify(a));}}catch(e){{}}}}\
+['scroll','touchstart','touchmove','pointerdown','wheel','keydown'].forEach(function(ev){{\
+document.addEventListener(ev,function(){{last=Date.now();}},{{capture:true,passive:true}});}});\
+setInterval(function(){{var a=document.activeElement;\
+if(a&&(a.tagName==='INPUT'||a.tagName==='SELECT'))return;\
+if(Date.now()-last<{IDLE_MS})return;\
+save();location.reload();}},{ms});}})();</script>"
     )
 }
 /// Log/Coins/Channels: daar zit je te lézen, een herlaadflits om de paar seconden helpt niemand.
@@ -418,8 +447,19 @@ fn shell(title: &str, nav: &str, wide: bool, body: &str) -> String {
     format!(
         r#"<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>{title}</title><style>
-:root{{color-scheme:light dark}}
+/* ⚠️ **`only dark`, niet `light dark`** (user-melding 2026-07-29: de naamkleur-preview week
+   op mobiel af van de gekozen gem-kleur, op desktop klopte ze).
+   De site is één vast donker ontwerp — ze hééft geen lichte variant. Zolang hier
+   `light dark` stond, vertelde de pagina de browser "ik kan beide aan", en dan voelt een
+   telefoonbrowser (Chrome's Auto Dark Theme, Samsung Internet's donkere modus) zich vrij om
+   de pagina zélf te hertinten. Zo'n force-dark-algoritme herrekent precies **tekstkleuren**,
+   dus de naam in de preview kreeg een andere tint dan de hex van de gem-rol — terwijl de HTML
+   en de kleurmechaniek identiek zijn aan desktop. `only dark` is de gestandaardiseerde manier
+   om te zeggen: deze pagina is al donker, blijf ervan. De meta-tag hierboven doet hetzelfde
+   vóór de CSS geparsed is (en wordt door sommige mobiele browsers als enige gelezen). */
+:root{{color-scheme:only dark}}
 *{{box-sizing:border-box}}
 body{{margin:0;min-height:100vh;display:flex;flex-direction:column;
   font:16px/1.5 system-ui,sans-serif;background:#0e1510;color:#e8f0e4}}
@@ -624,7 +664,10 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   font-weight:700;font-size:1.25rem;border:1px solid #2c3d2a;
   font-family:'gg sans','Noto Sans','Helvetica Neue',Arial,sans-serif;transition:color .15s}}
 .swatch.dark{{background:#141414}}
-.swatch.light{{background:#ffffff}}
+/* Dit vakje is met opzet licht (het toont hoe je naam op Discord's lichte thema oogt).
+   `only light` zegt de browser dat dat bedoeld is, zodat een force-dark-modus ook hier
+   niet begint te hertinten — anders klopt de vergelijking dark/light niet meer. */
+.swatch.light{{background:#ffffff;color-scheme:only light}}
 .preview-hint{{text-align:center;font-size:.72rem;margin:-.4rem 0 .8rem}}
 .gemcard.previewable{{cursor:pointer}}
 .gemcard.previewsel{{outline:2px solid {MEADOW};outline-offset:2px}}
@@ -4516,5 +4559,38 @@ mod redirect_and_cookie {
             esc("<a href=\"x\" onclick='y'>&"),
             "&lt;a href=&quot;x&quot; onclick=&#39;y&#39;&gt;&amp;"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-refresh: het gegenereerde script moet geldige JS zijn (format!-escaping van
+// de accolades is makkelijk mis te slaan) én de twee mobiele beschermingen bevatten:
+// de rustperiode vóór een reload en het bewaren/herstellen van `scrollLeft`.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod auto_refresh_script {
+    use super::auto_refresh_js;
+
+    #[test]
+    fn bevat_idle_gate_en_scroll_behoud() {
+        let s = auto_refresh_js(5_000);
+        assert!(s.starts_with("<script>") && s.ends_with("</script>"));
+        // Interval-periode en rustperiode staan er als getal in.
+        assert!(s.contains(",5000);"), "interval-periode ontbreekt: {s}");
+        assert!(s.contains("Date.now()-last<8000"), "rustperiode ontbreekt: {s}");
+        // Zijwaartse schuifposities worden bewaard én teruggezet.
+        assert!(s.contains("scrollLeft"), "scrollLeft-behoud ontbreekt");
+        assert!(s.contains("sessionStorage.setItem(K,JSON.stringify(a))"));
+        assert!(s.contains("sessionStorage.removeItem(K)"));
+        // De reload zelf blijft bestaan.
+        assert!(s.contains("location.reload()"));
+        // Accolades/haakjes in balans (vangt een misgeslagen `{{`/`}}`-escaping op;
+        // een letterlijke `}}` is géén signaal — die komt in geldige JS gewoon voor,
+        // bv. `catch(e){}}` aan het einde van een functie).
+        let js = &s["<script>".len()..s.len() - "</script>".len()];
+        let bal = |open: char, close: char| {
+            js.chars().filter(|c| *c == open).count() == js.chars().filter(|c| *c == close).count()
+        };
+        assert!(bal('{', '}') && bal('(', ')') && bal('[', ']'), "onbalans in JS: {js}");
     }
 }
