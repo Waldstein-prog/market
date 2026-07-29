@@ -61,6 +61,39 @@ matchten een gelijknamige rol, dus geen enkele gem viel terug op een oude seed-k
 `items.color` op prod zijn letterlijk wat de Discord-API teruggaf, en de `.swatch`-CSS zet die hex
 ongewijzigd op de tekst (geen `opacity`/`filter`/`text-shadow`). De sync-kant is dus gezond.
 
+### 📌 Openstaand uit deze sessie
+1. **Bevestiging op een échte telefoon** van fix 2 (naamkleur). Hard verversen kan nodig zijn — de
+   CSS zit ingebakken in de HTML, maar de pagina zelf kan gecached zijn. Klopt de kleur nóg niet,
+   dan is het geen browser-force-dark meer maar een **kleurfilter/inversie op OS-niveau**; volgende
+   stap is dan de tint mét en zónder dat filter vergelijken vóór er nog code verandert.
+2. Fix 1 (strook) is te controleren door op de Shop een strook naar rechts te schuiven en ~10s te
+   wachten: ze mag niet meer terugspringen.
+
+### ⚠️ Werkwijze-les uit deze sessie
+De user meldde beide bugs als "**enkel op mobile**". Dat is een **scope-afbakening**: de
+onderliggende mechaniek staat dan niet ter discussie. Ik ben eerst de Discord-rolkleuren, de
+kleur-sync en de rol-hiërarchie gaan uitpluizen en stelde voor de kleurmechaniek aan te passen —
+mis, en terecht geïrriteerd afgekapt. Werkwijze die wél werkte: de **echte** pagina met een
+geldige sessie tegen een lokale server renderen op 390px én op 1280px en de twee vergelijken.
+Verdachten bij zo'n melding zijn UA-gedrag (force-dark/`color-scheme`, scrollposities die een
+reload niet overleven, touch-vs-click), niet de businesslogica.
+
+### 🧰 Recept: de site op mobiele breedte bekijken (lokaal)
+Handig, want dit kostte deze sessie het meeste uitzoekwerk:
+- `MARKET_WEB_ONLY=1 ./target/release/market` (poort 8700; kill eerst een oude `release/market`).
+- Sessie fabriceren in de lokale `coins.db`: `INSERT INTO sessions(token,user_id,username,created)`
+  **met `created = nu`** — een rij met `created=0` wordt door de sessie-TTL geweigerd (dat is
+  waarom de oude testsessies `s3`/`smoke2` op de loginpagina uitkomen).
+- Pagina ophalen met `curl -b "session=<token>"`, de relatieve `src="/…"` naar
+  `http://localhost:8700/…` herschrijven en als **bestand** wegschrijven (Chrome headless kan geen
+  cookie meesturen; via `file://` mét absolute asset-URL's klopt de render wel).
+- Screenshotten met de flatpak-Chrome: `flatpak run com.google.Chrome --headless --disable-gpu
+  --no-sandbox --hide-scrollbars --window-size=390,1400 --screenshot=… file://…`.
+  **Valkuil:** de flatpak-sandbox mag enkel in `~/Downloads` schrijven — een pad in `/tmp` of
+  `~/.cache` geeft "Failed to write file: No such file or directory".
+- **Force-dark is zo niet te reproduceren** (Android-only), dus mobiele kleurafwijkingen blijven
+  een test op het toestel zelf.
+
 ---
 
 ## ⏭️ Sessie (2026-07-29) — Level-up-embed enkel in coin-kanalen (correctie op 07-27)
