@@ -1,4 +1,32 @@
-# Handover — Meadow Market (2026-07-27)
+# Handover — Meadow Market (2026-07-29)
+
+## ⏭️ Sessie (2026-07-29) — Level-up-embed enkel in coin-kanalen (correctie op 07-27)
+
+**LIVE + gepusht + gedeployd** (`1192c0d`; subtree `market-gh` → `74dd720`).
+
+User-melding: level-up-berichten verschenen **in het marktkanaal** en dat is niet gewenst.
+Oorzaak = de verhuizing van 07-27: het embed ging naar het kanaal van de uitlokker, maar een
+level-up wordt ook getriggerd door **knopklikken** (daily-check-in, 🎁-gift-claim, weekly-claim)
+en die knoppen kunnen in **élk** kanaal staan.
+
+**Nieuwe regel (user):** het embed komt in het kanaal waar je levelde **als dat kanaal op de
+lijst staat waar treasure chests mogen spawnen** (`coin_channels`, threads via hun parent) —
+staat het er niet op → **prod #coins**.
+
+- Nieuwe helper **`levelup_target(ctx, data, channel)`** in `bot.rs` (vlak boven `handle_message`):
+  exact dezelfde check als `maybe_spawn_chest` — `db::is_coin_channel` op het kanaal, anders op
+  het `thread_parent`. Bewust één lijst om te beheren.
+- **Toegepast op de 3 knop-paden**: daily (`mc.channel_id`), gift-claim, weekly-claim.
+- **Ongewijzigd (per definitie al goed)**: het chat-award-pad zit ná de `coin_here`-gate, en een
+  chest spawnt enkel in een coin-kanaal → beide geven hun kanaal rechtstreeks door. Enkel in de
+  comments vastgelegd waarom, plus een ⚠️ op `maybe_levelup` dat de **caller** een toegelaten
+  kanaal aanlevert.
+
+**Prod-lijst geverifieerd** (16 coin-kanalen): #meadowmarket en #coins staan er **niet** op —
+dat bevestigt de diagnose. Verificatie: `cargo build` schoon, **26/26 tests groen**, service
+active, home 200, geen warnings in het journal na de restart.
+
+---
 
 ## ⏭️ Sessie (2026-07-27) — Level-up in het juiste kanaal + tag die écht pingt + site mobile-proof
 
