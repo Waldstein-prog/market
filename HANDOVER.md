@@ -1,9 +1,27 @@
 # Handover — Meadow Market (2026-07-31)
 
+## 📌 Openstaand na 2026-07-31 (kort)
+1. **Faybelle test de shoprotatie** — gewichten naar smaak in Manage → Shop. De huidige
+   getallen (gems 10, horseshoe 2) zijn enkel gekozen om de bestaande zeldzaamheid **niet** te
+   veranderen; ze zijn géén balansoordeel. ⚠️ Een gewijzigd gewicht slaat pas aan bij de
+   volgende rotatie (02:00 Brussel) of meteen via **↻ reroll** op Admin shop preview.
+2. **Balansoordeel over de horseshoe zelf**: 2× lot-kans bij een chest voor 7777 coins, nu ook
+   echt te koop als hij in de rotatie valt. Nooit beoordeeld — het oude testprotocol is
+   afgerond t.e.m. het odds-bewijs, dít punt bleef over.
+3. **Telefoonbevestiging uit sessie 07-29b** (los van vandaag): de naamkleur op de Gems-tab en
+   de strook die niet meer terugspringt. Beide fixes staan live, enkel nooit op een echt
+   toestel nagekeken.
+4. Untracked in de map, niet van deze sessies: `artwork/Grannys_2.png`, `artwork/toeter.png`,
+   `screenshots/vakjes passen.png` — user beslist of ze in git mogen.
+
+---
+
 ## ⏭️ Sessie (2026-07-31b) — Chest-tellers op de Coins-tab
 
-**LIVE op prod + gecommit.** Op de inventory-pagina, Coins-tab, staan onder *Coins earned
-all-time* nu twee regels: **Chests opened** en **Chests won** (user-verzoek, exacte woorden).
+**LIVE op prod + gecommit + gepusht** (`1fe2c5c`; subtree `market-gh` → `1575cc4`). Deploy om
+10:02, site 200, geen fouten in het log. Geen schemawijziging, dus geen backup nodig.
+Op de inventory-pagina, Coins-tab, staan onder *Coins earned all-time* nu twee regels:
+**Chests opened** en **Chests won** (user-verzoek, exacte woorden).
 
 - Bron = het **logboek**, geen nieuwe telling: `db::chest_counts(pool, uid)` telt in één query
   de `chest/join`- en `chest/win`-regels van dat lid. Werkt dus met terugwerkende kracht vanaf
@@ -92,13 +110,7 @@ Gewicht 10 als basis (niet 1) geeft ruimte om met **gehele** getallen fijn te re
   die post verandert niets.
 
 ### 📌 Openstaand
-1. **Faybelle test de rotatie** (waarvoor gedeployd is): gewichten naar smaak zetten in
-   Manage → Shop. De getallen die er nu staan zijn enkel gekozen om de bestaande zeldzaamheid
-   **niet** te veranderen — ze zijn géén balansoordeel.
-2. **Balans van de horseshoe zelf** (het laatste punt van het oude testprotocol): 2× lot-kans
-   voor 7777 coins, nu ook echt te koop als hij in de rotatie valt. Nog niet beoordeeld.
-3. Uit de vorige sessie blijft open: bevestiging op een échte telefoon van de naamkleur-fix
-   (Gems-tab) en van de strook die niet meer terugspringt.
+Verhuisd naar de lijst **bovenaan dit bestand**, samen met de rest van 31/07 — één plek.
 
 ---
 
