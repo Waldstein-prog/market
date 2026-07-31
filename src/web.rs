@@ -1232,6 +1232,8 @@ fn inventory_home(
         // Permanente pas (of helemaal geen pas): niets te tellen → geen knop.
         Some((_, None)) | None => String::new(),
     };
+    // Chest-teller onder de all-time-regel: hoeveel chests dit lid meeopende en won.
+    let (opened, won) = db::chest_counts(pool, uid);
     let coins_panel = format!(
         "<div class=\"earned\">{MC} <span data-bal>{coins}</span></div>\
          <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">current balance</p>\
@@ -1239,7 +1241,11 @@ fn inventory_home(
            <div class=\"bar\"><div class=\"fill\" data-fill style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\" data-lvlnm>{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Coins earned all-time</span>\
-           <span>{MC} <b data-earned>{total_earned}</b></span></div>{grants}{pass_row}",
+           <span>{MC} <b data-earned>{total_earned}</b></span></div>\
+         <div class=\"statrow\"><span class=\"k\">Chests opened</span>\
+           <span><b>{opened}</b></span></div>\
+         <div class=\"statrow\"><span class=\"k\">Chests won</span>\
+           <span><b>{won}</b></span></div>{grants}{pass_row}",
         grants = grants_html(grants),
     );
 

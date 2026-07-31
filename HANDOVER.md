@@ -1,5 +1,28 @@
 # Handover — Meadow Market (2026-07-31)
 
+## ⏭️ Sessie (2026-07-31b) — Chest-tellers op de Coins-tab
+
+**LIVE op prod + gecommit.** Op de inventory-pagina, Coins-tab, staan onder *Coins earned
+all-time* nu twee regels: **Chests opened** en **Chests won** (user-verzoek, exacte woorden).
+
+- Bron = het **logboek**, geen nieuwe telling: `db::chest_counts(pool, uid)` telt in één query
+  de `chest/join`- en `chest/win`-regels van dat lid. Werkt dus met terugwerkende kracht vanaf
+  de eerste chest ooit, en er valt niets uit de pas te lopen.
+- **Opened = enkel een échte deelname.** Een tweede klik logt `already_in`, een klik op een
+  verdwenen chest `too_late` — die tellen niet mee. Een chest waaraan je meedeed en die daarna
+  despawnde (te weinig klikkers) telt **wél**: geopend, maar hij ging niet open. Op prod maakt
+  dat verschil vandaag nul (alle 19 chests tot nu toe zijn ook echt opengegaan). Wil de user
+  later enkel uitbetaalde chests tellen, dan is dat een join ⋈ win op `ref_id`.
+- **Won** = de `chest/win`-regels, inclusief die van een `!chestrescue`.
+- Weergave = dezelfde `.statrow` als de all-time-regel (label links, getal rechts, geen
+  dubbele punt), zodat het één blok blijft.
+- Test `db::chest_counts_test`: dubbelklik, te late klik, andermans winst, een spawn zonder
+  actor en een aankoop van hetzelfde lid mogen géén van alle meetellen. **37/37 groen.**
+
+Stand op prod bij de deploy: FayBelle 16/6, easycomes 11/2, Waldstein 9/3, HeijiCat 7/2.
+
+---
+
 ## ⏭️ Sessie (2026-07-31) — Shoprotatie met gewicht per item (Faybelle) + horseshoe in gebruik
 
 **LIVE op prod + gecommit + gepusht** (`16bcceb`; subtree `market-gh` → `6adb7d2`). Deploy om

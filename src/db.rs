@@ -1622,6 +1622,27 @@ pub fn award_daily(
 }
 
 /// (saldo, hoogste saldo ooit, publiek?, ooit verdiend) voor de Coins-tab.
+/// (chests meegeopend, chests gewonnen) voor dit lid, uit het logboek.
+///
+/// **Meegeopend** = het aantal `chest/join`-regels: één per lid per chest, enkel bij een
+/// échte nieuwe deelname (een tweede klik logt `already_in`, een klik op een verdwenen chest
+/// `too_late` — die tellen dus niet mee). Een chest die nadien despawnde omdat er te weinig
+/// klikkers waren, telt wél mee: je hebt hem geopend, hij ging enkel niet open.
+/// **Gewonnen** = de `chest/win`-regels, inclusief die van een `!chestrescue`.
+pub fn chest_counts(pool: &DbPool, user_id: &str) -> (i64, i64) {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT COALESCE(SUM(event = 'join'), 0), COALESCE(SUM(event = 'win'), 0)
+           FROM server_log WHERE category = 'chest' AND actor_uid = ?1",
+        params![user_id],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or((0, 0))
+}
+
 pub fn get_stats(pool: &DbPool, user_id: &str) -> (i64, i64, bool, i64) {
     let conn = pool.get().expect("db");
     conn.query_row(
@@ -3746,6 +3767,53 @@ mod thread_backfill_test {
         assert_eq!(removed, 1, "enkel de niet-uitbetaalde rij verdwijnt");
         assert_eq!(backfill_totals(&pool), (0, 0, 0));
         assert_eq!(balance(&pool, "u1"), (4, 4), "reeds uitbetaalde coins blijven staan");
+
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// De chest-teller op de Coins-tab. Ze leest het logboek, dus de valkuil is dat er méér
+/// chest-regels per lid bestaan dan enkel "meegedaan" en "gewonnen".
+#[cfg(test)]
+mod chest_counts_test {
+    use super::*;
+
+    fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-cc-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (init_pool(p.to_str().unwrap()), p)
+    }
+
+    fn log(pool: &DbPool, event: &str, uid: &str, chest: u64) {
+        log_event(
+            pool,
+            1.0,
+            &LogEntry::new("chest", event).actor(uid, "Tester").reference(chest),
+        );
+    }
+
+    #[test]
+    fn telt_enkel_echte_deelnames_en_eigen_winsten() {
+        let (pool, path) = fresh("telling");
+        assert_eq!(chest_counts(&pool, "u1"), (0, 0), "nog niets gedaan");
+
+        // Chest 1: meegedaan en gewonnen.
+        log(&pool, "join", "u1", 1);
+        log(&pool, "win", "u1", 1);
+        // Chest 2: meegedaan, iemand anders won.
+        log(&pool, "join", "u1", 2);
+        log(&pool, "win", "u2", 2);
+        // Chest 3: enkel een tweede klik en een te late klik → geen deelname.
+        log(&pool, "already_in", "u1", 3);
+        log(&pool, "too_late", "u1", 3);
+        // Een spawn staat zonder actor in het log en mag niemand toegerekend worden.
+        log_event(&pool, 1.0, &LogEntry::new("chest", "spawn").reference(4));
+        // Een aankoop van hetzelfde lid hoort niet in deze telling thuis.
+        log_event(&pool, 1.0, &LogEntry::new("shop", "buy").actor("u1", "Tester"));
+
+        assert_eq!(chest_counts(&pool, "u1"), (2, 1), "2 meegeopend, 1 gewonnen");
+        assert_eq!(chest_counts(&pool, "u2"), (0, 1), "wie enkel won: 0 deelnames gelogd");
+        assert_eq!(chest_counts(&pool, "onbekend"), (0, 0));
 
         let _ = std::fs::remove_file(path);
     }
