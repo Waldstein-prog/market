@@ -2,8 +2,21 @@
 
 ## ⏭️ Sessie (2026-07-31) — Shoprotatie met gewicht per item (Faybelle) + horseshoe in gebruik
 
-**Gebouwd en lokaal getest. NOG NIET gedeployd, nog niet gecommit** — prod draait onveranderd
-(enkel read-only bevraagd). De lokale dev-server draait nog op `localhost:8700` om te bekijken.
+**LIVE op prod + gecommit + gepusht** (`16bcceb`; subtree `market-gh` → `6adb7d2`). Deploy om
+09:02, service draait, gem-kleursync normaal (12/12), geen fouten in het log. Vóór de deploy een
+consistente online backup van de prod-DB gemaakt (`/opt/market/coins.db.bak-20260731-090100`),
+want de migratie voegt kolommen toe aan een draaiende database.
+
+**Stand op prod na de migratie:** 12 gems op gewicht 10, Lucky Horseshoe op 2, beide passen uit
+de rotatie → pool van 13 items, som 122. Een gem staat **32,7%** van de dagen in de shop, de
+horseshoe **7,3% ≈ 1 dag op 14**. (Controle: 12 × 32,7% + 7,3% = 400% = de 4 slots. De som van
+alle kansen is altijd het aantal slots.) De verouderde rij `horseshoe_shop_odds_days` is uit de
+`settings`-tabel verwijderd.
+
+⚠️ **De dagselectie van 31/07 was al getrokken vóór de deploy** (onder de oude, uniforme regels).
+Nieuwe gewichten slaan pas aan bij de volgende rotatie (02:00 Brussel) of meteen via de **↻
+reroll** op Manage → Admin shop preview. Wie het effect direct wil zien: één item tijdelijk op
+een fors gewicht zetten, rerollen.
 
 ### Waarom
 Faybelle wil kunnen sturen hoe vaak een item in de dagshop verschijnt — niet enkel voor de
@@ -56,11 +69,13 @@ Gewicht 10 als basis (niet 1) geeft ruimte om met **gehele** getallen fijn te re
   die post verandert niets.
 
 ### 📌 Openstaand
-1. **Deploy + commit** — beide nog niet gebeurd, op verzoek van de user.
-2. Op prod blijft de rij `horseshoe_shop_odds_days` in `settings` staan; niets leest ze nog.
-   Op te ruimen bij de deploy (of gewoon laten, ze is onschadelijk).
-3. Faybelle kan na de deploy de gewichten naar smaak zetten — de getallen die er nu staan zijn
-   enkel gekozen om de bestaande zeldzaamheid **niet** te veranderen.
+1. **Faybelle test de rotatie** (waarvoor gedeployd is): gewichten naar smaak zetten in
+   Manage → Shop. De getallen die er nu staan zijn enkel gekozen om de bestaande zeldzaamheid
+   **niet** te veranderen — ze zijn géén balansoordeel.
+2. **Balans van de horseshoe zelf** (het laatste punt van het oude testprotocol): 2× lot-kans
+   voor 7777 coins, nu ook echt te koop als hij in de rotatie valt. Nog niet beoordeeld.
+3. Uit de vorige sessie blijft open: bevestiging op een échte telefoon van de naamkleur-fix
+   (Gems-tab) en van de strook die niet meer terugspringt.
 
 ---
 
