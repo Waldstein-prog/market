@@ -267,6 +267,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/update", post(admin_item_update))
         .route("/admin/item/delete", post(admin_item_delete))
         .route("/admin/item/stock", post(admin_item_stock))
+        .route("/admin/item/rotation", post(admin_item_rotation))
         .route("/admin/accounts", get(admin_accounts))
         .route("/admin/absent", get(admin_absent))
         .route("/admin/absent/backfill", post(admin_absent_backfill))
@@ -742,6 +743,20 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .aitem .stockbox .num{{width:4rem;background:#0e1510;border:1px solid #2c3d2a;color:#e8f0e4;
   border-radius:8px;padding:.25rem .35rem;font:inherit;font-size:.78rem}}
 .aitem .stockbox .arow{{display:flex;gap:.3rem;align-items:center}}
+/* Rotatievak op de Manage-kaart: zelfde opzet als het voorraadvak (eigen formulier),
+   met het gewicht-veld en de daaruit volgende kans naast elkaar. */
+.aitem .rotbox{{border-top:1px solid #2c3d2a;padding-top:.45rem;margin:.1rem 0 0;
+  display:flex;flex-direction:column;gap:.3rem}}
+.aitem .rotbox .arow{{display:flex;gap:.35rem;align-items:center;flex-wrap:wrap}}
+.aitem .rotbox .num{{width:3.4rem;background:#0e1510;border:1px solid #2c3d2a;color:#e8f0e4;
+  border-radius:8px;padding:.25rem .35rem;font:inherit;font-size:.78rem;text-align:right}}
+.aitem .rotbox .pct{{position:relative;min-width:3.4rem;font-size:.78rem;font-weight:700;
+  color:#cfe0c8;padding-bottom:.28rem}}
+.aitem .rotbox .pct.off{{color:#6b7d63;font-weight:400}}
+.aitem .rotbox .pct .bar{{position:absolute;left:0;bottom:0;height:3px;border-radius:2px;
+  background:{MEADOW};max-width:100%}}
+.aitem .rotbox .hint{{font-size:.68rem}}
+.rot-info{{margin:0 0 1rem;font-size:.78rem;color:#9db095;max-width:70ch;line-height:1.5}}
 .soldout{{color:#c0562f}}
 /* Out-of-stock-vinkje op de item-kaart: op één regel, klikbaar label. */
 .aitem .chk{{display:flex;align-items:center;gap:.4rem;font-size:.74rem;color:#cfe0c8;
@@ -1393,15 +1408,8 @@ async fn market(
     let countdown =
         format!("<span class=\"shop-countdown\" data-refresh=\"{next_refresh}\">⏳ …</span>");
     let picks = if SHOP_DAILY_PICKS_LIVE {
-        let offers: String = db::shop_offers(
-            &st.pool,
-            shop_day(),
-            SHOP_DAILY_N,
-            settings::i64_of(&st.pool, "horseshoe_shop_odds_days"),
-        )
-        .iter()
-        .map(slot)
-        .collect();
+        let offers: String =
+            db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
         // GEEN reroll-knop op de publieke shop (de admin-reroll leeft enkel op de
         // Admin shop preview). De publieke shop toont enkel de afteller.
         format!(
@@ -1490,15 +1498,7 @@ async fn admin_shop_preview(
     let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass, coins);
 
     let offers: String =
-        db::shop_offers(
-            &st.pool,
-            shop_day(),
-            SHOP_DAILY_N,
-            settings::i64_of(&st.pool, "horseshoe_shop_odds_days"),
-        )
-        .iter()
-        .map(slot)
-        .collect();
+        db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
     // Reroll keert terug naar deze preview (niet naar /market zoals de publieke knop).
     let reroll = "<form method=\"post\" action=\"/admin/shop/reroll?next=/admin/shop/preview\" \
                    class=\"reroll-f\">\
@@ -2472,8 +2472,59 @@ fn human_duration(secs: i64) -> String {
 
 // --- admin: market-beheer ----------------------------------------------
 
+/// Het rotatie-blokje van één item: doet het mee in de dagshop, met welk gewicht, en
+/// hoe vaak het daardoor te zien is. `odds` = de kans dat dit item op een gegeven dag in
+/// de shop staat (None = doet niet mee). Eigen formuliertje met ✓ i.p.v. de autosave van
+/// het hoofdformulier: één gewicht wijzigen verandert de kans van **alle** items (ze delen
+/// de pot), dus de pagina moet daarna opnieuw renderen om de juiste percentages te tonen.
+fn rotation_ui(it: &db::Item, odds: Option<f64>) -> String {
+    let checked = if it.in_rotation { " checked" } else { "" };
+    // Kans + de praktische vertaling ervan ("≈ 1 dag op 16"), want een percentage per dag
+    // zegt weinig als je wil weten hoe zeldzaam iets aanvoelt.
+    let (kans, onder) = match odds {
+        None => ("<span class=\"pct off\">—</span>".to_string(), String::new()),
+        Some(p) if p >= 0.999 => (
+            "<span class=\"pct\">100%<span class=\"bar\" style=\"width:100%\"></span></span>"
+                .to_string(),
+            "<div class=\"hint\">staat elke dag in de shop</div>".to_string(),
+        ),
+        Some(p) => {
+            let om = (1.0 / p).round().max(1.0);
+            (
+                format!(
+                    "<span class=\"pct\">{:.1}%<span class=\"bar\" style=\"width:{:.1}%\"></span>\
+                     </span>",
+                    p * 100.0,
+                    p * 100.0,
+                ),
+                format!("<div class=\"hint\">≈ 1 dag op {om:.0}</div>"),
+            )
+        }
+    };
+    format!(
+        "<form method=\"post\" action=\"/admin/item/rotation\" class=\"rotbox\">\
+           <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+           <div class=\"lbl\">Daily rotation</div>\
+           <label class=\"chk\"><input type=\"checkbox\" name=\"in_rotation\" value=\"1\"{checked}>\
+             In the rotation <span class=\"hint\">(uit = nooit in de dagshop)</span></label>\
+           <div class=\"arow\">\
+             <input class=\"num\" name=\"weight\" value=\"{w}\" inputmode=\"decimal\" \
+               title=\"Lot-gewicht: hoger = vaker. Enkel de verhouding tot de andere items telt.\">\
+             {kans}\
+             <button class=\"btn small\" type=\"submit\" title=\"Gewicht bewaren\">✓</button>\
+           </div>{onder}</form>",
+        id = it.id,
+        w = it.shop_weight,
+    )
+}
+
 /// Eén item-editor op de beheerpagina: thumb, naam, prijs, upload, verwijder.
-fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> String {
+fn admin_item(
+    it: &db::Item,
+    shelves: &[(i64, String)],
+    saved: Option<i64>,
+    odds: Option<f64>,
+) -> String {
     let dur_min = it.duration / 60;
     let sel = |c: &str| if it.category == c { " selected" } else { "" };
     let so = if it.sold_out { " checked" } else { "" };
@@ -2627,7 +2678,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
            {dur_field}\
            <label class=\"chk\"><input type=\"checkbox\" name=\"sold_out\" value=\"1\"{so}>\
              Out of stock <span class=\"hint\">(zichtbaar, maar niet koopbaar)</span></label>\
-           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{stock_ui}{img2_ui}\
+           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{rot_ui}{stock_ui}{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
              <input type=\"hidden\" name=\"id\" value=\"{id}\">\
@@ -2650,6 +2701,7 @@ fn admin_item(it: &db::Item, shelves: &[(i64, String)], saved: Option<i64>) -> S
         cboo = sel("booster"),
         cb = sel("boost"),
         img2_ui = img2_ui,
+        rot_ui = rotation_ui(it, odds),
     )
 }
 
@@ -2663,12 +2715,22 @@ async fn admin_market(
     };
     let saved = q.saved;
     let all_shelves = db::list_shelves(&st.pool);
+    // Kans per item op één plek berekenen: de items delen dezelfde pot, dus de kans van
+    // een item hangt af van álle andere gewichten — niet per schap te bepalen.
+    let pool = db::rotation_pool(&st.pool);
+    let gewichten: Vec<f64> = pool.iter().map(|(_, w)| *w).collect();
+    let kansen: std::collections::HashMap<i64, f64> = pool
+        .iter()
+        .map(|(id, _)| *id)
+        .zip(db::rotation_odds(&gewichten, SHOP_DAILY_N as usize))
+        .collect();
+    let odds_of = |it: &db::Item| kansen.get(&it.id).copied();
     let shelves: String = all_shelves
         .iter()
         .map(|(sid, title)| {
             let items: String = db::shelf_items(&st.pool, *sid)
                 .iter()
-                .map(|it| admin_item(it, &all_shelves, saved))
+                .map(|it| admin_item(it, &all_shelves, saved, odds_of(it)))
                 .collect();
             format!(
                 "<section class=\"ashelf\"><div class=\"ashelf-head\">\
@@ -2691,7 +2753,7 @@ async fn admin_market(
 
     let lucky_items: String = db::lucky_items(&st.pool)
         .iter()
-        .map(|it| admin_item(it, &all_shelves, saved))
+        .map(|it| admin_item(it, &all_shelves, saved, odds_of(it)))
         .collect();
     let lucky = format!(
         "<section class=\"ashelf\"><div class=\"ashelf-head\"><b>🍀 Lucky items</b></div>\
@@ -2701,11 +2763,21 @@ async fn admin_market(
              <button class=\"plus\" type=\"submit\" title=\"Extra lucky item\">＋</button></form></div></section>"
     );
 
+    // Kop bij de rotatie: waar de percentages op slaan. Zonder dit lijkt een kans van 31%
+    // bij twaalf items vreemd hoog — tot je ziet dat er elke dag 4 slots gevuld worden.
+    let som: f64 = gewichten.iter().sum();
+    let rot_info = format!(
+        "<p class=\"rot-info\">Dagrotatie: <b>{SHOP_DAILY_N}</b> slots per dag, getrokken uit \
+         <b>{}</b> meedoende item(s) · som van de gewichten: <b>{som}</b>. Het percentage bij \
+         een item is de kans dat het op een dag in de shop staat; enkel de <i>verhouding</i> \
+         tussen de gewichten telt, niet de grootte.</p>",
+        pool.len(),
+    );
     let body = format!(
         "<h1>⚙ Shop management</h1>\
          <form method=\"post\" action=\"/admin/sync-gem-colors\" style=\"margin:0 0 1rem\">\
            <button class=\"btn small ghost\" type=\"submit\" title=\"Fetch each gem's color from the matching Discord role\">🎨 Sync gem colors from Discord</button></form>\
-         {shelves}{lucky}\
+         {rot_info}{shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
            <input name=\"title\" placeholder=\"New shelf name\" required>\
            <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}{AUTOSAVE_JS}{DND_JS}"
@@ -3099,6 +3171,7 @@ async fn admin_log(
             ("admin", "item_delete") => ("#862e9c", "🗑 item deleted"),
             ("admin", "correction") => ("#c92a2a", "🩹 correction"),
             ("admin", "shop_reroll") => ("#3b5bdb", "↻ shop reroll"),
+            ("admin", "rotation") => ("#2f6f4e", "🎲 rotation"),
             _ => ("#868e96", event),
         };
         format!(
@@ -3935,6 +4008,51 @@ async fn admin_item_stock(
                 .actor(&admin_uid, &admin)
                 .reference(f.id as u64)
                 .detail(detail),
+        );
+    }
+    Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
+}
+
+#[derive(Deserialize)]
+struct RotationForm {
+    id: i64,
+    /// Lot-gewicht als tekst: een BE-toetsenbord tikt "2,5" en dat mag niet stilletjes
+    /// op 0 uitkomen (net als bij de chest-tiers wordt de komma een punt).
+    #[serde(default)]
+    weight: String,
+    /// Enkel aanwezig als het vinkje aanstaat — afwezig = uit de rotatie.
+    #[serde(default)]
+    in_rotation: Option<String>,
+}
+
+/// Het gewicht + de aan/uit-vlag van één item in de dagrotatie bewaren.
+async fn admin_item_rotation(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<RotationForm>,
+) -> Response {
+    if let Some((admin_uid, admin)) = require_admin(&st, &headers) {
+        let mee = f.in_rotation.is_some();
+        // Onleesbaar getal = gewicht ongemoeid laten (enkel de vlag toepassen); zo wist een
+        // typfout geen ingestelde zeldzaamheid.
+        let vorig = db::get_item(&st.pool, f.id);
+        let oud_w = vorig.as_ref().map(|i| i.shop_weight).unwrap_or(0.0);
+        let w = match f.weight.trim().replace(',', ".").parse::<f64>() {
+            Ok(v) if v.is_finite() && v >= 0.0 => v,
+            _ => oud_w,
+        };
+        db::set_item_rotation(&st.pool, f.id, w, mee);
+        let naam = vorig.map(|i| i.name).unwrap_or_default();
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "rotation")
+                .actor(&admin_uid, &admin)
+                .reference(f.id as u64)
+                .detail(format!(
+                    "{naam} · rotation {} · weight {oud_w} → {w} · by {admin}",
+                    if mee { "on" } else { "off" }
+                )),
         );
     }
     Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()

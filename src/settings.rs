@@ -38,7 +38,8 @@ pub struct Spec {
 pub const COINS: &str = "Coins per bericht";
 pub const DAILY: &str = "Daily-beloning";
 pub const CHEST: &str = "Treasure chest";
-pub const SHOP: &str = "Shop";
+// (Er was ook een groep "Shop"; die staat leeg sinds de shoprotatie per item geregeld
+// wordt in Manage → Shop i.p.v. met een instelling hier.)
 
 /// Elke instelbare parameter, in weergavevolgorde. De defaults zijn de waarden
 /// die vóór deze refactor als `const` in `bot.rs` stonden — een lege DB gedraagt
@@ -184,16 +185,9 @@ pub const SPECS: &[Spec] = &[
         max: 100.0,
         help: "Minder klikkers dan dit → de chest despawnt en er wordt niets uitbetaald.",
     },
-    Spec {
-        key: "horseshoe_shop_odds_days",
-        label: "Horseshoe shop-kans",
-        group: SHOP,
-        kind: Kind::Int,
-        default: 14.0,
-        min: 0.0,
-        max: 365.0,
-        help: "De Lucky Horseshoe verschijnt gemiddeld 1 keer per zoveel dagen in de dagshop (1-op-N-kans per dag). Hoger = zeldzamer. 0 = UIT: geen boosters in de dagshop (dan enkel gems).",
-    },
+    // NB: de zeldzaamheid van de Lucky Horseshoe stond hier ooit als één instelling
+    // (`horseshoe_shop_odds_days`, 1-op-N per dag). Vervangen door een gewicht **per item**
+    // in Manage → Shop, want dat geldt voor élk shopitem en niet enkel voor de booster.
 ];
 
 pub fn spec(key: &str) -> Option<&'static Spec> {

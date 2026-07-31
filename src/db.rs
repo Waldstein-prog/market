@@ -1,6 +1,7 @@
 //! SQLite-persistentie voor de coin-economy (rusqlite + r2d2, zoals cyd).
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rand::Rng;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 pub type DbPool = Pool<SqliteConnectionManager>;
@@ -271,6 +272,23 @@ pub fn init_pool(path: &str) -> DbPool {
     // ook niet plots worden). Een admin vult "Add stock" in en telt er zo bij op; elke
     // aankoop telt er één af, en op 0 staat het item op Out of Stock.
     ensure_column(&conn, "items", "stock", "INTEGER NOT NULL DEFAULT -1");
+    // Dagrotatie per item (vervangt de aparte `horseshoe_shop_odds_days`-instelling):
+    // `shop_weight` = relatief lot-gewicht bij de dagelijkse trekking, `in_rotation` = doet
+    // dit item überhaupt mee. Twee velden i.p.v. één, zodat een item tijdelijk uit de shop
+    // kan zonder dat het ingestelde gewicht verloren gaat. Default: gewicht 10 (ruimte om
+    // met gehele getallen fijner te regelen dan met 1) en meedoen — behalve de passen, die
+    // hun eigen vaste plek op de shop hebben; die zet de seed hieronder op 0.
+    let rotation_is_new = !column_exists(&conn, "items", "shop_weight");
+    ensure_column(&conn, "items", "shop_weight", "REAL NOT NULL DEFAULT 10.0");
+    ensure_column(&conn, "items", "in_rotation", "INTEGER NOT NULL DEFAULT 1");
+    if rotation_is_new {
+        // Passen (category 'boost') staan al permanent op de shop → niet in de dagtrekking.
+        conn.execute("UPDATE items SET in_rotation = 0 WHERE category = 'boost'", []).ok();
+        // De booster hield vóór deze kolommen zijn zeldzaamheid uit `horseshoe_shop_odds_days`
+        // (1-op-14 per dag ≈ 7% van de dagen zichtbaar). Gewicht 2 tegen 10 voor de gems komt
+        // daar bij 12 gems + 4 slots vlak bij uit, zodat er bij de overgang niets verspringt.
+        conn.execute("UPDATE items SET shop_weight = 2.0 WHERE category = 'booster'", []).ok();
+    }
     // Voorloper van `stock` (2026-07-15, één sessie geleefd): een vinkje dat na élke
     // aankoop Out of stock aanzette. Vervangen door een echte teller — die toont de speler
     // ook wát er nog is. Kolom weg, anders staan er twee mechanismen naast elkaar.
@@ -409,25 +427,18 @@ fn seed_horseshoe(pool: &DbPool) {
     )
     .expect("seed booster shelf");
     let shelf_id = conn.last_insert_rowid();
+    // shop_weight 2 tegen de 10 van een gem: dezelfde zeldzaamheid als de migratie op een
+    // bestaande database zet, zodat een verse DB en prod niet uiteenlopen.
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, color, category, description, position)
+        "INSERT INTO items (zone, shelf_id, name, price, color, category, description, position,
+                            shop_weight)
          VALUES ('shelf', ?1, 'Lucky Horseshoe', 7777, '#c9a227', 'booster',
-                 'You will have twice as much chance to open Fortuna''s Favor.', 0)",
+                 'You will have twice as much chance to open Fortuna''s Favor.', 0, 2.0)",
         params![shelf_id],
     )
     .expect("seed horseshoe");
 }
 
-/// De dagelijkse shop-selectie: `n` items voor `day`, stabiel bewaard in
-/// daily_shop. Pool = de **gems** (category 'inventory'); de Hytale-passen vallen
-/// er bewust buiten (staan altijd apart te koop). **Boosters** (category 'booster',
-/// bv. de Lucky Horseshoe) zijn zeldzaam: met kans **1/`booster_odds_days`** pakt er
-/// vandaag één een dagslot, anders is de shop gems-only. **`booster_odds_days <= 0` = UIT**:
-/// dan komt er nooit een booster in de dagshop (enkel gems). Die worp weet niets van hoevéél
-/// boosters er bestaan — het blijft altijd hoogstens één boosterslot per dag. Áls de worp
-/// valt, wordt willekeurig (gelijke kans) één booster uit de hele pot gekozen; nieuwe
-/// boosteritems delen dus automatisch in dezelfde 1-per-N-dagen-kans. De selectie is voor
-/// iedereen dezelfde — dat maakt verzamelen spannender.
 /// De opgeslagen dagselectie voor `day`, in trekkingsvolgorde. ORDER BY rowid = insertie- =
 /// (random) trekkingsvolgorde; zonder dit gebruikt SQLite de PK-index (day, item_id) → gesorteerd
 /// op item_id, waardoor de shop bij elke her-lees "geherordend" lijkt i.p.v. random.
@@ -441,7 +452,112 @@ fn daily_ids(conn: &rusqlite::Connection, day: i64) -> Vec<i64> {
         .collect()
 }
 
-pub fn shop_offers(pool: &DbPool, day: i64, n: i64, booster_odds_days: i64) -> Vec<Item> {
+/// De meedoende items van de dagrotatie: (id, gewicht), op id. Meedoen vergt de vlag
+/// `in_rotation` **en** een gewicht > 0 — een gewicht van 0 zou anders een item opleveren
+/// dat wel meetelt in de lijst maar nooit getrokken wordt (en een deling door nul in de
+/// kansberekening als álles op 0 staat).
+pub fn rotation_pool(pool: &DbPool) -> Vec<(i64, f64)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, shop_weight FROM items
+              WHERE in_rotation = 1 AND shop_weight > 0 ORDER BY id",
+        )
+        .expect("prepare rotation_pool");
+    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))
+        .expect("query rotation_pool")
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Trek `n` verschillende items uit `pool` (id, gewicht), gewogen en zonder teruglegging.
+///
+/// Methode = de **exponentiële race** (Efraimidis–Spirakis): elk item krijgt een sleutel
+/// `-ln(u)/w` met u uniform in (0,1] en de `n` kleinste sleutels winnen. Dat is aantoonbaar
+/// hetzelfde als "trek er één op gewicht, haal hem eruit, trek de volgende" — maar in één
+/// pass, en het is de vorm waarvoor `rotation_odds` een exacte kans kan uitrekenen.
+fn draw_weighted(items: &[(i64, f64)], n: usize) -> Vec<i64> {
+    let mut rng = rand::thread_rng();
+    let mut keyed: Vec<(f64, i64)> = items
+        .iter()
+        .filter(|(_, w)| *w > 0.0)
+        .map(|(id, w)| {
+            // gen_range is [0,1), dus 1.0 - x ligt in (0,1] → ln() nooit op 0.
+            let u: f64 = 1.0 - rng.gen_range(0.0f64..1.0);
+            (-u.ln() / w, *id)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    keyed.truncate(n);
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+/// De kans dat elk item **vandaag in de shop staat** (dus: bij de `n` getrokken slots zit),
+/// in dezelfde volgorde als `weights`. Niet hetzelfde getal als het aandeel `w/Σw`: er worden
+/// `n` slots uit dezelfde pot getrokken, dus een item met 10% aandeel staat er véél vaker dan
+/// 10% van de dagen. Dít is het getal waarop een admin stuurt ("hoe vaak zie ik dit?").
+///
+/// Exact gerekend, niet bemonsterd. Via de race-vorm uit `draw_weighted`: item *i* zit in de
+/// selectie zodra hoogstens `n-1` anderen een kleinere sleutel trekken. Conditioneel op de
+/// sleutel van *i* zijn die "anderen" onderling onafhankelijk, en met de substitutie
+/// `u = e^{-w_i·t}` valt de exponentiële vorm helemaal weg:
+/// `P(j sneller dan i) = 1 - u^(w_j/w_i)`. Wat overblijft is een integraal over u ∈ [0,1] van
+/// een Poisson-binomiale staartkans, die met Gauss–Legendre in één pass wordt uitgerekend.
+/// (Getoetst tegen een simulatie van de échte trekking, zie `mod rotation_odds_tests`.)
+pub fn rotation_odds(weights: &[f64], n: usize) -> Vec<f64> {
+    let live: Vec<f64> = weights.iter().map(|w| w.max(0.0)).collect();
+    let meedoen = live.iter().filter(|w| **w > 0.0).count();
+    // Passen alle meedoende items in de slots, dan staat elk van hen er sowieso.
+    if meedoen <= n {
+        return live.iter().map(|w| if *w > 0.0 { 1.0 } else { 0.0 }).collect();
+    }
+    if n == 0 {
+        return vec![0.0; live.len()];
+    }
+    live.iter()
+        .map(|wi| {
+            if *wi <= 0.0 {
+                return 0.0;
+            }
+            // De integrand: de kans dat hoogstens n-1 anderen sneller zijn, gegeven u.
+            let integrand = |u: f64| {
+                // Poisson-binomiaal: de verdeling van "aantal snellere items", afgekapt
+                // op n (verder tellen hoeft niet — alles daarboven is toch verlies).
+                let mut dist = vec![0.0f64; n + 1];
+                dist[0] = 1.0;
+                for wj in live.iter() {
+                    if std::ptr::eq(wj, wi) || *wj <= 0.0 {
+                        continue;
+                    }
+                    let p = 1.0 - u.powf(wj / wi); // kans dat j sneller is dan i
+                    for k in (1..=n).rev() {
+                        dist[k] = dist[k] * (1.0 - p) + dist[k - 1] * p;
+                    }
+                    dist[0] *= 1.0 - p;
+                }
+                dist[..n].iter().sum::<f64>() // hoogstens n-1 sneller
+            };
+            // Samengestelde Simpson over [0,1]. Ruim genomen (1024 panelen): bij sterk
+            // uiteenlopende gewichten wordt de integrand vlak bij u = 0 steil, en dat is
+            // net waar een te grove stap zichtbaar zou gaan afwijken.
+            const PANELEN: usize = 1024;
+            let h = 1.0 / PANELEN as f64;
+            let mut acc = integrand(0.0) + integrand(1.0);
+            for k in 1..PANELEN {
+                let coef = if k % 2 == 1 { 4.0 } else { 2.0 };
+                acc += coef * integrand(k as f64 * h);
+            }
+            (acc * h / 3.0).clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+/// De dagelijkse shop-selectie: `n` items voor `day`, stabiel bewaard in `daily_shop`.
+/// Pool + verhoudingen komen volledig uit de items zelf (`in_rotation` + `shop_weight`),
+/// live te regelen in Manage → Shop. Wie een groter gewicht heeft, verschijnt vaker; wie
+/// niet meedoet (bv. de Hytale-passen, die staan al permanent te koop) blijft eruit.
+/// De selectie is voor iedereen dezelfde — dat maakt verzamelen spannender.
+pub fn shop_offers(pool: &DbPool, day: i64, n: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     // Snelle weg: bestaat de dagselectie al, lees ze lockloos (de shop wordt vaak herladen).
     let ids = daily_ids(&conn, day);
@@ -449,6 +565,12 @@ pub fn shop_offers(pool: &DbPool, day: i64, n: i64, booster_odds_days: i64) -> V
         return ids.iter().filter_map(|id| get_item(pool, *id)).collect();
     }
     drop(conn);
+    // Doet er niets mee (alles uitgevinkt of op gewicht 0), dan valt er niets te trekken en
+    // ook niets op te slaan. Zonder deze uitweg zou élke paginaweergave opnieuw een lege
+    // trekking onder een schrijf-lock proberen, want er komt nooit iets in `daily_shop`.
+    if rotation_pool(pool).is_empty() {
+        return Vec::new();
+    }
 
     // Trage weg: nieuwe dag → trek + schrijf ONDER een write-lock, zodat twee gelijktijdige
     // eerste-bezoekers niet elk een eigen set rollen en er een mengeling (mogelijk > n items)
@@ -462,47 +584,22 @@ pub fn shop_offers(pool: &DbPool, day: i64, n: i64, booster_odds_days: i64) -> V
         if !existing.is_empty() {
             existing // een gelijktijdige aanroep was ons voor
         } else {
-            let mut ids: Vec<i64> = Vec::new();
-            // Rol of de zeldzame booster vandaag een plek krijgt: 1/N-kans.
-            // `RANDOM() % N` blijft in (-N, N) → ABS overloopt nooit (anders dan ABS(RANDOM())).
-            let show_booster = booster_odds_days > 0
-                && tx
-                    .query_row(
-                        "SELECT ABS(RANDOM() % ?1) = 0",
-                        params![booster_odds_days],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .map(|v| v != 0)
-                    .unwrap_or(false);
-            if show_booster {
-                if let Some(bid) = tx
-                    .query_row(
-                        "SELECT id FROM items WHERE category = 'booster' ORDER BY RANDOM() LIMIT 1",
-                        [],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .optional()
-                    .unwrap_or(None)
-                {
-                    ids.push(bid);
-                }
-            }
-            // Vul de resterende slots met willekeurige gems.
-            let need = (n - ids.len() as i64).max(0);
-            if need > 0 {
-                let mut stmt = tx
-                    .prepare(
-                        "SELECT id FROM items
-                         WHERE category = 'inventory' ORDER BY RANDOM() LIMIT ?1",
-                    )
-                    .expect("prepare pick");
-                let gems: Vec<i64> = stmt
-                    .query_map(params![need], |r| r.get::<_, i64>(0))
-                    .expect("query pick")
-                    .filter_map(Result::ok)
-                    .collect();
-                ids.extend(gems);
-            }
+            // Gewogen trekking uit de meedoende items — binnen dezelfde transactie
+            // gelezen, zodat een gewichtswijziging tijdens de trekking er niet half
+            // tussen kan vallen.
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, shop_weight FROM items
+                      WHERE in_rotation = 1 AND shop_weight > 0 ORDER BY id",
+                )
+                .expect("prepare rotation pool");
+            let kandidaten: Vec<(i64, f64)> = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))
+                .expect("query rotation pool")
+                .filter_map(Result::ok)
+                .collect();
+            drop(stmt);
+            let ids = draw_weighted(&kandidaten, n.max(0) as usize);
             for id in &ids {
                 tx.execute(
                     "INSERT OR IGNORE INTO daily_shop (day, item_id) VALUES (?1, ?2)",
@@ -630,18 +727,21 @@ fn seed_hytale(pool: &DbPool) {
     )
     .expect("seed hytale shelf");
     let shelf_id = conn.last_insert_rowid();
-    // Dagpas: blauw, 24u. Permanent: goud, permanent.
+    // Dagpas: blauw, 24u. Permanent: goud, permanent. Beide buiten de dagrotatie
+    // (in_rotation 0): de passen hebben hun eigen vaste rij op de shop.
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description, position)
+        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description,
+                            position, in_rotation)
          VALUES ('shelf', ?1, 'Hytale Day Pass', 100, '#4a86e8', 86400, 'boost',
-                 '24h access to the Hytale server.', 0)",
+                 '24h access to the Hytale server.', 0, 0)",
         params![shelf_id],
     )
     .expect("seed daypass");
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description, position)
+        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description,
+                            position, in_rotation)
          VALUES ('shelf', ?1, 'Hytale Permanent Pass', 1000, '#d4af37', 0, 'boost',
-                 'Permanent access to the Hytale server.', 1)",
+                 'Permanent access to the Hytale server.', 1, 0)",
         params![shelf_id],
     )
     .expect("seed permpass");
@@ -1611,7 +1711,19 @@ pub struct Item {
     /// Voorraad: **-1 = onbeperkt** (niet gevolgd), anders het aantal dat nog te koop is.
     /// Elke aankoop telt er één af; op 0 is het voor iedereen Out of Stock.
     pub stock: i64,
+    /// Relatief lot-gewicht in de dagelijkse shoprotatie: hoger = vaker getrokken.
+    /// Zegt niets over de kans op zich — enkel de verhouding tot de andere meedoende items.
+    pub shop_weight: f64,
+    /// Doet dit item mee in de dagrotatie? Los van het gewicht, zodat uitzetten het
+    /// ingestelde gewicht niet wist. De passen staan hier standaard op `false`.
+    pub in_rotation: bool,
 }
+
+/// De kolomlijst van `items`, één keer uitgeschreven: hij stond vier keer letterlijk in
+/// een query en dan is een nieuwe kolom vergeten op één plek een kwestie van tijd.
+const ITEM_COLS: &str = "id, name, price, image, image2, color, role_id, duration, \
+                         category, description, zone, shelf_id, sold_out, stock, \
+                         shop_weight, in_rotation";
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -1629,6 +1741,8 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         shelf_id: r.get("shelf_id")?,
         sold_out: r.get::<_, i64>("sold_out")? != 0,
         stock: r.get("stock")?,
+        shop_weight: r.get("shop_weight")?,
+        in_rotation: r.get::<_, i64>("in_rotation")? != 0,
     })
 }
 
@@ -1648,10 +1762,10 @@ pub fn list_shelves(pool: &DbPool) -> Vec<(i64, String)> {
 pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
-        .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, stock FROM items
-             WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id",
-        )
+        .prepare(&format!(
+            "SELECT {ITEM_COLS} FROM items
+             WHERE zone = 'shelf' AND shelf_id = ?1 ORDER BY position, id"
+        ))
         .expect("prepare shelf_items");
     let rows = stmt.query_map(params![shelf_id], row_to_item).expect("query");
     rows.filter_map(Result::ok).collect()
@@ -1661,10 +1775,9 @@ pub fn shelf_items(pool: &DbPool, shelf_id: i64) -> Vec<Item> {
 pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
-        .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, stock FROM items
-             WHERE zone = 'lucky' ORDER BY position, id",
-        )
+        .prepare(&format!(
+            "SELECT {ITEM_COLS} FROM items WHERE zone = 'lucky' ORDER BY position, id"
+        ))
         .expect("prepare lucky_items");
     let rows = stmt.query_map([], row_to_item).expect("query lucky");
     rows.filter_map(Result::ok).collect()
@@ -1674,7 +1787,7 @@ pub fn lucky_items(pool: &DbPool) -> Vec<Item> {
 pub fn get_item(pool: &DbPool, id: i64) -> Option<Item> {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, stock FROM items WHERE id = ?1",
+        &format!("SELECT {ITEM_COLS} FROM items WHERE id = ?1"),
         params![id],
         row_to_item,
     )
@@ -1898,6 +2011,19 @@ pub fn set_item_shelf(pool: &DbPool, id: i64, shelf_id: i64) {
         params![id, shelf_id, pos],
     )
     .expect("move item shelf");
+}
+
+/// Zet de rotatie-instellingen van één item: het lot-gewicht in de dagtrekking en of het
+/// überhaupt meedoet. Het gewicht wordt bewaard ook als het item niet meedoet — zo staat de
+/// oude instelling er nog als je het later terug aanzet. Negatieve gewichten worden op 0
+/// geklemd (0 = doet feitelijk niet mee, ook al staat de vlag aan).
+pub fn set_item_rotation(pool: &DbPool, id: i64, weight: f64, in_rotation: bool) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE items SET shop_weight = ?2, in_rotation = ?3 WHERE id = ?1",
+        params![id, weight.max(0.0), i64::from(in_rotation)],
+    )
+    .expect("set item rotation");
 }
 
 pub fn delete_item(pool: &DbPool, id: i64) {
@@ -2146,10 +2272,9 @@ pub fn chest_weight(pool: &DbPool, uid: &str) -> u32 {
 pub fn all_booster_items(pool: &DbPool) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
-        .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, stock FROM items
-             WHERE category = 'booster' ORDER BY position, id",
-        )
+        .prepare(&format!(
+            "SELECT {ITEM_COLS} FROM items WHERE category = 'booster' ORDER BY position, id"
+        ))
         .expect("prepare all_booster_items");
     let rows = stmt.query_map([], row_to_item).expect("query boosters");
     rows.filter_map(Result::ok).collect()
@@ -3180,37 +3305,163 @@ mod horseshoe_dryrun {
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn shop_lottery_includes_booster_at_odds_one_and_fills_with_gems() {
-        let (pool, path) = fresh("lottery");
-        // Twee gems toevoegen zodat er iets is om mee aan te vullen.
-        {
-            let conn = pool.get().unwrap();
-            for nm in ["Ruby", "Sapphire"] {
-                conn.execute(
-                    "INSERT INTO items (zone, name, price, color, category, description, position)
-                     VALUES ('shelf', ?1, 100, '#fff', 'inventory', '', 0)",
-                    params![nm],
-                )
-                .unwrap();
-            }
+    /// Voeg `n` gems toe (gewicht = de default) en geef hun ids terug.
+    fn gems(pool: &DbPool, namen: &[&str]) {
+        let conn = pool.get().unwrap();
+        for nm in namen {
+            conn.execute(
+                "INSERT INTO items (zone, name, price, color, category, description, position)
+                 VALUES ('shelf', ?1, 100, '#fff', 'inventory', '', 0)",
+                params![nm],
+            )
+            .unwrap();
         }
+    }
+
+    #[test]
+    fn rotatie_neemt_alles_mee_dat_meedoet_en_blijft_stabiel() {
+        let (pool, path) = fresh("lottery");
+        gems(&pool, &["Ruby", "Sapphire"]);
         let hid = horseshoe_id(&pool);
 
-        // odds_days = 1 → ABS(RANDOM()%1)=0 altijd → booster zit er zeker bij.
-        let offers = shop_offers(&pool, 1, 4, 1);
+        // 2 gems + horseshoe = 3 items voor 4 slots → alle drie staan er hoe dan ook.
+        let offers = shop_offers(&pool, 1, 4);
         let ids: Vec<i64> = offers.iter().map(|it| it.id).collect();
-        assert!(ids.contains(&hid), "bij 1-op-1-kans staat de horseshoe in de shop");
-        assert!(offers.iter().any(|it| it.category == "inventory"), "rest aangevuld met gems");
+        assert_eq!(ids.len(), 3, "meer slots dan items → gewoon alles");
+        assert!(ids.contains(&hid), "de horseshoe doet mee in de rotatie");
+        assert!(offers.iter().any(|it| it.category == "inventory"), "gems doen mee");
 
         // Dezelfde dag opnieuw = stabiel (cache), zelfde set (volgorde is niet gegarandeerd).
         let mut a = ids.clone();
         a.sort();
-        let mut again: Vec<i64> = shop_offers(&pool, 1, 4, 1).iter().map(|it| it.id).collect();
+        let mut again: Vec<i64> = shop_offers(&pool, 1, 4).iter().map(|it| it.id).collect();
         again.sort();
         assert_eq!(a, again, "dagselectie is stabiel");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn passen_staan_buiten_de_rotatie_en_een_uitgezet_item_wordt_nooit_getrokken() {
+        let (pool, path) = fresh("pool");
+        gems(&pool, &["Ruby", "Sapphire", "Topaz"]);
+        let hid = horseshoe_id(&pool);
+        let in_pool: Vec<i64> = rotation_pool(&pool).into_iter().map(|(id, _)| id).collect();
+
+        // De geseede Hytale-passen zitten er niet in, de gems en de horseshoe wel.
+        let pas: i64 = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT id FROM items WHERE category='boost' LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(!in_pool.contains(&pas), "een Hytale-pas hoort niet in de dagtrekking");
+        assert!(in_pool.contains(&hid));
+
+        // Uitzetten haalt hem uit de pot, maar bewaart het gewicht.
+        set_item_rotation(&pool, hid, 2.0, false);
+        assert!(!rotation_pool(&pool).iter().any(|(id, _)| *id == hid));
+        assert_eq!(get_item(&pool, hid).unwrap().shop_weight, 2.0, "gewicht blijft bewaard");
+        for dag in 0..40 {
+            let ids: Vec<i64> = shop_offers(&pool, dag, 2).iter().map(|it| it.id).collect();
+            assert!(!ids.contains(&hid), "uitgezet item mag nooit getrokken worden");
+        }
+
+        // Gewicht 0 met de vlag aan doet evenmin mee (anders: nooit getrokken, wel getoond).
+        set_item_rotation(&pool, hid, 0.0, true);
+        assert!(!rotation_pool(&pool).iter().any(|(id, _)| *id == hid));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn alles_uitgezet_geeft_een_lege_shop_en_schrijft_niets() {
+        let (pool, path) = fresh("leeg");
+        gems(&pool, &["Ruby", "Sapphire"]);
+        {
+            let conn = pool.get().unwrap();
+            conn.execute("UPDATE items SET in_rotation = 0", []).unwrap();
+        }
+        assert!(shop_offers(&pool, 7, 4).is_empty(), "niets in de rotatie → lege dagshop");
+        // En er is niets gepersisteerd, dus morgen (of na het terugzetten) klopt het weer.
+        let opgeslagen: i64 = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM daily_shop", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(opgeslagen, 0, "een lege trekking mag niets opslaan");
+
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// De kansberekening achter het gewicht-vakje in Manage → Shop. `rotation_odds` rekent de
+/// kans exact uit (integraal), terwijl `draw_weighted` de échte trekking doet — die twee
+/// moeten hetzelfde opleveren, anders staat er een getal op het scherm dat niet klopt met
+/// wat de shop doet. Daarom hier: formule vs. simulatie van de echte trekking.
+#[cfg(test)]
+mod rotation_odds_tests {
+    use super::{draw_weighted, rotation_odds};
+
+    /// Hoe vaak elk item in de selectie belandt, over `rondes` echte trekkingen.
+    fn simuleer(weights: &[f64], n: usize, rondes: usize) -> Vec<f64> {
+        let items: Vec<(i64, f64)> =
+            weights.iter().enumerate().map(|(i, w)| (i as i64, *w)).collect();
+        let mut tel = vec![0usize; weights.len()];
+        for _ in 0..rondes {
+            for id in draw_weighted(&items, n) {
+                tel[id as usize] += 1;
+            }
+        }
+        tel.iter().map(|t| *t as f64 / rondes as f64).collect()
+    }
+
+    #[test]
+    fn formule_komt_overeen_met_de_echte_trekking() {
+        // Realistisch geval: 12 gems van gewicht 10 + een zeldzame booster van 2, 4 slots.
+        let mut w = vec![10.0; 12];
+        w.push(2.0);
+        let exact = rotation_odds(&w, 4);
+        let gemeten = simuleer(&w, 4, 60_000);
+        for (i, (e, g)) in exact.iter().zip(&gemeten).enumerate() {
+            assert!(
+                (e - g).abs() < 0.01,
+                "item {i}: formule {e:.4} vs. gemeten {g:.4} (mag 1 procentpunt schelen)"
+            );
+        }
+        // De som van alle kansen = het aantal slots (elke trekking vult er precies 4).
+        let som: f64 = exact.iter().sum();
+        assert!((som - 4.0).abs() < 0.01, "som van de kansen = aantal slots, was {som}");
+        // En de booster is duidelijk zeldzamer dan een gem.
+        assert!(exact[12] < exact[0] / 3.0, "gewicht 2 vs 10 → veel zeldzamer");
+    }
+
+    #[test]
+    fn scherpe_verhoudingen_blijven_kloppen() {
+        // Eén dominant item tegen vier kleintjes: hier wordt de integrand het steilst.
+        let w = vec![100.0, 1.0, 1.0, 1.0, 1.0];
+        let exact = rotation_odds(&w, 2);
+        let gemeten = simuleer(&w, 2, 60_000);
+        for (i, (e, g)) in exact.iter().zip(&gemeten).enumerate() {
+            assert!((e - g).abs() < 0.015, "item {i}: formule {e:.4} vs. gemeten {g:.4}");
+        }
+        assert!(exact[0] > 0.98, "een gewicht van 100 tegen 1 pakt vrijwel altijd een slot");
+    }
+
+    #[test]
+    fn randgevallen() {
+        // Meer slots dan items → iedereen staat er zeker.
+        assert_eq!(rotation_odds(&[3.0, 1.0], 5), vec![1.0, 1.0]);
+        // Even zware items delen de kans gelijk: 2 van de 4 slots elk.
+        let vier = rotation_odds(&[1.0, 1.0, 1.0, 1.0], 2);
+        for p in &vier {
+            assert!((p - 0.5).abs() < 1e-6, "gelijke gewichten → gelijke kans, kreeg {p}");
+        }
+        // Gewicht 0 = doet niet mee, en trekt de rest niet scheef.
+        let met_nul = rotation_odds(&[1.0, 1.0, 0.0], 1);
+        assert_eq!(met_nul[2], 0.0);
+        assert!((met_nul[0] - 0.5).abs() < 1e-6);
+        // Geen slots = niemand.
+        assert_eq!(rotation_odds(&[1.0, 2.0], 0), vec![0.0, 0.0]);
     }
 }
 
@@ -3417,10 +3668,10 @@ mod concurrency_guards {
             insert_gem(&pool, nm);
         }
         let day = 100;
-        let ids1: Vec<i64> = shop_offers(&pool, day, 2, 0).iter().map(|it| it.id).collect();
+        let ids1: Vec<i64> = shop_offers(&pool, day, 2).iter().map(|it| it.id).collect();
         assert_eq!(ids1.len(), 2, "twee gems getrokken (0 = geen booster)");
         // Zelfde dag opnieuw = exact dezelfde set en volgorde (stabiel gebufferd).
-        let ids2: Vec<i64> = shop_offers(&pool, day, 2, 0).iter().map(|it| it.id).collect();
+        let ids2: Vec<i64> = shop_offers(&pool, day, 2).iter().map(|it| it.id).collect();
         assert_eq!(ids1, ids2, "dagselectie is stabiel");
         // Wat getoond wordt == wat opgeslagen staat (canoniek, geen lokaal-gerolde mengeling).
         let stored = daily_ids(&pool.get().unwrap(), day);

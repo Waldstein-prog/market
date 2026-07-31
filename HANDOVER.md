@@ -1,3 +1,69 @@
+# Handover — Meadow Market (2026-07-31)
+
+## ⏭️ Sessie (2026-07-31) — Shoprotatie met gewicht per item (Faybelle) + horseshoe in gebruik
+
+**Gebouwd en lokaal getest. NOG NIET gedeployd, nog niet gecommit** — prod draait onveranderd
+(enkel read-only bevraagd). De lokale dev-server draait nog op `localhost:8700` om te bekijken.
+
+### Waarom
+Faybelle wil kunnen sturen hoe vaak een item in de dagshop verschijnt — niet enkel voor de
+Lucky Horseshoe, maar **voor elk shopitem**: "een vakje bij elk shop item in de management met
+gewicht en kans, en ik kan toggelen of iets in de shop komt of niet" (model: de chest-tiers).
+Dat vervangt de aparte instelling `horseshoe_shop_odds_days` (1-op-N enkel voor boosters).
+
+### Wat er nu staat
+- **Twee kolommen op `items`** (idempotente migratie, `db.rs`): `shop_weight REAL DEFAULT 10`
+  en `in_rotation INTEGER DEFAULT 1`. Twee velden i.p.v. één, zodat een item tijdelijk uit de
+  shop kan **zonder** dat het ingestelde gewicht verloren gaat. Migratie zet de **passen**
+  (category 'boost') op `in_rotation = 0` (die staan al permanent op de shop) en de **booster**
+  op gewicht 2 — zie "zeldzaamheid" hieronder. De seeds doen hetzelfde voor een verse DB.
+- **De dagtrekking is gewogen** (`db::shop_offers`, nu 3 argumenten): pool + verhoudingen komen
+  volledig uit de items zelf. Methode = de **exponentiële race** (Efraimidis–Spirakis): sleutel
+  `-ln(u)/w`, de `n` kleinste winnen — aantoonbaar gelijk aan "trek er één op gewicht, haal hem
+  eruit, trek de volgende", maar in één pass én in de vorm waarvoor de kans exact te berekenen is.
+- **`db::rotation_odds`** rekent per item de kans uit dat het **op een dag in de shop staat**.
+  Dat is bewust níét het aandeel `w/Σw`: er worden 4 slots uit dezelfde pot getrokken, dus een
+  item met 10% aandeel staat er veel vaker dan 10% van de dagen. Exact gerekend (integraal over
+  een Poisson-binomiale staartkans, Simpson met 1024 panelen), **niet** bemonsterd.
+- **Manage → Shop**: elk item heeft nu een blokje *Daily rotation* — vinkje "In the rotation",
+  een gewicht-vakje en daarnaast de kans met een balkje, met eronder de praktische vertaling
+  ("≈ 1 dag op 14"). Eigen formuliertje met ✓ (niet de autosave van het hoofdformulier): één
+  gewicht wijzigen verandert de kans van **alle** items, dus de pagina moet opnieuw renderen.
+  Bovenaan een regel met "4 slots per dag, getrokken uit N items, som van de gewichten = X".
+- **Weg**: de instelling `horseshoe_shop_odds_days` (spec + beide aanroepen). De groep "Shop"
+  in ⚙ Settings staat daardoor leeg.
+- **Logboek**: elke wijziging logt als `admin/rotation` ("🎲 rotation") met oud → nieuw gewicht.
+
+### Zeldzaamheid van de horseshoe (ongewijzigd overgenomen)
+Gems staan op gewicht **10**, de horseshoe op **2**. Op prod (12 gems + horseshoe, 4 slots) geeft
+dat **7,3% ≈ 1 dag op 14** — vrijwel exact de oude `horseshoe_shop_odds_days = 14`. Bij de
+overgang verspringt er dus niets; Faybelle kan het nu zelf bijstellen in Manage → Shop.
+Gewicht 10 als basis (niet 1) geeft ruimte om met **gehele** getallen fijn te regelen.
+
+### Tests — 36/36 groen (was 27)
+- `bot::horseshoe_odds` (4 tests): de 2× van de Lucky Horseshoe bij de **chest**-trekking,
+  **uitputtend** bewezen i.p.v. bemonsterd (elke mogelijke roll één keer, 2 t/m 6 deelnemers).
+  Daarvoor is de dubbel uitgeschreven winnaartrekking in `bot.rs` één pure helper geworden
+  (`pick_weighted`), gebruikt door zowel de gewone opening als `!chestrescue`.
+- `db::rotation_odds_tests` (3 tests): de **formule tegen een simulatie van de échte trekking**
+  (60k rondes, ≤1 procentpunt verschil), ook bij scherpe verhoudingen (100 vs 1); som van de
+  kansen = aantal slots; randgevallen (meer slots dan items, gewicht 0, 0 slots).
+- `db::horseshoe_dryrun`: passen buiten de rotatie, uitgezet item wordt nooit getrokken en
+  behoudt zijn gewicht, en "alles uitgezet" geeft een lege shop **zonder** iets op te slaan
+  (anders zou elke paginaweergave opnieuw een schrijf-lock nemen).
+- Handmatig end-to-end getest tegen de lokale server: opslaan (303 + juiste kans na render),
+  komma-getal `2,5`, typfout `abc` laat het gewicht ongemoeid, vinkje uit, en een niet-admin
+  die post verandert niets.
+
+### 📌 Openstaand
+1. **Deploy + commit** — beide nog niet gebeurd, op verzoek van de user.
+2. Op prod blijft de rij `horseshoe_shop_odds_days` in `settings` staan; niets leest ze nog.
+   Op te ruimen bij de deploy (of gewoon laten, ze is onschadelijk).
+3. Faybelle kan na de deploy de gewichten naar smaak zetten — de getallen die er nu staan zijn
+   enkel gekozen om de bestaande zeldzaamheid **niet** te veranderen.
+
+---
+
 # Handover — Meadow Market (2026-07-29)
 
 ## ⏭️ Sessie (2026-07-29b) — Twee mobiele bugs: strook sprong terug naar links + naamkleur week af

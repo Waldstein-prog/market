@@ -749,6 +749,22 @@ fn chest_prize(pool: &DbPool) -> i64 {
     rng.gen_range(lo.min(hi)..=lo.max(hi))
 }
 
+/// Kies een index uit `weights` bij een gegeven `roll` ∈ [0, Σweights): loop de
+/// gewichten af en pak de eerste waar de roll binnenvalt. Apart en puur gehouden
+/// omdat dit de winnaar van een treasure chest bepaalt (Lucky Horseshoe = 2 loten):
+/// zo is de verdeling exact te bewijzen i.p.v. te bemonsteren — zie `mod horseshoe_odds`.
+/// Lege `weights` of een te grote roll kan niet voorkomen (caller telt zelf op), maar
+/// valt terug op 0 i.p.v. te panieken tijdens een uitbetaling.
+fn pick_weighted(weights: &[u32], mut roll: u32) -> usize {
+    for (i, w) in weights.iter().enumerate() {
+        if roll < *w {
+            return i;
+        }
+        roll -= *w;
+    }
+    0
+}
+
 /// Formatteer de tier-tabel als embed-regels ("**X%** · lo–hi coins"). De
 /// percentages worden uit de relatieve gewichten gerekend, dus de embed klopt
 /// ook als een admin de gewichten niet op 100 (of 1000) laat uitkomen.
@@ -857,15 +873,7 @@ pub async fn chestrescue(ctx: Context<'_>, msg_id: Option<u64>) -> Result<(), Er
     // De horseshoe is permanent — niets te verbruiken na afloop.
     let weights: Vec<u32> = joiners.iter().map(|(uid, _)| db::chest_weight(pool, uid)).collect();
     let total_weight: u32 = weights.iter().sum();
-    let mut roll = rand::thread_rng().gen_range(0..total_weight);
-    let mut idx = 0;
-    for (i, w) in weights.iter().enumerate() {
-        if roll < *w {
-            idx = i;
-            break;
-        }
-        roll -= *w;
-    }
+    let idx = pick_weighted(&weights, rand::thread_rng().gen_range(0..total_weight));
     let winner_had_luck = weights[idx] > 1;
     let (winner_uid, winner_name) = &joiners[idx];
     let prize = chest_prize(pool);
@@ -1553,15 +1561,7 @@ async fn pop_chest(
     // hij blijft na de chest gewoon meetellen, er valt niets te verbruiken.
     let weights: Vec<u32> = joiners.iter().map(|(uid, _)| db::chest_weight(&pool, uid)).collect();
     let total_weight: u32 = weights.iter().sum();
-    let mut roll = rand::thread_rng().gen_range(0..total_weight);
-    let mut idx = 0;
-    for (i, w) in weights.iter().enumerate() {
-        if roll < *w {
-            idx = i;
-            break;
-        }
-        roll -= *w;
-    }
+    let idx = pick_weighted(&weights, rand::thread_rng().gen_range(0..total_weight));
     let winner_had_luck = weights[idx] > 1;
     let (winner_uid, winner_name) = &joiners[idx];
     let prize = chest_prize(&pool);
@@ -1985,4 +1985,59 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
         .await?;
     client.start().await?;
     Ok(())
+}
+
+/// Het odds-bewijs van de Lucky Horseshoe. Bezit = gewicht 2 i.p.v. 1 bij de
+/// chest-trekking; de vraag is of dat écht "dubbele kans" oplevert. Dit werd eerder
+/// met 500k willekeurige trekkingen bemonsterd — hier **uitputtend**: elke mogelijke
+/// roll ∈ [0, Σweights) precies één keer, dus de verdeling is exact, niet statistisch.
+#[cfg(test)]
+mod horseshoe_odds {
+    use super::pick_weighted;
+
+    /// Tel per index hoeveel van alle mogelijke rolls daar terechtkomen.
+    fn tally(weights: &[u32]) -> Vec<u32> {
+        let total: u32 = weights.iter().sum();
+        let mut hits = vec![0u32; weights.len()];
+        for roll in 0..total {
+            hits[pick_weighted(weights, roll)] += 1;
+        }
+        hits
+    }
+
+    #[test]
+    fn houder_wint_exact_dubbel_zo_vaak() {
+        // Eén houder tussen N-1 gewone spelers, voor 2 t/m 6 deelnemers.
+        for spelers in 2..=6 {
+            let mut w = vec![1u32; spelers];
+            w[0] = 2; // de horseshoe-houder
+            let hits = tally(&w);
+            assert_eq!(hits.iter().sum::<u32>(), spelers as u32 + 1, "elke roll telt exact 1×");
+            for (i, h) in hits.iter().enumerate().skip(1) {
+                assert_eq!(hits[0], h * 2, "houder vs speler {i} bij {spelers} deelnemers");
+            }
+            // Concreet: bij 2 spelers is dat 2/3 vs 1/3, bij 3 spelers 2/4 vs 1/4, …
+            assert_eq!(hits[0], 2);
+        }
+    }
+
+    #[test]
+    fn zonder_houder_is_iedereen_gelijk() {
+        let hits = tally(&[1, 1, 1, 1]);
+        assert_eq!(hits, vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn meerdere_houders_blijven_onderling_gelijk() {
+        // 2 houders + 2 gewone spelers: 2/6 elk vs 1/6 elk.
+        let hits = tally(&[2, 2, 1, 1]);
+        assert_eq!(hits, vec![2, 2, 1, 1]);
+    }
+
+    #[test]
+    fn randgevallen_paniekeren_niet() {
+        assert_eq!(pick_weighted(&[], 0), 0, "lege lijst valt terug op 0");
+        assert_eq!(pick_weighted(&[1, 1], 99), 0, "roll buiten bereik valt terug op 0");
+        assert_eq!(pick_weighted(&[2], 1), 0, "enige deelnemer wint altijd");
+    }
 }
