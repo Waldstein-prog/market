@@ -32,32 +32,15 @@ pub struct Config {
     #[serde(default)]
     pub internal_secret: String,
     // --- Twitch-luik: channel-points-redeem → Hytale-whitelist ---
+    // Enkel de geheimen staan hier. Alles wat de streamer zelf wil bijstellen
+    // (reward-titel, duur van de pas, de whisper-tekst) woont in de `settings`-tabel
+    // en staat op Manage → ⚙ Settings — live aanpasbaar, zonder deploy.
     #[serde(default)]
     pub twitch_enabled: bool,
     #[serde(default)]
     pub twitch_app_id: String,
     #[serde(default)]
     pub twitch_app_secret: String,
-    /// Titel van de channel-points-reward (deze app beheert ze).
-    #[serde(default)]
-    pub twitch_reward_title: String,
-    /// Kost in channel points. Leeg ⇒ env-default (dev 0 / prod 1500).
-    #[serde(default)]
-    pub twitch_reward_cost: Option<u32>,
-    /// Titel van de PERMANENTE-pas channel-points-reward. **Leeg ⇒ perma-redeem UIT**
-    /// (enkel de dagpas-reward draait). De user levert de exacte, zichtbare titel — we
-    /// verzinnen hier bewust géén default speler-zichtbare tekst.
-    #[serde(default)]
-    pub twitch_perma_reward_title: String,
-    /// Kost van de permanente-pas-reward in channel points. Leeg ⇒ env-default (dev 0 / prod 5000).
-    #[serde(default)]
-    pub twitch_perma_reward_cost: Option<u32>,
-    /// Duur van één pas in uren (default 24).
-    #[serde(default)]
-    pub twitch_pass_hours: Option<u32>,
-    /// Bevestiging in de Twitch-chat posten (default true).
-    #[serde(default)]
-    pub twitch_announce_in_chat: Option<bool>,
 }
 
 fn env_override(current: &mut String, key: &str) {
@@ -87,8 +70,6 @@ pub fn load() -> Config {
     env_override(&mut cfg.internal_secret, "MARKET_INTERNAL_SECRET");
     env_override(&mut cfg.twitch_app_id, "TWITCH_APP_ID");
     env_override(&mut cfg.twitch_app_secret, "TWITCH_APP_SECRET");
-    env_override(&mut cfg.twitch_reward_title, "TWITCH_REWARD_TITLE");
-    env_override(&mut cfg.twitch_perma_reward_title, "TWITCH_PERMA_REWARD_TITLE");
     if let Ok(v) = std::env::var("TWITCH_ENABLED") {
         cfg.twitch_enabled = v != "0" && !v.is_empty() && v.to_lowercase() != "false";
     }
@@ -101,9 +82,6 @@ pub fn load() -> Config {
     }
     if cfg.environment.is_empty() {
         cfg.environment = "prod".to_string();
-    }
-    if cfg.twitch_reward_title.is_empty() {
-        cfg.twitch_reward_title = "Hytale-ticket (24u)".to_string();
     }
     cfg
 }
@@ -125,43 +103,4 @@ impl Config {
             && !self.twitch_app_secret.is_empty()
     }
 
-    pub fn twitch_pass_hours(&self) -> u32 {
-        self.twitch_pass_hours.unwrap_or(24).max(1)
-    }
-
-    pub fn twitch_announce(&self) -> bool {
-        self.twitch_announce_in_chat.unwrap_or(true)
-    }
-
-    /// Kost van de reward in channel points. Een expliciete `twitch_reward_cost` wint;
-    /// anders geldt de omgeving-default: dev → 0 (gratis testen), prod → 1500.
-    pub fn twitch_reward_cost(&self) -> u32 {
-        if let Some(c) = self.twitch_reward_cost {
-            return c;
-        }
-        if self.environment.eq_ignore_ascii_case("dev") {
-            0
-        } else {
-            1500
-        }
-    }
-
-    /// Perma-redeem actief? Enkel als de user een reward-titel heeft ingevuld — zonder
-    /// titel géén tweede reward (en dus geen verzonnen speler-zichtbare tekst).
-    pub fn twitch_perma_enabled(&self) -> bool {
-        !self.twitch_perma_reward_title.trim().is_empty()
-    }
-
-    /// Kost van de permanente-pas-reward. Expliciete config wint; anders env-default
-    /// (dev → 0, prod → 5000 als voorlopige placeholder — het echte getal beslist de user).
-    pub fn twitch_perma_reward_cost(&self) -> u32 {
-        if let Some(c) = self.twitch_perma_reward_cost {
-            return c;
-        }
-        if self.environment.eq_ignore_ascii_case("dev") {
-            0
-        } else {
-            5000
-        }
-    }
 }

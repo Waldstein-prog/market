@@ -827,6 +827,11 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .sfield input[type=number]{{width:7rem;padding:.4rem .5rem;border:1px solid #2c3d2a;
   border-radius:8px;background:#0e1510;color:#e8f0e4;font:inherit}}
 .sfield .unit{{color:#8fb37a;font-size:.85rem;min-width:3.2rem}}
+/* Tekstvelden (reward-titel, whisper) delen de look van de nummervelden, maar
+   vullen de rest van de regel — een titel of bericht is nu eenmaal geen 7rem. */
+.sfield .stext{{flex:1 1 18rem;min-width:0;padding:.4rem .5rem;border:1px solid #2c3d2a;
+  border-radius:8px;background:#0e1510;color:#e8f0e4;font:inherit}}
+.sfield textarea.stext{{resize:vertical;line-height:1.35}}
 .sfield .shelp{{flex:1 1 100%;margin:.2rem 0 0 13.7rem;font-size:.8rem;color:#9db095}}
 .wtable{{width:100%;border-collapse:collapse;margin:.4rem 0 .8rem}}
 .wtable th{{text-align:left;font-size:.78rem;color:#9db095;font-weight:600;
@@ -3483,7 +3488,12 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
             ));
             current_group = sp.group;
         }
-        let val = settings::f64_of(&st.pool, sp.key);
+        // Tekstvelden lezen anders (str_of); f64_of paniekt er bewust op.
+        let val = if sp.kind == settings::Kind::Text {
+            0.0
+        } else {
+            settings::f64_of(&st.pool, sp.key)
+        };
         let field = match sp.kind {
             // Het verborgen `on_form`-veld is er omdat een uitgevinkt vakje in HTML
             // niets meestuurt: zonder dit ziet de save-route geen verschil tussen
@@ -3502,6 +3512,22 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
                 min = sp.min,
                 max = sp.max,
             ),
+            // Een sleutel op `_text` draagt een heel bericht (regeleindes, honderden
+            // tekens) → meerregelig veld; de rest is één regel, zoals een titel.
+            settings::Kind::Text => {
+                let v = esc(&settings::str_of(&st.pool, sp.key));
+                if sp.key.ends_with("_text") {
+                    format!(
+                        "<textarea id=\"{k}\" name=\"{k}\" rows=\"3\" class=\"stext\">{v}</textarea>",
+                        k = sp.key
+                    )
+                } else {
+                    format!(
+                        "<input type=\"text\" id=\"{k}\" name=\"{k}\" value=\"{v}\" class=\"stext\">",
+                        k = sp.key
+                    )
+                }
+            }
         };
         groups.push_str(&format!(
             "<div class=\"sfield\"><label for=\"{k}\">{label}</label>{field}\
@@ -3628,7 +3654,7 @@ async fn admin_settings_save(
                     }
                     if value_of(sp.key).is_some() { "1" } else { "0" }.to_string()
                 }
-                settings::Kind::Int => match value_of(sp.key) {
+                settings::Kind::Int | settings::Kind::Text => match value_of(sp.key) {
                     Some(v) => v,
                     None => continue, // veld stond niet op het formulier
                 },

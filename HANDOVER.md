@@ -1,4 +1,74 @@
-# Handover — Meadow Market (2026-07-31)
+# Handover — Meadow Market (2026-08-03)
+
+## ⏭️ Sessie (2026-08-03) — Twitch-redeem omgebouwd: streamer bezit de reward, whisper i.p.v. chat
+
+**Gebouwd + volledig mock-getest, nog NIET live** (prod heeft geen `[twitch]`-config, dus het
+luik is daar hoe dan ook inert). Drie user-beslissingen zijn de kern:
+
+1. **Faybelle maakt de reward zelf aan** in haar Twitch-dashboard (met invoerprompt voor de
+   Hytale-naam). Market maakt/beheert **geen** rewards meer.
+2. **Geen automatische terugbetaling** — manueel in de Twitch-wachtrij als het nodig is.
+3. **De duur is instelbaar** op Manage → ⚙ Settings (test: **2 uur**).
+
+### Wat dat technisch afdwingt
+Helix laat een app enkel redemptions **fulfillen/annuleren** van rewards die ze **zélf**
+aanmaakte (anders 403). Wie de reward bezit en wie kan terugbetalen is dus dezelfde vraag —
+punt 1 en 2 zijn onlosmakelijk. Gevolgen in `twitch.rs`:
+- **`ensure_reward` weg** (aanmaken + kost-syncen), **`set_redemption_status` weg**,
+  **chat-bevestiging weg**.
+- **Herkennen op TITEL i.p.v. reward-id.** We kennen de id van haar reward niet, dus het
+  EventSub-abonnement is nu **breed** (`reward_id` in de condition is optioneel volgens de
+  docs): álle redemptions van het kanaal komen binnen en `on_redeem` filtert op titel
+  (getrimd, hoofdletter-ongevoelig). Bijvangst: een hernoemde of pas aangemaakte reward werkt
+  **meteen**, zonder herstart. Elke andere beloning van het kanaal wordt genegeerd — mét
+  logregel, want een titel die net niet klopt is anders onzichtbaar.
+- **Ongeldige naam** → geen grant, geen refund, wél `twitch/rejected` in het logboek met
+  "refund manually in Twitch". Dát is het signaal voor Faybelle.
+- **Naam blijft vastgezet** op het Twitch-account bij de eerste redeem (user-beslissing tegen
+  gesmoemel; foute namen ruimen jullie zelf op).
+
+### Whisper i.p.v. chatbevestiging
+De bevestiging gaat als **Twitch-DM (whisper)** naar de kijker — daar staat ook het
+**serveradres** in, want zonder adres geraakt hij er niet op. `POST /helix/whispers`.
+⚠️ **Twitch-eisen** (uit de docs, niet af te leiden uit onze code): scope
+**`user:manage:whispers`** — die zit **niet** in het huidige token, dus de OAuth-stap moet
+één keer opnieuw — en het **zendende account moet een geverifieerd telefoonnummer** hebben
+(anders 401). Kijker die whispers van vreemden blokkeert → 403. Mislukt de whisper, dan is de
+**toegang toch toegekend**; enkel het bericht ontbreekt.
+
+### Nieuw: tekst-instellingen (`Kind::Text` in `settings.rs`)
+De Settings-tab kende enkel getallen en vinkjes. Nu ook vrije tekst (`str_of`, opgeslagen
+getrimd, geen grenzen; een sleutel op `_text` krijgt een `<textarea>`). Nieuwe groep
+**"Twitch-redeem → Hytale-pas"** met 5 velden: reward-titel, duur in uren, whisper-tekst
+(plaatshouders `{uren}`/`{naam}`), plus perma-titel en perma-whisper. **Leeg = uit** bij elk
+tekstveld — inclusief de reward-titel, dus zolang die leeg is negeert market álle redeems.
+De titels/duur/tekst zijn uit `secrets.json` **weg**: `config.rs` houdt enkel nog de geheimen.
+
+> Speler-zichtbare tekst blijft van de user: de whisper-velden starten **leeg**, ik verzin er
+> geen. Zolang Faybelle ze niet invult, krijgt een kijker wél zijn pas maar géén bericht.
+
+### Verificatie
+- **39/39 tests groen** (was 37): titel-routing (incl. hoofdletters, lege titels, "niet van
+  ons"), template-invulling, en het kappen op 500 tekens op een **tekengrens** (geen kapot
+  UTF-8).
+- **Mock-e2e `docs/twitch_e2e.sh`** (vervangt `perma_e2e.sh`) — Twitch-CLI EventSub-mock,
+  market op poort 8701 zodat het naast een draaiende market kan. Vier redemptions, alle vier
+  bewezen: vreemde titel → genegeerd (geen rij), ongeldige naam → `rejected` + geen rij,
+  geldige → **1u seed + 2u = 3,00u** (duur uit de settings!) + de whisper-tekst ingevuld,
+  perma-titel → `expires = NULL`.
+- **Settings-pagina** lokaal gerenderd en een echte opslag-ronde gedaan: multiline-tekst
+  overleeft, `&`/`"`/`<` komen correct ge-escaped terug, spaties eromheen worden getrimd,
+  leeg blijft leeg.
+
+### 📌 Nodig vóór de live-test (allemaal user-/Faybelle-kant)
+1. **Reward aanmaken** in Twitch mét "Require Viewer to Enter Text" **aan**.
+2. **Nieuw OAuth-token** met `user:manage:whispers` (recept in `docs/twitch-setup.md`), en een
+   **geverifieerd telefoonnummer** op het streamer-account.
+3. **De vijf settings invullen** — vooral de reward-titel (letterlijk dezelfde) en de
+   whisper-tekst **met het serveradres erin**.
+4. `[twitch]`-creds in prod `secrets.json` + herstart.
+
+---
 
 ## 📌 Openstaand na 2026-07-31 (kort)
 1. **Faybelle test de shoprotatie** — gewichten naar smaak in Manage → Shop. De huidige

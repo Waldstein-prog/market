@@ -1,23 +1,30 @@
 //! Twitch-luik — channel-points-redeem → Hytale-whitelist (Rust-port van het
 //! vroegere `tale/bot/twitch_bridge.py`).
 //!
-//! Een kijker doet een channel-points-redeem "Hytale-ticket (24u)" en typt (de 1e
-//! keer) zijn exacte Hytale-naam. We ankeren op de ONVERANDERLIJKE Twitch-user-id en
-//! bewaren de grant in market's bestaande `hytale_whitelist`-tabel onder de pseudo-id
-//! `twitch:<user_id>`. De tale-bot leest die tabel read-only en whitelistet de naam op
-//! de Hytale-server (`reconcile_market`/`enforce_whitelist`) — dit luik raakt de
-//! Hytale-FIFO dus NIET meer aan.
+//! Een kijker doet een channel-points-redeem en typt (de 1e keer) zijn exacte
+//! Hytale-naam. We ankeren op de ONVERANDERLIJKE Twitch-user-id en bewaren de grant in
+//! market's bestaande `hytale_whitelist`-tabel onder de pseudo-id `twitch:<user_id>`.
+//! De tale-bot leest die tabel read-only en whitelistet de naam op de Hytale-server
+//! (`reconcile_market`/`enforce_whitelist`) — dit luik raakt de Hytale-FIFO dus NIET aan.
 //!
-//!   * 1e keer      → naam op goed vertrouwen registreren en VASTZETTEN → 24u.
-//!   * volgende keer → getypte tekst negeren, gewoon 24u erbij (stapelt, reset niet).
-//!   * lege/ongeldige naam → redemption CANCELED ⇒ punten terug + uitleg in de chat.
+//!   * 1e keer      → naam op goed vertrouwen registreren en VASTZETTEN.
+//!   * volgende keer → getypte tekst negeren, gewoon tijd erbij (stapelt, reset niet).
+//!   * lege/ongeldige naam → geen grant, wél een `twitch/rejected`-regel in het logboek.
 //!
-//! Naast de **dagpas**-reward is er een optionele **permanente-pas**-reward: dezelfde
-//! naam-vastzet-flow, maar de grant is permanent (`expires = NULL`). Hij draait enkel als
-//! de user een reward-titel invult (`twitch_perma_reward_title`) — anders bestaat hij niet.
+//! ## De streamer bezit de reward, wij niet (omslag 2026-08-03)
+//! Vroeger maakte deze app de reward zelf aan via Helix. Nu maakt de **streamer** ze aan
+//! in haar eigen dashboard (met "kijker moet tekst invullen" aan) en herkent market ze aan
+//! de **titel** uit `settings` (Manage → ⚙ Settings). Gevolgen, bewust aanvaard:
 //!
-//! De reward(s) worden door DEZE app aangemaakt/beheerd (via Helix), want enkel de app die
-//! de reward maakte mag redemptions fulfillen/annuleren (anders 403, geen refund).
+//!   * We kunnen redemptions **niet** meer fulfillen of annuleren — Helix laat dat enkel toe
+//!     aan de app die de reward maakte (anders 403). **Terugbetalen gebeurt dus manueel** in
+//!     de Twitch-wachtrij; het logboek zegt wanneer dat nodig is.
+//!   * We abonneren **breed** (alle redemptions van het kanaal) en filteren zelf op titel.
+//!     Zo werkt een hernoemde of pas aangemaakte reward meteen, zonder herstart.
+//!
+//! Bevestiging gaat als **whisper** (Twitch-DM) naar de kijker — daar past ook het
+//! serveradres in, want zonder adres geraakt hij er niet op. De tekst zelf staat in de
+//! settings: speler-zichtbare tekst levert de user.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -30,6 +37,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::Config;
 use crate::db::{self, DbPool};
+use crate::settings;
 
 const HELIX: &str = "https://helix.twitch.tv";
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
@@ -64,12 +72,31 @@ fn is_loopback_ws(url: &str) -> bool {
     url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]")
 }
 
-/// Verloopmoment als lokale-ish HH:MM (best-effort, UTC) voor de chatbevestiging.
-fn fmt_hm(expires: f64) -> String {
-    let secs = expires as i64;
-    let mins = (secs / 60) % 60;
-    let hours = (secs / 3600) % 24;
-    format!("{hours:02}:{mins:02}")
+/// Titels vergelijken zoals een mens ze bedoelt: spaties eromheen en hoofdletters
+/// mogen niet uitmaken. De streamer typt de titel twee keer over (in Twitch en in de
+/// settings) — een verschil in kapitaal mag de pas niet stil laten mislukken.
+fn title_matches(a: &str, b: &str) -> bool {
+    !b.trim().is_empty() && a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// Vul de door de user geschreven whisper-tekst in. Onbekende accolades blijven
+/// gewoon staan — het is háár tekst, wij knippen er niets uit.
+fn fill_template(tpl: &str, name: &str, hours: Option<u32>) -> String {
+    let mut out = tpl.replace("{naam}", name);
+    if let Some(h) = hours {
+        out = out.replace("{uren}", &h.to_string());
+    }
+    out
+}
+
+/// Twitch weigert een whisper langer dan 500 tekens aan iemand die jou nog nooit
+/// geschreven heeft. Kap op een tekengrens (niet midden in een UTF-8-teken).
+fn cap_whisper(msg: &str) -> &str {
+    const MAX: usize = 500;
+    match msg.char_indices().nth(MAX) {
+        Some((idx, _)) => &msg[..idx],
+        None => msg,
+    }
 }
 
 // --- Tokenopslag ------------------------------------------------------------
@@ -114,7 +141,7 @@ fn save_tokens(path: &PathBuf, t: &Tokens) {
 /// Begrensde set van reeds verwerkte EventSub-`message_id`'s, voor de-duplicatie. Twitch levert
 /// **at-least-once**: dezelfde notificatie kan meer dan eens binnenkomen (met hetzelfde
 /// `message_id`). Zonder dedup zou een redelivery `grant_day_whitelist` een tweede keer stapelen
-/// → 48u pas i.p.v. 24u. Houdt de laatste `cap` id's bij (FIFO-eviction).
+/// → dubbele pasduur. Houdt de laatste `cap` id's bij (FIFO-eviction).
 #[derive(Default)]
 struct Seen {
     set: HashSet<String>,
@@ -148,11 +175,9 @@ struct Ctx {
     tokens_file: PathBuf,
     tok: Mutex<Tokens>,
     broadcaster_id: String,
-    reward_id: String,
-    /// Reward-id van de permanente-pas-reward; leeg ⇒ perma-redeem uit.
-    perma_reward_id: String,
-    pass_hours: u32,
-    announce: bool,
+    /// De reward-titels, de pasduur en de whisper-tekst staan bewust NIET hier: die
+    /// worden per redeem vers uit `settings` gelezen, zodat een wijziging op de
+    /// Settings-pagina meteen geldt (geen herstart).
     pool: DbPool,
     /// Mock-modus (Twitch CLI EventSub-mock): sla alle echte Helix/token-calls over.
     mock: bool,
@@ -243,81 +268,89 @@ impl Ctx {
         Err("helix: onbereikbaar na refresh".into())
     }
 
-    async fn set_redemption_status(&self, redemption_id: &str, fulfilled: bool) {
-        let status = if fulfilled { "FULFILLED" } else { "CANCELED" };
+    /// Privébericht (whisper) naar de kijker — dát is waar het serveradres in staat.
+    /// Faalt dit, dan is de pas al toegekend; we loggen enkel, want de toegang zelf
+    /// mag niet afhangen van of Twitch het bericht doorlaat.
+    ///
+    /// Twitch-eisen (docs): scope `user:manage:whispers`, en het **zendende account
+    /// moet een geverifieerd telefoonnummer** hebben (anders 401). Een 403 betekent
+    /// dat de kijker whispers van vreemden blokkeert — daar kunnen wij niets aan doen.
+    async fn whisper(&self, to_user_id: &str, msg: &str) {
+        if msg.trim().is_empty() || to_user_id.is_empty() {
+            return; // lege tekst = de user heeft het veld (nog) niet ingevuld ⇒ geen bericht
+        }
         if self.mock {
-            tracing::info!("[mock] redemption {redemption_id} → {status} (Helix overgeslagen)");
+            tracing::info!("[mock] whisper → {to_user_id}: {msg}");
             return;
         }
         let url = format!(
-            "{HELIX}/helix/channel_points/custom_rewards/redemptions?broadcaster_id={}&reward_id={}&id={}",
-            self.broadcaster_id, self.reward_id, redemption_id
+            "{HELIX}/helix/whispers?from_user_id={}&to_user_id={to_user_id}",
+            self.broadcaster_id
         );
-        if let Err(e) = self
-            .helix(reqwest::Method::PATCH, &url, Some(&json!({ "status": status })))
-            .await
-        {
-            tracing::warn!("kon redemption-status niet zetten ({status}): {e}");
-        }
-    }
-
-    async fn chat(&self, msg: &str) {
-        if !self.announce {
-            return;
-        }
-        if self.mock {
-            tracing::info!("[mock] chat: {msg}");
-            return;
-        }
-        let url = format!("{HELIX}/helix/chat/messages");
-        let body = json!({
-            "broadcaster_id": self.broadcaster_id,
-            "sender_id": self.broadcaster_id,
-            "message": msg,
-        });
-        if let Err(e) = self.helix(reqwest::Method::POST, &url, Some(&body)).await {
-            tracing::warn!("kon Twitch-chatbericht niet sturen: {e}");
+        let body = json!({ "message": cap_whisper(msg) });
+        match self.helix(reqwest::Method::POST, &url, Some(&body)).await {
+            Ok(_) => tracing::info!("Twitch-whisper verstuurd naar {to_user_id}"),
+            Err(e) => tracing::warn!(
+                "kon Twitch-whisper niet sturen naar {to_user_id}: {e} \
+                 (401 = zendend account zonder geverifieerd telefoonnummer of scope \
+                 'user:manage:whispers' ontbreekt; 403 = de kijker laat geen whispers toe)"
+            ),
         }
     }
 }
 
 // --- De kern: reageren op een redeem ---------------------------------------
-/// Welke pas hoort bij het reward-id van deze redemption? Pure functie zodat de
-/// branch-keuze los te testen is. Onbekend/leeg → Day (veilige val: een tijdelijke pas
-/// die vanzelf verloopt, nooit per ongeluk permanent).
+/// Welke pas hoort bij deze redemption? We krijgen álle redemptions van het kanaal
+/// binnen, dus `None` (= "niet van ons") is de normale uitkomst voor elke andere
+/// beloning die de streamer aanbiedt. Pure functie zodat de keuze los te testen is.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum PassKind {
     Day,
     Perma,
 }
 
-fn pass_kind_for(reward_id: &str, day_id: &str, perma_id: &str) -> PassKind {
-    if !perma_id.is_empty() && reward_id == perma_id {
-        PassKind::Perma
+fn pass_kind_for(title: &str, day_title: &str, perma_title: &str) -> Option<PassKind> {
+    // Perma eerst: staan beide titels per ongeluk gelijk, dan is permanent geven
+    // erger dan een paar uur geven — maar de keuze moet vastliggen, niet toevallig zijn.
+    if title_matches(title, perma_title) {
+        Some(PassKind::Perma)
+    } else if title_matches(title, day_title) {
+        Some(PassKind::Day)
     } else {
-        let _ = day_id; // day is de default; day_id enkel voor de leesbaarheid/symmetrie
-        PassKind::Day
+        None
     }
 }
 
 async fn on_redeem(ctx: &Ctx, event: &Value) {
     let tid = event.get("user_id").and_then(|x| x.as_str()).unwrap_or("");
     let login = event.get("user_login").and_then(|x| x.as_str()).unwrap_or("");
-    let redemption_id = event.get("id").and_then(|x| x.as_str()).unwrap_or("");
-    let reward_id = event
+    let title = event
         .get("reward")
-        .and_then(|r| r.get("id"))
+        .and_then(|r| r.get("title"))
         .and_then(|x| x.as_str())
         .unwrap_or("");
     let user_input = event
         .get("user_input")
         .and_then(|x| x.as_str())
         .unwrap_or("");
-    if tid.is_empty() || redemption_id.is_empty() {
-        tracing::warn!("Twitch-redeem zonder user_id/id — genegeerd");
+    if tid.is_empty() {
+        tracing::warn!("Twitch-redeem zonder user_id — genegeerd");
         return;
     }
-    let kind = pass_kind_for(reward_id, &ctx.reward_id, &ctx.perma_reward_id);
+
+    // Titels vers uit de settings: hernoemt de streamer haar reward, dan volstaat het
+    // veld op de Settings-pagina aanpassen.
+    let day_title = settings::str_of(&ctx.pool, "twitch_reward_title");
+    let perma_title = settings::str_of(&ctx.pool, "twitch_perma_reward_title");
+    let Some(kind) = pass_kind_for(title, &day_title, &perma_title) else {
+        // Elke andere beloning van het kanaal komt hier ook binnen; dat is geen fout.
+        // Wel loggen wát er langskwam: bij een titelverschil is dit de enige aanwijzing.
+        tracing::info!(
+            "Twitch-redeem '{title}' van {login} genegeerd — komt niet overeen met de \
+             ingestelde reward-titel(s)"
+        );
+        return;
+    };
     let uid = format!("twitch:{tid}");
 
     // Naam vastzetten: bestaat er al een naam voor deze Twitch-id, dan die gebruiken
@@ -327,20 +360,21 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
         None => match clean_name(user_input) {
             Some(n) => (n, true),
             None => {
-                ctx.set_redemption_status(redemption_id, false).await; // punten terug
-                ctx.chat(&format!(
-                    "@{login} geen geldige Hytale-naam ingevuld — je punten zijn teruggegeven. \
-                     Redeem opnieuw en typ enkel je exacte Hytale-naam."
-                ))
-                .await;
-                tracing::info!("Twitch-redeem geweigerd (lege/ongeldige naam): {login}");
-                // Logboek: geweigerde redeem (punten teruggegeven) — voor de audittrail.
+                // GEEN automatische refund meer: de reward is van de streamer, dus Helix
+                // laat ons de redemption niet annuleren. Deze logregel is het signaal om
+                // in de Twitch-wachtrij manueel terug te betalen.
+                tracing::info!(
+                    "Twitch-redeem geweigerd (lege/ongeldige naam): {login} typte '{user_input}' \
+                     — manuele terugbetaling nodig"
+                );
                 db::log_event(
                     &ctx.pool,
                     now_epoch(),
                     &db::LogEntry::new("twitch", "rejected")
                         .actor(&uid, login)
-                        .detail(format!("invalid Hytale name: '{user_input}' — refunded")),
+                        .detail(format!(
+                            "invalid Hytale name: '{user_input}' — refund manually in Twitch"
+                        )),
                 );
                 return;
             }
@@ -353,7 +387,6 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
     match kind {
         PassKind::Perma => {
             db::grant_perma_whitelist(&ctx.pool, &uid, &name);
-            ctx.set_redemption_status(redemption_id, true).await;
 
             // Logboek: permanente Twitch-pas toegekend — bindt kijker aan Hytale-naam.
             db::log_event(
@@ -364,37 +397,30 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
                     .detail(format!("{login} → {name} · permanent")),
             );
 
-            ctx.chat(&format!(
-                "@{login} ✅ permanente toegang voor Hytale-naam '{name}'{reg}. Veel plezier!"
-            ))
-            .await;
+            let tpl = settings::str_of(&ctx.pool, "twitch_perma_whisper_text");
+            ctx.whisper(tid, &fill_template(&tpl, &name, None)).await;
             tracing::info!(
                 "Twitch-pas (PERMANENT): {name} ({login}){reg} — grant in hytale_whitelist als {uid}"
             );
         }
         PassKind::Day => {
-            let add_secs = ctx.pass_hours as f64 * 3600.0;
-            let expires = db::grant_day_whitelist(&ctx.pool, &uid, &name, add_secs, now);
-            ctx.set_redemption_status(redemption_id, true).await;
+            let hours = settings::i64_of(&ctx.pool, "twitch_pass_hours").max(1) as u32;
+            let add_secs = hours as f64 * 3600.0;
+            db::grant_day_whitelist(&ctx.pool, &uid, &name, add_secs, now);
 
-            // Logboek: Twitch-dagpas toegekend (whitelist-grant) — bindt kijker aan Hytale-naam.
+            // Logboek: Twitch-pas toegekend (whitelist-grant) — bindt kijker aan Hytale-naam.
             db::log_event(
                 &ctx.pool,
                 now,
                 &db::LogEntry::new("twitch", "whitelist")
                     .actor(&uid, &name)
-                    .detail(format!("{login} → {name} · {}h", ctx.pass_hours)),
+                    .detail(format!("{login} → {name} · {hours}h")),
             );
 
-            ctx.chat(&format!(
-                "@{login} ✅ {}u toegang voor Hytale-naam '{name}'{reg}. Actief tot ~{}. Veel plezier!",
-                ctx.pass_hours,
-                fmt_hm(expires)
-            ))
-            .await;
+            let tpl = settings::str_of(&ctx.pool, "twitch_whisper_text");
+            ctx.whisper(tid, &fill_template(&tpl, &name, Some(hours))).await;
             tracing::info!(
-                "Twitch-pas: {name} ({login}){reg} — {}u, grant in hytale_whitelist als {uid}",
-                ctx.pass_hours
+                "Twitch-pas: {name} ({login}){reg} — {hours}u, grant in hytale_whitelist als {uid}"
             );
         }
     }
@@ -419,16 +445,6 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
             tokens_file,
             tok: Mutex::new(Tokens { access: String::new(), refresh: String::new() }),
             broadcaster_id: "mock_broadcaster".into(),
-            reward_id: "mock_reward".into(),
-            // In mock-modus stuurt de CLI de reward-id niet betrouwbaar mee → on_redeem valt
-            // terug op Day. Een perma-mocktest zet de reward-id expliciet gelijk aan deze.
-            perma_reward_id: if cfg.twitch_perma_enabled() {
-                "mock_perma_reward".into()
-            } else {
-                String::new()
-            },
-            pass_hours: cfg.twitch_pass_hours(),
-            announce: cfg.twitch_announce(),
             pool,
             mock: true,
             seen: Mutex::new(Seen::default()),
@@ -443,10 +459,6 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
         tokens_file,
         tok: Mutex::new(tokens),
         broadcaster_id: String::new(),
-        reward_id: String::new(),
-        perma_reward_id: String::new(),
-        pass_hours: cfg.twitch_pass_hours(),
-        announce: cfg.twitch_announce(),
         pool,
         mock: false,
         seen: Mutex::new(Seen::default()),
@@ -464,86 +476,52 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
         return Err("kon broadcaster-id niet ophalen (get_users leeg)".into());
     }
 
-    // Dagpas-reward: zoeken/aanmaken/kost-syncen.
-    let reward_title = cfg.twitch_reward_title.clone();
-    let reward_id = ensure_reward(&ctx, &broadcaster_id, &reward_title, cfg.twitch_reward_cost()).await?;
-
-    // Permanente-pas-reward: enkel als de user een titel invulde (anders bewust geen
-    // tweede reward + geen verzonnen speler-zichtbare tekst).
-    let perma_reward_id = if cfg.twitch_perma_enabled() {
-        let title = cfg.twitch_perma_reward_title.clone();
-        ensure_reward(&ctx, &broadcaster_id, &title, cfg.twitch_perma_reward_cost()).await?
-    } else {
-        String::new()
-    };
-
+    let ctx = Ctx { broadcaster_id, ..ctx };
+    let day = settings::str_of(&ctx.pool, "twitch_reward_title");
+    let perma = settings::str_of(&ctx.pool, "twitch_perma_reward_title");
     tracing::info!(
-        "Twitch-luik actief — kanaal={broadcaster_login}, dagpas-reward='{reward_title}', pas={}u, \
-         perma-reward={}, chat={}",
-        ctx.pass_hours,
-        if perma_reward_id.is_empty() {
-            "uit".to_string()
-        } else {
-            format!("'{}'", cfg.twitch_perma_reward_title)
-        },
-        if ctx.announce { "aan" } else { "uit" }
+        "Twitch-luik actief — kanaal={broadcaster_login}, reward-titel={}, perma-titel={}, pas={}u",
+        if day.is_empty() { "(leeg — redeems worden genegeerd)".into() } else { format!("'{day}'") },
+        if perma.is_empty() { "(uit)".into() } else { format!("'{perma}'") },
+        settings::i64_of(&ctx.pool, "twitch_pass_hours"),
     );
+    // Diagnose-hulp: wélke rewards het kanaal heeft. Een titel die net niet klopt is
+    // anders enkel te zien aan redeems die stil genegeerd worden.
+    log_channel_rewards(&ctx).await;
 
-    Ok(Ctx { broadcaster_id, reward_id, perma_reward_id, ..ctx })
+    Ok(ctx)
 }
 
-/// Vind de door-deze-app-beheerbare reward met deze titel, of maak ze aan. Synchroniseert
-/// de kost met de config (onze app beheert 'm → grijs in de Twitch-UI). Retourneert het
-/// reward-id.
-async fn ensure_reward(
-    ctx: &Ctx,
-    broadcaster_id: &str,
-    title: &str,
-    cost: u32,
-) -> Result<String, String> {
-    let list_url = format!(
-        "{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={broadcaster_id}&only_manageable_rewards=true"
+/// Log de titels van de channel-points-rewards van het kanaal. Puur informatief: we
+/// maken en beheren ze niet meer, maar zo staat in de log waar de titel op moet lijken.
+/// Mislukt de call (scope/rechten), dan is dat geen reden om het luik niet te starten.
+async fn log_channel_rewards(ctx: &Ctx) {
+    let url = format!(
+        "{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={}",
+        ctx.broadcaster_id
     );
-    let rewards = ctx.helix(reqwest::Method::GET, &list_url, None).await?;
-    let existing = rewards["data"]
-        .as_array()
-        .and_then(|arr| arr.iter().find(|r| r["title"].as_str() == Some(title)));
-
-    let id = if let Some(r) = existing {
-        let id = r["id"].as_str().unwrap_or("").to_string();
-        let cur_cost = r["cost"].as_u64().unwrap_or(0) as u32;
-        tracing::info!("Twitch-reward gevonden: '{title}' ({cur_cost} punten, id={id})");
-        if cur_cost != cost {
-            let upd = format!(
-                "{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={broadcaster_id}&id={id}"
-            );
-            match ctx
-                .helix(reqwest::Method::PATCH, &upd, Some(&json!({ "cost": cost })))
-                .await
-            {
-                Ok(_) => tracing::info!("Twitch-reward '{title}' kost bijgewerkt: {cur_cost} → {cost}"),
-                Err(e) => tracing::warn!("kon reward-kost '{title}' niet bijwerken: {e}"),
+    match ctx.helix(reqwest::Method::GET, &url, None).await {
+        Ok(v) => {
+            let titles: Vec<String> = v["data"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|r| r["title"].as_str())
+                        .map(|t| format!("'{t}'"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if titles.is_empty() {
+                tracing::warn!(
+                    "Twitch: het kanaal heeft (nog) geen channel-points-rewards — de streamer \
+                     moet ze zelf aanmaken, met 'kijker moet tekst invullen' aan."
+                );
+            } else {
+                tracing::info!("Twitch-rewards op het kanaal: {}", titles.join(", "));
             }
         }
-        id
-    } else {
-        let create_url =
-            format!("{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={broadcaster_id}");
-        let body = json!({
-            "title": title,
-            "cost": cost,
-            "prompt": "Typ je exacte Hytale-naam (enkel de 1e keer belangrijk; wordt daarna vastgezet).",
-            "is_user_input_required": true,
-        });
-        let created = ctx.helix(reqwest::Method::POST, &create_url, Some(&body)).await?;
-        let id = created["data"][0]["id"].as_str().unwrap_or("").to_string();
-        tracing::info!("Twitch-reward aangemaakt: '{title}' ({cost} punten, id={id})");
-        id
-    };
-    if id.is_empty() {
-        return Err(format!("geen reward-id voor '{title}' (aanmaken/zoeken faalde)"));
+        Err(e) => tracing::warn!("kon de reward-lijst niet ophalen (enkel diagnose): {e}"),
     }
-    Ok(id)
 }
 
 // --- EventSub-WebSocket-loop ------------------------------------------------
@@ -616,7 +594,7 @@ async fn ws_session(ctx: &Ctx, url: &str) -> Result<Option<String>, String> {
                 let sub_type = v["metadata"]["subscription_type"].as_str().unwrap_or("");
                 if sub_type == "channel.channel_points_custom_reward_redemption.add" {
                     // Dedup op message_id: Twitch levert at-least-once, een redelivery mag geen
-                    // tweede whitelist-grant (= 48u i.p.v. 24u) geven.
+                    // tweede whitelist-grant (= dubbele pasduur) geven.
                     let mid = v["metadata"]["message_id"].as_str().unwrap_or("");
                     let fresh = ctx.seen.lock().unwrap().insert_new(mid, SEEN_CAP);
                     if fresh {
@@ -636,24 +614,19 @@ async fn ws_session(ctx: &Ctx, url: &str) -> Result<Option<String>, String> {
 
 async fn subscribe_redemptions(ctx: &Ctx, session_id: &str) -> Result<(), String> {
     let url = format!("{HELIX}/helix/eventsub/subscriptions");
-    // Eén abonnement per (niet-lege) reward — zo krijgen we enkel ónze redemptions binnen,
-    // en on_redeem weet aan de reward-id welke pas (dag/permanent) het is.
-    for reward_id in [ctx.reward_id.as_str(), ctx.perma_reward_id.as_str()] {
-        if reward_id.is_empty() {
-            continue;
-        }
-        let body = json!({
-            "type": "channel.channel_points_custom_reward_redemption.add",
-            "version": "1",
-            "condition": {
-                "broadcaster_user_id": ctx.broadcaster_id,
-                "reward_id": reward_id,
-            },
-            "transport": { "method": "websocket", "session_id": session_id },
-        });
-        ctx.helix(reqwest::Method::POST, &url, Some(&body)).await?;
-        tracing::info!("Twitch EventSub: geabonneerd op reward-redemptions (reward_id={reward_id})");
-    }
+    // Eén breed abonnement: `reward_id` in de condition is optioneel (Twitch-docs) en we
+    // laten het weg, want we kénnen de id van de streamer haar reward niet — zij maakt ze
+    // aan, niet wij. We krijgen dus álle redemptions van het kanaal binnen en `on_redeem`
+    // filtert op titel. Bijkomend voordeel: een reward die pas ná de start wordt aangemaakt
+    // of hernoemd werkt meteen, zonder herstart.
+    let body = json!({
+        "type": "channel.channel_points_custom_reward_redemption.add",
+        "version": "1",
+        "condition": { "broadcaster_user_id": ctx.broadcaster_id },
+        "transport": { "method": "websocket", "session_id": session_id },
+    });
+    ctx.helix(reqwest::Method::POST, &url, Some(&body)).await?;
+    tracing::info!("Twitch EventSub: geabonneerd op alle reward-redemptions van het kanaal");
     Ok(())
 }
 
@@ -721,19 +694,53 @@ pub async fn run(pool: DbPool, cfg: Config) {
 
 #[cfg(test)]
 mod dedup {
-    use super::{is_loopback_ws, pass_kind_for, PassKind, Seen, SEEN_CAP};
+    use super::{
+        cap_whisper, fill_template, is_loopback_ws, pass_kind_for, PassKind, Seen, SEEN_CAP,
+    };
 
-    /// De reward-id bepaalt dag vs. permanent; onbekend/leeg → veilige val Day.
+    /// De reward-TITEL bepaalt dag vs. permanent vs. "niet van ons". Een lege
+    /// ingestelde titel matcht nooit — dat is precies hoe je zo'n redeem uitzet.
     #[test]
     fn pass_kind_routing() {
-        // Perma enkel bij een exacte, niet-lege match op de perma-reward-id.
-        assert_eq!(pass_kind_for("perma", "day", "perma"), PassKind::Perma);
-        assert_eq!(pass_kind_for("day", "day", "perma"), PassKind::Day);
-        // Onbekende reward → Day (verloopt vanzelf; nooit per ongeluk permanent).
-        assert_eq!(pass_kind_for("xyz", "day", "perma"), PassKind::Day);
-        // Perma uitgeschakeld (lege perma-id): nooit Perma, ook niet bij een lege reward-id.
-        assert_eq!(pass_kind_for("", "day", ""), PassKind::Day);
-        assert_eq!(pass_kind_for("day", "day", ""), PassKind::Day);
+        let day = "Hytale pass";
+        let perma = "Hytale forever";
+        assert_eq!(pass_kind_for(day, day, perma), Some(PassKind::Day));
+        assert_eq!(pass_kind_for(perma, day, perma), Some(PassKind::Perma));
+        // Elke andere beloning van het kanaal → niets doen.
+        assert_eq!(pass_kind_for("Song request", day, perma), None);
+        // Hoofdletters/spaties mogen niet uitmaken: de titel wordt twee keer overgetypt.
+        assert_eq!(pass_kind_for("  hytale PASS ", day, perma), Some(PassKind::Day));
+        // Perma-titel leeg = die redeem bestaat niet; een lege reward-titel matcht nooit.
+        assert_eq!(pass_kind_for(perma, day, ""), None);
+        assert_eq!(pass_kind_for("", day, perma), None);
+        // Beide instellingen leeg ⇒ market doet niets, ook niet bij een lege titel.
+        assert_eq!(pass_kind_for("", "", ""), None);
+        assert_eq!(pass_kind_for("Anything", "", ""), None);
+    }
+
+    /// De whisper-tekst is van de user; wij vullen enkel de plaatshouders in.
+    #[test]
+    fn whisper_template_fills_placeholders() {
+        let tpl = "Hoi {naam}, je mag {uren} uur op 1.2.3.4:5520 — {uren} uur!";
+        assert_eq!(
+            fill_template(tpl, "Waldstein", Some(2)),
+            "Hoi Waldstein, je mag 2 uur op 1.2.3.4:5520 — 2 uur!"
+        );
+        // Permanent: er is geen urental, dus {uren} blijft staan i.p.v. iets te verzinnen.
+        assert_eq!(fill_template("{naam}: {uren}", "X", None), "X: {uren}");
+        // Onbekende accolades blijven ongemoeid — het is de tekst van de user.
+        assert_eq!(fill_template("{onbekend} {naam}", "X", None), "{onbekend} X");
+    }
+
+    /// Kappen op 500 tekens gebeurt op een tekengrens (geen kapot UTF-8).
+    #[test]
+    fn whisper_capped_on_char_boundary() {
+        let short = "kort bericht";
+        assert_eq!(cap_whisper(short), short);
+        let long: String = "é".repeat(600);
+        let capped = cap_whisper(&long);
+        assert_eq!(capped.chars().count(), 500);
+        assert!(long.starts_with(capped));
     }
 
     /// Mock-detectie: enkel een loopback-URL telt als de lokale Twitch-mock (footgun-fix).
