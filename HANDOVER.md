@@ -2,8 +2,11 @@
 
 ## ⏭️ Sessie (2026-08-03) — Twitch-redeem omgebouwd: streamer bezit de reward, whisper i.p.v. chat
 
-**Gebouwd + volledig mock-getest, nog NIET live** (prod heeft geen `[twitch]`-config, dus het
-luik is daar hoe dan ook inert). Drie user-beslissingen zijn de kern:
+**Gecommit + gepusht + gedeployd** (`ec0ba96`; subtree `market-gh` → `4e0902d`; deploy 12:03,
+service active, site 200, schone log). Het Twitch-luik zélf draait op prod **niet**: prod
+`secrets.json` heeft geen twitch-velden, dus `twitch_ready()` is false. De deploy zet vooral de
+**nieuwe Settings-velden** klaar zodat Faybelle ze kan invullen. Drie user-beslissingen zijn de
+kern:
 
 1. **Faybelle maakt de reward zelf aan** in haar Twitch-dashboard (met invoerprompt voor de
    Hytale-naam). Market maakt/beheert **geen** rewards meer.
