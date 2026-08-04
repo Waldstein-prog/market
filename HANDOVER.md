@@ -91,12 +91,17 @@ voor iets wat hij niet vroeg. Nu: **geen tijd**, een whisper, en een
   > `"Test Input From CLI"`). Daarom dragen de kijkers die wél tijd moeten krijgen net die
   > tekst als vastgezette naam — anders zou élke redeem in de test een mismatch zijn.
 
+### 🔑 Iedereen uitgelogd (user-beslissing, uitgevoerd 2026-08-04 07:2x)
+Om de nieuwe scope bij ál de leden op te halen: **alle 21 sessierijen gewist** in prod
+`coins.db` (backup vooraf; `sessions` is wegwerpdata — niemand raakt coins, inventaris of pas
+kwijt; leden 25 en passen 6 stonden er ná de wis nog). De oudste sessie dateerde van 10 juli, dus
+zonder deze ingreep had een deel van de leden het toestemmingsscherm pas in oktober gezien.
+Iedereen moet nu één keer opnieuw "Sign in" doen en passeert daarbij langs
+`scope=identify+connections` (na de wis geverifieerd op prod). Pas dán is hun `twitch_id`
+gekoppeld en verschijnt een Twitch-pas op hun pagina.
+
 ### 📌 Open
-1. **De andere 20 leden zitten nog op een cookie van 90 dagen** en krijgen het toestemmings-
-   scherm dus voorlopig niet. Wie een Twitch-redeem doet en niet opnieuw aanmeldt, ziet zijn
-   pas niet op de site (toegang tot de server werkt wél — die staat volledig los van Discord).
-   Voorstel aan de user: één regel in de whisper-tekst i.p.v. iedereen forceren. Zijn keuze.
-3. De tale-commit `5f731cf` staat wél lokaal maar is **niet naar tale-gh gepusht** — dat is
+1. De tale-commit `5f731cf` staat wél lokaal maar is **niet naar tale-gh gepusht** — dat is
    werk van de andere sessie, niet aan mij om te publiceren.
 
 ---
