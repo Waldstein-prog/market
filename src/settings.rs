@@ -32,12 +32,15 @@ pub struct Spec {
     /// Kopje waaronder dit veld in de GUI staat.
     pub group: &'static str,
     pub kind: Kind,
-    /// Getal-default (Bool/Int). Bij `Kind::Text` niet gebruikt: een tekstveld dat
-    /// nooit gezet is, is **leeg** — speler-zichtbare tekst levert de user, die
-    /// verzinnen wij niet.
+    /// Getal-default (Bool/Int). Bij `Kind::Text` niet gebruikt — zie `text_default`.
     pub default: f64,
     pub min: f64,
     pub max: f64,
+    /// Startwaarde van een tekstveld, en enkel te vullen met tekst die de **user** zelf
+    /// gaf — wij verzinnen geen speler-zichtbare zinnen. Leeg = het veld begint leeg.
+    /// NB: dit geldt alleen zolang de sleutel nooit bewaard is. Wist Faybelle het veld,
+    /// dan blijft het leeg (= bericht uit); de startwaarde springt niet terug.
+    pub text_default: &'static str,
     /// Eén zin onder het veld: wat het getal dóét.
     pub help: &'static str,
 }
@@ -59,6 +62,7 @@ pub const SPECS: &[Spec] = &[
         group: COINS,
         kind: Kind::Int,
         default: 30.0,
+        text_default: "",
         min: 0.0,
         max: 3600.0,
         help: "Minimale tijd tussen twee coin-toekenningen per lid. Berichten binnen de cooldown leveren niets op.",
@@ -69,6 +73,7 @@ pub const SPECS: &[Spec] = &[
         group: DAILY,
         kind: Kind::Int,
         default: 20.0,
+        text_default: "",
         min: 1.0,
         max: 168.0,
         help: "Minimum tussen twee claims. Staat lager dan 24u zodat je niet elke dag een uur later moet klikken.",
@@ -79,6 +84,7 @@ pub const SPECS: &[Spec] = &[
         group: DAILY,
         kind: Kind::Int,
         default: 30.0,
+        text_default: "",
         min: 1.0,
         max: 336.0,
         help: "Opnieuw klikken binnen dit venster telt als de volgende streakdag. Erbuiten valt de streak terug naar dag 1.",
@@ -89,6 +95,7 @@ pub const SPECS: &[Spec] = &[
         group: DAILY,
         kind: Kind::Int,
         default: 10.0,
+        text_default: "",
         min: 0.0,
         max: 1_000_000.0,
         help: "De eerste claim is een willekeurig bedrag tussen deze ondergrens en de bovengrens.",
@@ -99,6 +106,7 @@ pub const SPECS: &[Spec] = &[
         group: DAILY,
         kind: Kind::Int,
         default: 100.0,
+        text_default: "",
         min: 0.0,
         max: 1_000_000.0,
         help: "Ligt deze onder de ondergrens, dan wint de ondergrens (geen leeg bereik).",
@@ -109,6 +117,7 @@ pub const SPECS: &[Spec] = &[
         group: DAILY,
         kind: Kind::Int,
         default: 1.0,
+        text_default: "",
         min: 0.0,
         max: 10_000.0,
         help: "Hoeveel de ondergrens omhooggaat per opeenvolgende streakdag.",
@@ -119,6 +128,7 @@ pub const SPECS: &[Spec] = &[
         group: DAILY,
         kind: Kind::Int,
         default: 5.0,
+        text_default: "",
         min: 0.0,
         max: 10_000.0,
         help: "Hoeveel de bovengrens omhooggaat per opeenvolgende streakdag.",
@@ -129,6 +139,7 @@ pub const SPECS: &[Spec] = &[
         group: DAILY,
         kind: Kind::Int,
         default: 200.0,
+        text_default: "",
         min: 1.0,
         max: 100_000.0,
         help: "Na zoveel dagen stopt de stijging. De streak zelf blijft wel doorlopen.",
@@ -139,6 +150,7 @@ pub const SPECS: &[Spec] = &[
         group: CHEST,
         kind: Kind::Bool,
         default: 1.0,
+        text_default: "",
         min: 0.0,
         max: 1.0,
         help: "Uit = er spawnen geen nieuwe chests meer. Een chest die nu openstaat popt nog gewoon.",
@@ -149,6 +161,7 @@ pub const SPECS: &[Spec] = &[
         group: CHEST,
         kind: Kind::Int,
         default: 3.0,
+        text_default: "",
         min: 1.0,
         max: 100.0,
         help: "Zoveel verschillende mensen moeten binnen het venster chatten voor een chest verschijnt.",
@@ -159,6 +172,7 @@ pub const SPECS: &[Spec] = &[
         group: CHEST,
         kind: Kind::Int,
         default: 10.0,
+        text_default: "",
         min: 1.0,
         max: 1440.0,
         help: "Het venster waarbinnen die chatters geteld worden. Ruimer = chests spawnen makkelijker.",
@@ -169,6 +183,7 @@ pub const SPECS: &[Spec] = &[
         group: CHEST,
         kind: Kind::Int,
         default: 10.0,
+        text_default: "",
         min: 1.0,
         max: 1440.0,
         help: "Hoelang een chest openstaat voor hij popt. De aftel-tekst in de embed leest dit mee.",
@@ -179,6 +194,7 @@ pub const SPECS: &[Spec] = &[
         group: CHEST,
         kind: Kind::Int,
         default: 60.0,
+        text_default: "",
         min: 0.0,
         max: 10_080.0,
         help: "Rust per kanaal na een chest — anti-spam. Op 0 kan er meteen een nieuwe komen.",
@@ -189,6 +205,7 @@ pub const SPECS: &[Spec] = &[
         group: CHEST,
         kind: Kind::Int,
         default: 2.0,
+        text_default: "",
         min: 1.0,
         max: 100.0,
         help: "Minder klikkers dan dit → de chest despawnt en er wordt niets uitbetaald.",
@@ -209,6 +226,7 @@ pub const SPECS: &[Spec] = &[
         group: TWITCH,
         kind: Kind::Text,
         default: 0.0,
+        text_default: "",
         min: 0.0,
         max: 0.0,
         help: "Exact de titel van de channel-points-reward in Twitch (hoofdletters maken niet uit). Leeg = market doet niets met redeems.",
@@ -219,6 +237,7 @@ pub const SPECS: &[Spec] = &[
         group: TWITCH,
         kind: Kind::Int,
         default: 2.0,
+        text_default: "",
         min: 1.0,
         max: 8760.0,
         help: "Hoelang een kijker op de server mag na één redeem. Twee keer redeemen stapelt de tijd op.",
@@ -229,9 +248,25 @@ pub const SPECS: &[Spec] = &[
         group: TWITCH,
         kind: Kind::Text,
         default: 0.0,
+        text_default: "",
         min: 0.0,
         max: 0.0,
         help: "Privébericht na een geslaagde redeem. Gebruik {uren} en {naam}; zet hier ook het server-adres in. Leeg = geen bericht.",
+    },
+    // Tweede redeem met een àndere Hytale-naam: er wordt niets toegekend (de naam ligt na de
+    // eerste keer vast) en de kijker krijgt dit bericht. De tekst is letterlijk van de user;
+    // Faybelle past ze hier aan zonder deploy. Leeg = geen bericht — de weigering blijft.
+    Spec {
+        key: "twitch_mismatch_whisper_text",
+        label: "Whisper bij een afwijkende naam",
+        group: TWITCH,
+        kind: Kind::Text,
+        default: 0.0,
+        text_default: "Oh oh, you filled in a different Hytale name. The time is not granted. \
+                       Contact Faybelle to get your points back.",
+        min: 0.0,
+        max: 0.0,
+        help: "Privébericht als de kijker bij een volgende redeem een andere Hytale-naam invult dan de naam die al aan zijn Twitch-account vastzit. Er wordt dan géén tijd toegekend. {naam} = de vastgezette naam. Leeg = geen bericht.",
     },
     Spec {
         key: "twitch_perma_reward_title",
@@ -239,6 +274,7 @@ pub const SPECS: &[Spec] = &[
         group: TWITCH,
         kind: Kind::Text,
         default: 0.0,
+        text_default: "",
         min: 0.0,
         max: 0.0,
         help: "Optionele tweede reward die permanente toegang geeft. Leeg = die redeem bestaat niet.",
@@ -249,6 +285,7 @@ pub const SPECS: &[Spec] = &[
         group: TWITCH,
         kind: Kind::Text,
         default: 0.0,
+        text_default: "",
         min: 0.0,
         max: 0.0,
         help: "Privébericht na een geslaagde permanente redeem. Gebruik {naam}. Leeg = geen bericht.",
@@ -296,7 +333,10 @@ pub fn bool_of(pool: &DbPool, key: &str) -> bool {
 pub fn str_of(pool: &DbPool, key: &str) -> String {
     let sp = spec(key).unwrap_or_else(|| panic!("onbekende setting: {key}"));
     assert!(sp.kind == Kind::Text, "setting {key} is geen tekst");
-    db::setting_get(pool, key).unwrap_or_default().trim().to_string()
+    match db::setting_get(pool, key) {
+        Some(v) => v.trim().to_string(),
+        None => sp.text_default.to_string(),
+    }
 }
 
 /// Schrijf een waarde weg, geklemd binnen de spec. Geeft `false` bij een
@@ -345,5 +385,37 @@ mod clamp_tests {
         assert_eq!(clamp_bounds(5.0, 10.0, 0.0), 5.0);
         assert_eq!(clamp_bounds(99.0, 10.0, 0.0), 10.0);
         assert_eq!(clamp_bounds(-5.0, 10.0, 0.0), 0.0);
+    }
+}
+
+/// Startwaarde van een tekstveld: alleen zolang de sleutel nooit bewaard is.
+#[cfg(test)]
+mod text_default_tests {
+    use super::*;
+
+    #[test]
+    fn startwaarde_geldt_tot_faybelle_het_veld_zelf_bewaart() {
+        let p = std::env::temp_dir().join(format!("market-td-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let pool = db::init_pool(p.to_str().unwrap());
+
+        // Nooit gezet ⇒ de tekst die de user aanleverde.
+        let start = str_of(&pool, "twitch_mismatch_whisper_text");
+        assert!(start.starts_with("Oh oh, you filled in a different Hytale name."));
+        assert!(start.ends_with("Contact Faybelle to get your points back."));
+
+        // Aangepast ⇒ die tekst wint.
+        assert!(set(&pool, "twitch_mismatch_whisper_text", "  Iets anders  "));
+        assert_eq!(str_of(&pool, "twitch_mismatch_whisper_text"), "Iets anders");
+
+        // Leeggemaakt ⇒ blijft leeg (= bericht uit). De startwaarde mag NIET terugspringen,
+        // anders valt zo'n bericht nooit uit te zetten.
+        assert!(set(&pool, "twitch_mismatch_whisper_text", ""));
+        assert_eq!(str_of(&pool, "twitch_mismatch_whisper_text"), "");
+
+        // De velden waar de user nog geen tekst voor gaf, beginnen wél leeg.
+        assert_eq!(str_of(&pool, "twitch_whisper_text"), "");
+
+        let _ = std::fs::remove_file(p);
     }
 }

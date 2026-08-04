@@ -8,8 +8,10 @@
 //! (`reconcile_market`/`enforce_whitelist`) — dit luik raakt de Hytale-FIFO dus NIET aan.
 //!
 //!   * 1e keer      → naam op goed vertrouwen registreren en VASTZETTEN.
-//!   * volgende keer → getypte tekst negeren, gewoon tijd erbij (stapelt, reset niet).
-//!   * lege/ongeldige naam → geen grant, wél een `twitch/rejected`-regel in het logboek.
+//!   * volgende keer → **dezelfde** naam (of niets ingevuld): tijd erbij, stapelt, reset niet.
+//!   * volgende keer met een **andere** naam → geen tijd, wél een whisper + een
+//!     `twitch/name_mismatch`-regel; Faybelle betaalt de punten manueel terug.
+//!   * lege/ongeldige naam bij de 1e keer → geen grant, wél een `twitch/rejected`-regel.
 //!
 //! ## De streamer bezit de reward, wij niet (omslag 2026-08-03)
 //! Vroeger maakte deze app de reward zelf aan via Helix. Nu maakt de **streamer** ze aan
@@ -68,6 +70,17 @@ fn clean_name(raw: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Typte de kijker bij een volgende redeem een **andere** Hytale-naam dan de naam die al aan
+/// zijn Twitch-account vastzit?
+///
+/// Hoofdletters en spaties eromheen tellen niet mee — dat is dezelfde speler die z'n eigen naam
+/// net anders intikt, en die mag zijn tijd gewoon krijgen. Een **leeg** invoerveld is evenmin
+/// een conflict: dan heeft hij niets nieuws beweerd en blijft de vastgezette naam gelden.
+fn name_conflicts(registered: &str, typed: &str) -> bool {
+    let typed = typed.trim();
+    !typed.is_empty() && !typed.eq_ignore_ascii_case(registered.trim())
 }
 
 /// Wijst een EventSub-URL naar een loopback-adres? (→ de lokale Twitch CLI-mock.)
@@ -356,10 +369,32 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
     };
     let uid = format!("twitch:{tid}");
 
-    // Naam vastzetten: bestaat er al een naam voor deze Twitch-id, dan die gebruiken
-    // (getypte tekst negeren). Anders de getypte naam opschonen en vastzetten.
+    // Naam vastzetten: bestaat er al een naam voor deze Twitch-id, dan blijft die gelden.
+    // Anders de getypte naam opschonen en vastzetten.
     let (name, first_time) = match db::get_whitelist_name(&ctx.pool, &uid) {
-        Some(n) => (n, false),
+        Some(n) => {
+            // Tweede redeem met een ANDERE naam: niets toekennen. De naam ligt na de eerste
+            // keer vast (tegen doorgeven aan derden), dus stilzwijgend de tijd op de oude
+            // naam zetten zou de kijker laten betalen voor iets wat hij niet vroeg. Hij
+            // krijgt een bericht en Faybelle betaalt de punten manueel terug.
+            if name_conflicts(&n, user_input) {
+                tracing::info!(
+                    "Twitch-redeem geweigerd (andere naam): {login} staat geregistreerd als \
+                     '{n}' maar typte '{user_input}' — manuele terugbetaling nodig"
+                );
+                db::log_event(
+                    &ctx.pool,
+                    now_epoch(),
+                    &db::LogEntry::new("twitch", "name_mismatch").actor(&uid, &n).detail(format!(
+                        "typed '{user_input}' but is registered as '{n}' — refund manually in Twitch"
+                    )),
+                );
+                let tpl = settings::str_of(&ctx.pool, "twitch_mismatch_whisper_text");
+                ctx.whisper(tid, &fill_template(&tpl, &n, None)).await;
+                return;
+            }
+            (n, false)
+        }
         None => match clean_name(user_input) {
             Some(n) => (n, true),
             None => {
@@ -698,9 +733,27 @@ pub async fn run(pool: DbPool, cfg: Config) {
 #[cfg(test)]
 mod dedup {
     use super::{
-        cap_whisper, fill_template, is_loopback_ws, pass_kind_for, PassKind, Seen, EVENTSUB_WS,
-        HELIX, SEEN_CAP, TOKEN_URL,
+        cap_whisper, fill_template, is_loopback_ws, name_conflicts, pass_kind_for, PassKind, Seen,
+        EVENTSUB_WS, HELIX, SEEN_CAP, TOKEN_URL,
     };
+
+    /// De naam ligt na de eerste redeem vast. Typt de kijker later een àndere naam, dan mag er
+    /// geen tijd toegekend worden — maar "anders getypt" is niet hetzelfde als "andere speler".
+    #[test]
+    fn afwijkende_naam_bij_een_volgende_redeem() {
+        // Dezelfde naam, anders getikt: gewoon doorgaan.
+        assert!(!name_conflicts("Waldstein", "Waldstein"));
+        assert!(!name_conflicts("Waldstein", "  waldstein "));
+        assert!(!name_conflicts("Waldstein", "WALDSTEIN"));
+        // Niets ingevuld = niets beweerd; de vastgezette naam blijft gelden.
+        assert!(!name_conflicts("Waldstein", ""));
+        assert!(!name_conflicts("Waldstein", "   "));
+        // Een écht andere naam: weigeren.
+        assert!(name_conflicts("Waldstein", "Faybelle"));
+        assert!(name_conflicts("Waldstein", "Waldstein2"));
+        // Ook rommel is een afwijking — dan heeft hij iets anders bedoeld dan wat vastligt.
+        assert!(name_conflicts("Waldstein", "geef mij tijd"));
+    }
 
     /// Regressie 2026-08-04: de basis stond op `helix.twitch.tv` — een hostnaam die
     /// niet bestaat, dus élke Helix-call faalde met een DNS-fout. De mock-e2e zag dat

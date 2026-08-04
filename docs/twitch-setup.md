@@ -33,6 +33,7 @@ Alles hier werkt **live** — geen deploy, geen herstart.
 | **Reward-titel (tijdelijke pas)** | Exact de titel uit stap 1 (hoofdletters/spaties eromheen maken niet uit). **Leeg = market negeert alle redeems.** |
 | **Duur van de pas** | Uren toegang per redeem. Twee keer redeemen stapelt op. |
 | **Whisper naar de kijker** | Het privébericht na een geslaagde redeem. Plaatshouders `{uren}` en `{naam}`. **Zet hier het serveradres in** — zonder adres geraakt de kijker er niet op. Leeg = geen bericht. |
+| **Whisper bij een afwijkende naam** | Bericht als de kijker bij een **volgende** redeem een **andere** Hytale-naam invult dan de naam die al aan zijn Twitch-account vastzit. Er wordt dan **géén tijd toegekend** — betaal de punten manueel terug. `{naam}` = de vastgezette naam. Leeg = geen bericht (de weigering blijft). |
 | **Reward-titel (permanente pas)** | Optionele tweede reward die permanente toegang geeft. Leeg = die redeem bestaat niet. |
 | **Whisper (permanente pas)** | Idem, met `{naam}` (geen `{uren}`). |
 
@@ -117,16 +118,21 @@ Twitch EventSub: geabonneerd op alle reward-redemptions van het kanaal
    sqlite3 market/coins.db "SELECT user_id, hytale_name, expires FROM hytale_whitelist;"
    ```
    → rij `twitch:<id> | TestSpeler | <epoch ~now + N uur>`.
-3. Redeem nogmaals → `expires` stapelt; **de getypte naam wordt genegeerd** (de naam ligt na
-   de eerste keer vast op dat Twitch-account, tegen doorgeven aan derden). Een foute naam
-   ruim je zelf op: `DELETE FROM hytale_whitelist WHERE user_id='twitch:<id>'`, of de pas
-   intrekken via het Hytale-panel.
+3. Redeem nogmaals met **dezelfde** naam (hoofdletters maken niet uit, leeg laten mag ook) →
+   `expires` stapelt. De naam ligt na de eerste keer vast op dat Twitch-account, tegen
+   doorgeven aan derden.
+   Redeem je met een **andere** naam, dan wordt er **niets** toegekend: de kijker krijgt de
+   whisper "afwijkende naam" en er komt een `🚫 twitch name_mismatch`-regel in het logboek.
+   **Betaal die redeem manueel terug.** Wil je de vastgezette naam vrijgeven (typefout bij de
+   eerste keer), trek de pas dan in via het Hytale-panel, of
+   `DELETE FROM hytale_whitelist WHERE user_id='twitch:<id>'`.
 4. Redeem met een lege/rare naam → **geen** grant, wel een `🚫 twitch reject`-regel in
    Manage → 📜 Log. **Betaal die redeem manueel terug** in de Twitch-wachtrij.
 
 ### Mock-test zonder Twitch-account
 `bash docs/twitch_e2e.sh` — start de Twitch-CLI EventSub-mock + market in mock/web-only
-(op poort 8701, dus naast een draaiende market) en injecteert vier redemptions. Bewijst
+(op poort 8701, dus naast een draaiende market) en injecteert vijf redemptions. Bewijst
 end-to-end: een vreemde titel wordt genegeerd, een ongeldige naam geeft geen grant, een
-geldige geeft de duur uit de settings + de whisper-tekst, en de perma-titel geeft
-`expires = NULL`.
+geldige geeft de duur uit de settings + de whisper-tekst, de perma-titel geeft
+`expires = NULL`, en een afwijkende naam laat de bestaande tijd ongemoeid + logt
+`name_mismatch`.

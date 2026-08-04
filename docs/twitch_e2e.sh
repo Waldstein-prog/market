@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # E2e mock-test voor het Twitch-luik, zonder echt Twitch-account (Twitch-CLI EventSub-mock).
-# Bewijst de vier paden van `on_redeem` sinds de streamer de reward zelf bezit:
-#   1. titel matcht NIET            → niets (geen grant) — alle andere beloningen van het kanaal
-#   2. titel matcht, naam ongeldig  → geen grant, wél een 'twitch/rejected'-regel (manueel terugbetalen)
-#   3. titel matcht, naam vastgezet → grant van N uur uit de SETTINGS + whisper met die tekst
-#   4. perma-titel matcht           → permanente grant (expires = NULL)
+# Bewijst de vijf paden van `on_redeem` sinds de streamer de reward zelf bezit:
+#   1. titel matcht NIET             → niets (geen grant) — alle andere beloningen van het kanaal
+#   2. titel matcht, naam ongeldig   → geen grant, wél een 'twitch/rejected'-regel (manueel terugbetalen)
+#   3. titel matcht, zelfde naam     → grant van N uur uit de SETTINGS + whisper met die tekst
+#   4. perma-titel matcht            → permanente grant (expires = NULL)
+#   5. titel matcht, ANDERE naam dan de vastgezette → geen tijd, 'twitch/name_mismatch' + whisper
+#
+# ⚠️ De Twitch-CLI kan `user_input` niet zetten: elke redeem stuurt letterlijk
+# "Test Input From CLI". Daarom dragen de kijkers die wél tijd moeten krijgen (111/333) die
+# tekst als vastgezette naam — enkel zo is het getypte veld gelijk aan wat vastligt. Kijker
+# 555 staat geregistreerd op een gewone naam en botst dus met diezelfde invoer: precies het
+# nieuwe pad dat we willen bewijzen.
 #
 # Vereist: de Twitch CLI (`twitch`) en een gebouwde debug-binary (`cargo build`).
 # Draai vanuit de market-projectroot:  bash docs/twitch_e2e.sh
@@ -43,11 +50,15 @@ c = sqlite3.connect(db)
 for k, v in [("twitch_reward_title", day), ("twitch_perma_reward_title", perma),
              ("twitch_pass_hours", "2"),
              ("twitch_whisper_text", "Je mag {uren} uur mee op de server als {naam} — 1.2.3.4:5520"),
-             ("twitch_perma_whisper_text", "Permanent binnen als {naam} — 1.2.3.4:5520")]:
+             ("twitch_perma_whisper_text", "Permanent binnen als {naam} — 1.2.3.4:5520"),
+             ("twitch_mismatch_whisper_text", "Andere naam dan {naam} — geen tijd toegekend.")]:
     c.execute("INSERT INTO settings(key,value) VALUES(?,?) "
               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
-# 333 (dagpas) en 111 (perma) hebben hun naam al vastgezet; 222 nog niet.
-for uid, name in [("twitch:111", "PermaGuy"), ("twitch:333", "DayGuy")]:
+# 333 (dagpas) en 111 (perma) hebben hun naam al vastgezet op wat de CLI stuurt, zodat hun
+# redeem doorgaat; 555 staat op een àndere naam (→ botsing); 222 heeft er nog geen.
+for uid, name in [("twitch:111", "Test Input From CLI"),
+                  ("twitch:333", "Test Input From CLI"),
+                  ("twitch:555", "DayGuy")]:
     c.execute("INSERT OR REPLACE INTO hytale_whitelist(user_id,hytale_name,expires) VALUES(?,?,?)",
               (uid, name, time.time() + 3600))
 c.commit(); c.close(); print("settings + pre-seed ok")
@@ -60,6 +71,7 @@ trig "Song request"   444 evt-other      # 1. niet van ons
 trig "$DAY_TITLE"     222 evt-badname    # 2. naam ongeldig, geen refund
 trig "$DAY_TITLE"     333 evt-day        # 3. 2 uur + whisper
 trig "$PERMA_TITLE"   111 evt-perma      # 4. permanent
+trig "$DAY_TITLE"     555 evt-mismatch   # 5. andere naam dan vastgezet → niets toekennen
 sleep 2
 
 # 5. Resultaat
@@ -79,6 +91,7 @@ for kind, act, det in c.execute(
     print(f"    {kind:16} {act or '':14} {det or ''}")
 print("  444 mag NIET in de whitelist staan (titel matchte niet);")
 print("  222 mag er niet bij komen (ongeldige naam); 333 moet ~3u hebben (1u seed + 2u).")
+print("  555 moet op ~1u BLIJVEN staan (andere naam getypt) + een name_mismatch-regel hebben.")
 c.close()
 PY
 
