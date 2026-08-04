@@ -39,7 +39,10 @@ use crate::config::Config;
 use crate::db::{self, DbPool};
 use crate::settings;
 
-const HELIX: &str = "https://helix.twitch.tv";
+/// Basis van de Helix-API. Let op: dat is `api.twitch.tv`, niet `helix.twitch.tv` —
+/// die laatste hostnaam bestaat niet en geeft een DNS-fout. Het pad `/helix/...`
+/// komt er per call achter.
+const HELIX: &str = "https://api.twitch.tv";
 const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
 const EVENTSUB_WS: &str = "wss://eventsub.wss.twitch.tv/ws";
 const TOKENS_FILE: &str = "twitch_tokens.json";
@@ -695,8 +698,21 @@ pub async fn run(pool: DbPool, cfg: Config) {
 #[cfg(test)]
 mod dedup {
     use super::{
-        cap_whisper, fill_template, is_loopback_ws, pass_kind_for, PassKind, Seen, SEEN_CAP,
+        cap_whisper, fill_template, is_loopback_ws, pass_kind_for, PassKind, Seen, EVENTSUB_WS,
+        HELIX, SEEN_CAP, TOKEN_URL,
     };
+
+    /// Regressie 2026-08-04: de basis stond op `helix.twitch.tv` — een hostnaam die
+    /// niet bestaat, dus élke Helix-call faalde met een DNS-fout. De mock-e2e zag dat
+    /// nooit, want die wijst de basis naar loopback. Vandaar deze test op de echte
+    /// constanten: de Helix-API woont op `api.twitch.tv`, met `/helix` in het pad.
+    #[test]
+    fn helix_base_is_the_real_api_host() {
+        assert_eq!(HELIX, "https://api.twitch.tv");
+        assert_eq!(format!("{HELIX}/helix/users"), "https://api.twitch.tv/helix/users");
+        assert_eq!(TOKEN_URL, "https://id.twitch.tv/oauth2/token");
+        assert_eq!(EVENTSUB_WS, "wss://eventsub.wss.twitch.tv/ws");
+    }
 
     /// De reward-TITEL bepaalt dag vs. permanent vs. "niet van ons". Een lege
     /// ingestelde titel matcht nooit — dat is precies hoe je zo'n redeem uitzet.

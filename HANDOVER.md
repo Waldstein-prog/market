@@ -1,4 +1,59 @@
-# Handover — Meadow Market (2026-08-03)
+# Handover — Meadow Market (2026-08-04)
+
+## ⏭️ Sessie (2026-08-04) — Twitch-luik STAAT LIVE op prod (was inert) + DNS-bug in de Helix-basis
+
+**Gedeployd + gecommit + gepusht.** Het Twitch-luik draaide tot vandaag **niet** op prod bij
+gebrek aan creds. Dat is nu opgelost en `twitch_ready()` is waar: market luistert live mee op de
+channel-points-redemptions van **faybelle___**.
+
+### De creds waren niet weg — ze stonden in het tale-luik
+Zoekactie leverde ze op in `/opt/hytale/bot/config.toml` (`[twitch] enabled=false`), van de oude
+Python-bridge uit juli. Zelfde app-registratie hergebruikt (`app_id`
+`f70589odg5k0v76e1o0qrbzmbs8xw9`), gekopieerd naar `/opt/market/secrets.json` (backup
+`.bak-20260804-044853`, 600, market:market). Geldigheid eerst bewezen met een
+`client_credentials`-token vóór er iets herstart werd.
+
+### 🐛 Bug: `HELIX` wees naar een hostnaam die niet bestaat
+`const HELIX = "https://helix.twitch.tv"` — **die host resolvet niet**; de Helix-API woont op
+`api.twitch.tv` (het `/helix` zit in het *pad*). Bij de eerste echte start dus meteen
+`Twitch-luik start niet: helix netwerkfout` op `/helix/users`. **De mock-e2e kon dit nooit
+vangen**: die wijst de basis naar loopback, dus alle 39 tests waren groen terwijl geen enkele
+echte call ooit kon slagen. Gefixt + regressietest `helix_base_is_the_real_api_host` die de vier
+echte endpoint-constanten vastzet (**40/40 groen**). Diagnose liep via DNS, niet via gokken:
+`getent ahosts helix.twitch.tv` leeg, `id.twitch.tv` wél resolvend.
+
+### OAuth: device flow i.p.v. de redirect
+De browser-OAuth uit de doc gaf **`redirect_mismatch`** — `http://localhost:17563` staat niet in
+de app-registratie. Niet gerepareerd maar omzeild: **device code flow**
+(`POST /oauth2/device`), waarbij de streamer een code typt op `twitch.tv/activate`. Geen
+redirect-URL, geen listener, werkt vanaf gelijk welk toestel — en dus ook bruikbaar als we enkel
+via SSH werken. Token binnen, geverifieerd via `/oauth2/validate`: **faybelle___** (id
+`934674170`), scopes `channel:read:redemptions` + `user:manage:whispers`. Weggeschreven als
+`/opt/market/twitch_tokens.json` (600, market:market).
+
+### Stand op prod na de deploy
+```
+Twitch-luik actief — kanaal=faybelle___, reward-titel='Meadowland Day Pass', perma-titel=(uit), pas=2u
+Twitch EventSub: geabonneerd op alle reward-redemptions van het kanaal
+```
+Nagekeken via Helix + de settings-tabel, want dit zijn de twee stille faalmodi:
+- Reward **'Meadowland Day Pass'**: `invoerveld=True`, kost **1**, ingeschakeld. ✅
+- `twitch_whisper_text` **ingevuld** door Faybelle, mét serveradres `167.235.142.113:5520`.
+  Gebruikt geen `{naam}`/`{uren}` — mag, de plaatshouders zijn optioneel.
+- `twitch_pass_hours = 2`; perma-titel leeg ⇒ permanente redeem **uit**.
+
+### ⏳ Wat nog niet bewezen is
+1. **Een echte redeem** — nog niemand heeft de reward ingewisseld. Dát is de enige test die
+   overblijft; alles ervoor is geverifieerd.
+2. **De whisper** kan 401 geven als het streamer-account **geen geverifieerd telefoonnummer**
+   heeft. Onbekend tot de eerste redeem. Gevolg is beperkt: de **pas wordt toch toegekend**,
+   enkel het bericht met het serveradres ontbreekt. Zichtbaar in `journalctl -u market`.
+3. **Kost = 1 channel point** — dat oogt als een test-instelling; als de reward publiek gaat,
+   beslist Faybelle de echte prijs (in de Twitch-UI, market raakt de kost niet aan).
+4. Het secret is in juli ooit in plaintext-chat geplakt. Roteren mag, maar dan moet de
+   device-flow-stap opnieuw.
+
+---
 
 ## ⏭️ Sessie (2026-08-03) — Twitch-redeem omgebouwd: streamer bezit de reward, whisper i.p.v. chat
 
