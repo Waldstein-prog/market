@@ -1,5 +1,70 @@
 # Handover — Meadow Market (2026-08-04)
 
+## ⏭️ Sessie (2026-08-04b) — Twitch-pas hoort nu bij een lid + weergave van de speeltijd
+
+**Gedeployd + gecommit + gepusht** (`d1dcdd4`; subtree `market-gh` → `8e7c442`). Aanleiding:
+Waldstein wisselde een Twitch-redeem in, geraakte op de server, maar zag géén pas-embleem op
+zijn inventarispagina.
+
+### Waarom dat embleem ontbrak
+De grant staat onder `twitch:497218221`, de pagina zocht op zijn Discord-id. Geen match.
+**Opgelost via de Discord-verbindingen**, niet via de Hytale-naam: de login vraagt nu ook de
+OAuth-scope **`connections`** en bewaart het (door Discord **geverifieerde**) Twitch-account in
+`coins.twitch_id`. Matchen op naam was de alternatieve weg en is bewust **verworpen** — de
+kijker typt die naam zelf, dus wie "FayBelle" intikt zou een pas op háár pagina zetten.
+Geen koppeling ⇒ geen embleem, want dan valt niet te wéten van wie die pas is.
+> ⚠️ Bestaande leden zien de extra toestemming één keer bij hun **volgende login**; pas dán is
+> `twitch_id` gevuld. Wie niet opnieuw inlogt, ziet zijn Twitch-pas niet.
+
+### ⚠️ Botsing met de tale-sessie — en hoe die beslecht is
+Halverwege bleek de tale-kant **dezelfde functie** te bouwen (`UsageStore.java`,
+`test_speeltijd.py`) en al live te hebben. Ik had toen al een eigen boekhouding staan
+(`presence.rs` las join/leave uit `chat_mirror.log` en pauzeerde `expires`). **Die is er weer
+uit.** Reden is niet enkel dubbel werk: hun bot leidt het toegekende tegoed af uit de
+**stijging** van market's `expires`, dus mijn keepalive-tik zou stilzwijgend **gratis uren**
+hebben uitgedeeld.
+
+**Afspraak (user):** tale beslist over whitelisting en speeltijd, **market doet verkoop +
+weergave** en leest enkel af wat tale aanlevert. Gevolg in de code:
+- `grant_day_whitelist` stapelt weer **exact** zoals vroeger — daar leest de bot op mee, dus
+  daar mag niets aan veranderen.
+- Nieuw **`pass_ledger.rs`** leest `/opt/hytale/passes.json` (v2:
+  `{"granted","used","remaining"}` per Hytale-naam, `644`).
+- **Online-zijn staat niet in dat bestand**, maar valt af te leiden: `used` loopt enkel op
+  terwijl iemand speelt. Daarom bemonsteren we elke 20 s op de achtergrond — enkel bij een
+  paginabezoek kijken zou betekenen dat wie nooit z'n inventaris opent, nooit als online geldt.
+- Geen gegevens (onleesbaar bestand of onbekende naam) ⇒ **terugval** op de oude weergave.
+
+### Weergave (user-beslissingen)
+Tijd staat **onder** het logo i.p.v. erover; het logo draagt een **pauzeteken** zolang de klok
+stilstaat. Bewust **géén tekstregel** die uitlegt waarom hij stilstaat — *"het pauzesymbool is
+evident en de context"*. Speelt hij, dan loopt de afteller gewoon door.
+
+### Toegang die daarvoor nodig was
+`/opt/hytale` was `750 hytale:hytale`, dus market kon er niet bij. Toegevoegd:
+`setfacl -m u:market:x /opt/hytale` — **enkel doorloop**, geen leesrecht op de map zelf. Op dat
+niveau staan geen geheimen (`passes.json` is `644`; de bot-config met het Twitch-secret staat in
+`/opt/hytale/bot/`, `600`). Terug te draaien met `setfacl -x u:market /opt/hytale`.
+
+### Verificatie
+- **45 tests groen.** Nieuw: de koppeling (naam alleen koppelt níét, andermans id evenmin) en
+  het grootboek (formaat, hoofdletter-ongevoelig, kapot/afwezig bestand geeft niets).
+- **Weergave met de echte binary** in drie toestanden nagekeken: offline → pauzeteken +
+  stilstaande tijd; online (`used` steeg) → lopende afteller op `now + remaining`; naam niet in
+  het grootboek → terugval op `expires`.
+- **Prod na de deploy:** `Pas-grootboek: /opt/hytale/passes.json gelezen — 1 pas(sen)`,
+  Twitch-luik actief (reward heet nu **'Meadowland Pass'**, pas **6u**), site 200.
+
+### 📌 Open
+1. **Waldstein moet één keer opnieuw inloggen** op de site; dan pas staat zijn embleem er.
+2. **`pass-usage.json` bestaat nog niet** op prod en `used` is `0.0` — de mod-teller van de
+   tale-kant is dus nog niet aan het werk. Zolang die op 0 blijft, ziet market iedereen als
+   *gepauzeerd*. Dat is de juiste voorzichtige kant, maar het is nog niet bewezen.
+3. De tale-commit `5f731cf` staat wél lokaal maar is **niet naar tale-gh gepusht** — dat is
+   werk van de andere sessie, niet aan mij om te publiceren.
+
+---
+
 ## ⏭️ Sessie (2026-08-04) — Twitch-luik STAAT LIVE op prod (was inert) + DNS-bug in de Helix-basis
 
 **Gedeployd + gecommit + gepusht.** Het Twitch-luik draaide tot vandaag **niet** op prod bij
