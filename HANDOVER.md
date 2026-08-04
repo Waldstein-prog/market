@@ -68,6 +68,26 @@ door de `\`-regelvoortzetting werd die uitleg deel van de URL, en die gaat recht
 `authorize_url()` met een test die de vorm vastlegt én `HeaderValue::from_str` erop loslaat.
 **Les:** commentaar hoort nooit in een `\`-voortgezette literal.
 
+### ➕ Afwijkende naam bij een volgende redeem (`574ad69`, gedeployd)
+De naam ligt na de eerste redeem vast op het Twitch-account. Tot nu werd afwijkende invoer
+**stilzwijgend genegeerd** en ging de tijd naar de oude naam — de kijker betaalde dan punten
+voor iets wat hij niet vroeg. Nu: **geen tijd**, een whisper, en een
+`twitch/name_mismatch`-regel als signaal om manueel terug te betalen.
+- `name_conflicts()` telt **hoofdletters en spaties eromheen niet** mee (dezelfde speler die
+  zich anders intikt hoort niet gestraft te worden) en een **leeg** invoerveld evenmin — dan is
+  er niets nieuws beweerd en blijft de vastgezette naam gelden.
+- Tekst = **letterlijk van de user**, als startwaarde in de nieuwe setting
+  `twitch_mismatch_whisper_text` (Manage → ⚙ Settings). `{naam}` = de vastgezette naam.
+- Daarvoor kreeg `Spec` een **`text_default`**. Die geldt **enkel zolang de sleutel nooit
+  bewaard is**: maakt Faybelle het veld leeg, dan blijft het leeg (bericht uit) i.p.v. terug te
+  springen — anders viel zo'n bericht nooit meer af te zetten. De GUI leest via `str_of`, dus
+  ze ziet de tekst meteen in het tekstvak staan.
+- **48 tests.** Mock-e2e uitgebreid naar **vijf** paden; kijker 555 staat op een andere naam,
+  blijft op zijn 1u staan en krijgt de mismatch-whisper.
+  > ⚠️ Valkuil in die test: de **Twitch-CLI kan `user_input` niet zetten** (altijd
+  > `"Test Input From CLI"`). Daarom dragen de kijkers die wél tijd moeten krijgen net die
+  > tekst als vastgezette naam — anders zou élke redeem in de test een mismatch zijn.
+
 ### 📌 Open
 1. **De andere 20 leden zitten nog op een cookie van 90 dagen** en krijgen het toestemmings-
    scherm dus voorlopig niet. Wie een Twitch-redeem doet en niet opnieuw aanmeldt, ziet zijn
