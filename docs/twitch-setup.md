@@ -55,15 +55,23 @@ Bij de start logt market ook alle reward-titels die het kanaal heeft.
 ```
 Meer staat er niet meer in: titels, duur en teksten wonen in de Settings-pagina.
 
+> **Stand op prod (2026-08-04):** de app-registratie bestaat al — dezelfde als die van de oude
+> tale-bot (`app_id` `f70589odg5k0v76e1o0qrbzmbs8xw9`). ID + secret staan in
+> `/opt/market/secrets.json`, met `twitch_enabled: false` tot er een tokens-bestand is.
+> Geldigheid bevestigd via een `client_credentials`-token. Enige blokker is nu stap 5.
+
 ## 5. OAuth-token van de streamer (eenmalig)
 ⚠️ **De whisper vereist een nieuwe scope** (`user:manage:whispers`). Een token van vóór
 2026-08-03 heeft die niet — dan lukt de whisper niet en zie je een 401 in de log. De
 stappen hieronder moeten dus één keer opnieuw, ingelogd op het **streamer**-account.
 
-**Stap A — autoriseren (browser).** Vul de Client ID in en open:
+**Stap A — autoriseren (browser).** Ingelogd op het **streamer**-account, open:
 ```
-https://id.twitch.tv/oauth2/authorize?client_id=CLIENT_ID&redirect_uri=http://localhost:17563&response_type=code&scope=channel%3Aread%3Aredemptions+user%3Amanage%3Awhispers
+https://id.twitch.tv/oauth2/authorize?client_id=f70589odg5k0v76e1o0qrbzmbs8xw9&redirect_uri=http://localhost:17563&response_type=code&scope=channel%3Aread%3Aredemptions+user%3Amanage%3Awhispers&force_verify=true
 ```
+`force_verify=true` toont altijd het toestemmingsscherm mét accountnaam — zo autoriseer je niet
+per ongeluk met een verkeerd ingelogd account. (Voor een andere app-registratie: vervang de
+`client_id`.)
 → **Authorize**. De browser springt naar `http://localhost:17563/?code=XXXX&scope=…` (die
 pagina laadt niet — normaal). Kopieer de waarde **`code=XXXX`**.
 > De `code` vervalt na enkele minuten en is eenmalig. Foutmelding? Herhaal stap A.
