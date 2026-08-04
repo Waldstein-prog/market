@@ -1,5 +1,43 @@
 # Handover — Meadow Market (2026-08-04)
 
+## ⏭️ Sessie (2026-08-04c, vanuit de tale-sessie) — passen zijn onbeperkt stapelbaar, permanente pas weg
+
+**Gedeployd** (market draait sinds 09:07). Op vraag van Jo, en in één lijn met de omslag aan
+serverkant: **toegang is een tegoed aan speeltijd**, dus "één pas tegelijk" sloeg nergens meer op.
+
+**Wat er veranderd is:**
+1. **`db::purchase`** — de twee blokkades op een pas met looptijd zijn weg: `"You already have an
+   active pass."` en `"You already have permanent access."`. Elke aankoop schrijft dus tijd bij; een
+   lid mag zoveel passen kopen als het wil en de uren stapelen.
+   ⚠️ De eerste keek naar `expires`, en die waarde zegt sinds 2026-08-04 **niets meer** over wie er
+   binnen mag — dat beslist de server op het tegoed.
+2. **`shop_slot` (web.rs)** — `day_pass_active` weg (plus de parameter `has_pass`). De pas-kaart
+   toont niet langer "Bought" zolang er een pas loopt, ze blijft gewoon koopbaar.
+3. **Permanente pas geschrapt.** `buy()` weigert nu een pas-item zónder looptijd
+   (`"This pass has no duration set."`) i.p.v. permanente toegang uit te delen; het
+   `pass_perma`-logpad is weg. `set_perma_access`/`grant_perma_whitelist` blijven staan voor de
+   aparte Twitch-perma-reward en admin-toekenningen. Op prod bestond geen enkele permanente grant en
+   geen enkele `perma_access`-vlag, dus dit ging schoon.
+4. **Item 22 (`Hytale Permanent Pass`) is hergebruikt als `Test Pass`** — nooit gekocht, dus geen
+   historiek die breekt. Staat op **900 s (15 min), prijs 100, en `sold_out = 1`**: dat zijn
+   plaatshouders, hij is bewust **dicht** tot Jo prijs, duur en beschrijving zelf zet in
+   Manage → Shop. Meerdere pas-items naast elkaar mogen: de server leest bij elke aankoop de
+   `duration` van het item dat écht gekocht werd (via `inventory`).
+
+**⚠️ Contract met tale — gewijzigd, lees dit vóór je aan de passen raakt.** De tale-bot leidt het
+tegoed **niet meer** af uit de grootte van de stijging van `expires` (dat gaf gratis uren na
+bot-downtime). Nu geldt: **gaat `expires` omhoog, dan is er één pas bijgekomen**, en tale boekt de
+duur die bij díe pas hoort — `settings.twitch_pass_hours` voor een redeem, `items.duration` van het
+laatst gekochte pas-item voor de shop. Gevolg voor market: `expires` met exact de itemduur ophogen
+per aankoop (zoals `grant_day_whitelist` doet) en er verder van afblijven. Eén klok per speler:
+market houdt één rij per bron (Discord-id en `twitch:<id>`), tale telt ze samen op één tegoed.
+
+**Nog open aan market-kant:** de bevestiging na een aankoop zegt
+`"Whitelisted as X — N of access left."` en rekent dat uit `expires - nu`. Dat is wandkloktijd, geen
+speeltijd — het klopt zolang iemand niet gespeeld heeft en overschat daarna. De echte stand staat in
+`/opt/hytale/passes.json` (`granted - used`, wereld-leesbaar), maar die is pas ~15 s na de aankoop
+bijgewerkt. **Tekstkeuze is aan Jo**, dus hier niets aan veranderd.
+
 ## ⏭️ Sessie (2026-08-04b) — Twitch-pas hoort nu bij een lid + weergave van de speeltijd
 
 **Gedeployd + gecommit + gepusht** (`d1dcdd4`; subtree `market-gh` → `8e7c442`). Aanleiding:

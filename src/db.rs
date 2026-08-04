@@ -2081,35 +2081,13 @@ pub fn purchase(pool: &DbPool, uid: &str, item_id: i64, ts: f64) -> Result<(i64,
             return Err(format!("You already own {}.", item.name));
         }
     }
-    // Dagpas is nutteloos zodra je permanente toegang hebt.
-    if item.category == "boost" && item.duration > 0 {
-        let perma: i64 = tx
-            .query_row(
-                "SELECT perma_access FROM coins WHERE user_id = ?1",
-                params![uid],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
-            .unwrap_or(0);
-        if perma != 0 {
-            return Err("You already have permanent access.".to_string());
-        }
-        // Eén pas tegelijk: zolang er een lopende pas is, koop je er geen tweede bij —
-        // pas als de timer afloopt kan het weer. De shop toont de dagpas ondertussen als
-        // "Bought". (`expires IS NULL` vangt ook de permanente grant af.)
-        let lopend: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM hytale_whitelist
-                  WHERE user_id = ?1 AND (expires IS NULL OR expires > ?2)",
-                params![uid, ts],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        if lopend > 0 {
-            return Err("You already have an active pass.".to_string());
-        }
-    }
+    // NB (2026-08-04): hier stonden twee blokkades op de pas — "je hebt al een lopende
+    // pas" en "je hebt al permanente toegang". Allebei geschrapt (user-wens). Een pas is
+    // sinds die dag een **tegoed aan speeltijd** dat enkel leegloopt terwijl je in-game
+    // bent, en elke pas telt zijn tijd bij dat tegoed. Meerdere passen kopen is dus geen
+    // fout maar de normale gang van zaken: je koopt uren, geen venster. De oude check keek
+    // bovendien naar `expires`, en die waarde zegt niets meer over wie er binnen mag — dat
+    // beslist de server op het tegoed. Zie tale/HANDOVER.md, blok "SPEELTIJD-PASSEN".
     // Voorraad: -1 = onbeperkt. Anders atomisch aftellen binnen deze transactie — twee
     // gelijktijdige kopers mogen nooit samen de laatste pas meenemen.
     if item.stock >= 0 {
@@ -2335,6 +2313,10 @@ pub fn revoke_pass_by_name(pool: &DbPool, hytale_name: &str) -> Vec<(String, Str
     hits
 }
 
+/// Zet de permanente-toegangsvlag. Sinds 2026-08-04 verkoopt de shop geen permanente
+/// pas meer (toegang is een tegoed aan speeltijd), dus dit wordt nergens meer aangeroepen —
+/// het blijft staan voor een admin-toekenning of als de Twitch-perma-reward ooit aangaat.
+#[allow(dead_code)]
 pub fn set_perma_access(pool: &DbPool, uid: &str, username: &str) {
     let conn = pool.get().expect("db");
     conn.execute(

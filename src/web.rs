@@ -1461,9 +1461,7 @@ async fn market(
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
 
-    // Lopende pas? Dan toont de dagpas als "Bought" tot de timer afloopt (één tegelijk).
-    let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
-    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass, coins);
+    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins);
 
     // Volledig shop-ontwerp (zoals de Admin shop preview): dagrotatie + Hytale-passen.
     // Twee onderdelen zijn nog niet vrijgegeven en staan grijs (zie de flags bovenaan).
@@ -1559,8 +1557,7 @@ async fn admin_shop_preview(
         db::owned_item_ids(&st.pool, &uid).into_iter().collect();
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
-    let has_pass = db::get_whitelist(&st.pool, &uid, now_secs()).is_some();
-    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, has_pass, coins);
+    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins);
 
     let offers: String =
         db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
@@ -1715,16 +1712,15 @@ fn item_thumb(it: &db::Item) -> String {
 
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
-fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pass: bool, coins: i64) -> String {
-    // Lopende dagpas (boost mét looptijd + een actieve pas): zolang de timer loopt koop je
-    // geen tweede. Toon de kaart dan als "Bought" (grijs + ✓ + Bought-knop), niet als
-    // "Out of Stock" — er ís voorraad, jíj hebt er gewoon al een lopen.
-    let day_pass_active = it.category == "boost" && it.duration > 0 && has_pass;
+fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, coins: i64) -> String {
+    // NB (2026-08-04): een pas met looptijd toonde hier "Bought" zolang je er een had
+    // lopen — één tegelijk. Dat is geschrapt (user-wens): een pas is nu een tegoed aan
+    // speeltijd, dus je mag er altijd bijkopen en de uren stapelen. De kaart blijft dus
+    // gewoon koopbaar, hoeveel passen je ook al hebt.
     // Reeds gekocht → kaart grijs + groene ✓, geen Buy-knop. Geldt voor bezeten
-    // verzamel-items, de permanente pas (bij permanente toegang) én de dagpas zolang die loopt.
+    // verzamel-items en voor de permanente pas (bij permanente toegang).
     let bought = (owned && (it.category == "inventory" || it.category == "booster"))
-        || (it.category == "boost" && it.duration == 0 && has_perma)
-        || day_pass_active;
+        || (it.category == "boost" && it.duration == 0 && has_perma);
     // Dicht voor iedereen, om twee redenen:
     //  * handmatig op Out of stock gezet (sold_out);
     //  * voorraad op 0 → dicht tot een admin aanvult.
@@ -1735,11 +1731,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, has_pa
     // niet meer te verschijnen in de normale flow). buy()/purchase() blijft server-side de
     // rem als vangnet (race of handmatige POST).
     let cant_afford = coins < it.price;
-    let action = if day_pass_active {
-        // Eigen "Bought"-knop (grijs, niet klikbaar) i.p.v. de lege owned-actie, zodat
-        // duidelijk is dat je pas loopt.
-        "<button class=\"buy owned\" type=\"button\" disabled>Bought</button>".to_string()
-    } else if dicht && !bought {
+    let action = if dicht && !bought {
         "<button class=\"buy\" type=\"button\" disabled>Out of Stock</button>".to_string()
     } else if bought {
         String::new()
@@ -2377,22 +2369,28 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
             ))
             .into_response();
         }
-        // Al permanent? Dan is een tweede permanente pas zinloos (dagpas blokkeert
-        // `purchase` zelf al).
-        if item.duration == 0 && db::has_perma_access(&st.pool, &uid) {
+        // De permanente pas bestaat niet meer (user-wens 2026-08-04): toegang is sinds die
+        // dag een tegoed aan speeltijd, en "voor altijd" past daar niet in. Een pas-item
+        // zonder looptijd is dus een instelfout — koop weigeren i.p.v. stilzwijgend
+        // permanente toegang uitdelen. Zet er in Manage → Shop een aantal minuten op.
+        // (`set_perma_access`/`grant_perma_whitelist` blijven bestaan voor de aparte
+        // Twitch-perma-reward en voor admin-toekenningen.)
+        if item.duration == 0 {
             return Redirect::to(&format!(
                 "/market?err={}",
-                pct("You already have permanent access.")
+                pct("This pass has no duration set.")
             ))
             .into_response();
         }
-        // Saldo eraf + regelcontrole (blokkeert dagpas-bij-perma en te laag saldo).
+        // Saldo eraf + regelcontrole (voorraad en te laag saldo).
         let oldbal = match db::purchase(&st.pool, &uid, f.item_id, now_secs()) {
             Ok((bal, it)) => bal + it.price,
             Err(e) => return Redirect::to(&format!("/market?err={}", pct(&e))).into_response(),
         };
-        // Activeer meteen: dagpas → whitelist-timer (stapelt), perma → permanente whitelist.
-        let msg = if item.duration > 0 {
+        // Activeer meteen: de itemduur wordt bovenop de lopende grant gestapeld. De server
+        // (tale-bot) ziet die verhoging binnen 15s en zet ze om in speeltijd op het tegoed
+        // van deze speler — één klok per account, gevoed door al zijn passen.
+        let msg = {
             let exp =
                 db::grant_day_whitelist(&st.pool, &uid, &hname, item.duration as f64, now_secs());
             if exp.is_finite() {
@@ -2402,16 +2400,12 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
             } else {
                 format!("You already have permanent access ({hname}).")
             }
-        } else {
-            db::set_perma_access(&st.pool, &uid, &name);
-            db::grant_perma_whitelist(&st.pool, &uid, &hname);
-            format!("Permanent Hytale access — whitelisted as {hname}.")
         };
-        // Logboek: pas gekocht (dag/perma) + wie er onder welke Hytale-naam gewhitelist is.
+        // Logboek: pas gekocht + wie er onder welke Hytale-naam gewhitelist is.
         db::log_event(
             &st.pool,
             now_secs(),
-            &db::LogEntry::new("shop", if item.duration > 0 { "pass_day" } else { "pass_perma" })
+            &db::LogEntry::new("shop", "pass_day")
                 .actor(&uid, &name)
                 .reference(item.id as u64)
                 .amount(item.price)
