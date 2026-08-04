@@ -220,10 +220,6 @@ pub fn init_pool(path: &str) -> DbPool {
     // `connections`; leeg = niet gekoppeld of nog niet opnieuw ingelogd. Dit is de
     // enige betrouwbare brug tussen een `twitch:<id>`-pas en een Discord-lid.
     ensure_column(&conn, "coins", "twitch_id", "TEXT NOT NULL DEFAULT ''");
-    // Pas-tijd die nog te spelen valt, in seconden — gevuld zodra de speler OFFLINE
-    // gaat (pas op pauze), NULL zolang hij online is (dan telt `expires` af). Zie
-    // `pause_pass`/`resume_pass`: een pas van 6 uur is 6 uur in-game tijd.
-    ensure_column(&conn, "hytale_whitelist", "remaining", "REAL");
     // Hoogste level waarvoor al een cadeau-embed gepost is (per lid). Nieuwe level-ups
     // vuren enkel voor levels bóven deze marker → geen dubbele of gemiste cadeaus.
     ensure_column(&conn, "coins", "gifted_level", "INTEGER NOT NULL DEFAULT 0");
@@ -2411,48 +2407,28 @@ pub fn get_whitelist(pool: &DbPool, uid: &str, now: f64) -> Option<(String, Opti
     .filter(|(_, exp)| exp.map_or(true, |e| e > now))
 }
 
-// --- Pas op speeltijd (pauze bij offline) ----------------------------------
+// --- Passen: wie is de eigenaar, en wie houdt de klok bij? ---------------
 //
-// Een pas van N uur is N uur **in-game** tijd. Het model houdt daarom twee velden bij:
+// Sinds 2026-08-04 is een pas een **tegoed aan speeltijd**: hij loopt enkel leeg terwijl de
+// speler in-game is. Die boekhouding hoort bij de **tale-kant** — alleen de server weet wie
+// er online is. Market blijft de winkel: het verkoopt tijd en stapelt ze op `expires`, en de
+// tale-bot leidt het toegekende tegoed af uit de **stijging** van dat veld.
 //
-// * `expires`   — absolute epoch. Telt af terwijl de speler ONLINE is, en is tegelijk
-//                 het veld waar de tale-bot op whitelistet. Dat laatste is de reden dat
-//                 het ook tijdens een pauze in de toekomst moet blijven liggen.
-// * `remaining` — resterende speeltijd in seconden. Gevuld ⇒ de pas staat op PAUZE.
-//
-// Zolang iemand offline is, schuift een periodieke tik `expires` mee vooruit
-// (`PAUSE_KEEPALIVE_FLOOR` als bodem), anders zou de tale-bot hem van de whitelist halen
-// terwijl zijn pas net níét opgebruikt wordt. Bij het inloggen wordt `expires` exact op
-// `now + remaining` gezet — daardoor kloppen de in-game HUD-afteller en de kick-op-de-
-// seconde vanzelf, zonder één regel wijziging aan de tale-kant.
-//
-// Permanente pas = `expires IS NULL`; die krijgt nooit een `remaining`.
+// Daarom staat hier geen enkele pauze-logica meer. `expires` is voor market een
+// aankoop-grootboek geworden, geen wandklok waar je op mag aftellen; de resterende tijd komt
+// uit `passes.json` (zie `crate::pass_ledger`).
 
-/// Ondergrens waarmee een gepauzeerde pas whitelistbaar blijft tussen twee keepalive-tikken.
-/// Ruim boven de tik-frequentie: een gemiste tik mag niemand van de server werken.
-pub const PAUSE_KEEPALIVE_FLOOR: f64 = 3600.0;
-
-/// Een pas zoals de site hem toont.
+/// Een pas zoals market hem kent: van wie, en of hij permanent is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PassView {
     pub hytale_name: String,
     /// None ⇒ permanent.
     pub expires: Option<f64>,
-    /// Some(secs) ⇒ op pauze (speler offline); None ⇒ loopt (of permanent).
-    pub remaining: Option<f64>,
 }
 
 impl PassView {
-    /// Resterende speeltijd in seconden; None bij een permanente pas.
-    pub fn secs_left(&self, now: f64) -> Option<f64> {
-        match (self.remaining, self.expires) {
-            (Some(r), _) => Some(r.max(0.0)),
-            (None, Some(e)) => Some((e - now).max(0.0)),
-            (None, None) => None,
-        }
-    }
-    pub fn is_paused(&self) -> bool {
-        self.remaining.is_some()
+    pub fn is_permanent(&self) -> bool {
+        self.expires.is_none()
     }
 }
 
@@ -2463,8 +2439,8 @@ impl PassView {
 /// Discord-verbindingen van het lid zelf. Geen koppeling ⇒ enkel de eigen Discord-grant,
 /// en dat is de juiste uitkomst: dan is er geen manier om te wéten van wie die pas is.
 ///
-/// Heeft iemand er twee (bv. een gekochte dagpas én een Twitch-pas), dan wint de beste:
-/// permanent boven tijdelijk, anders de meeste resterende tijd.
+/// Heeft iemand er twee (bv. een gekochte dagpas én een Twitch-pas), dan wint permanent,
+/// en anders de verste `expires`.
 pub fn get_whitelist_linked(pool: &DbPool, uid: &str, now: f64) -> Option<PassView> {
     let conn = pool.get().expect("db");
     let twitch_id: String = conn
@@ -2482,37 +2458,30 @@ pub fn get_whitelist_linked(pool: &DbPool, uid: &str, now: f64) -> Option<PassVi
     };
     let mut stmt = conn
         .prepare(
-            "SELECT hytale_name, expires, remaining FROM hytale_whitelist
+            "SELECT hytale_name, expires FROM hytale_whitelist
              WHERE user_id = ?1 OR (?2 <> '' AND user_id = ?2)",
         )
         .expect("prepare linked whitelist");
     let rows = stmt
         .query_map(params![uid, twitch_key], |r| {
-            Ok(PassView {
-                hytale_name: r.get(0)?,
-                expires: r.get(1)?,
-                remaining: r.get(2)?,
-            })
+            Ok(PassView { hytale_name: r.get(0)?, expires: r.get(1)? })
         })
         .expect("query linked whitelist")
         .filter_map(Result::ok);
 
     let mut best: Option<PassView> = None;
     for p in rows {
-        // Verlopen én niet gepauzeerd ⇒ telt niet mee.
-        if p.expires.is_some() && p.remaining.is_none() && p.expires.unwrap_or(0.0) <= now {
-            continue;
-        }
-        if p.remaining.map_or(false, |r| r <= 0.0) {
+        // Verlopen grants tellen niet mee. NB: `expires` is een aankoop-grootboek — of er
+        // nog écht speeltijd over is, weet enkel de tale-kant.
+        if p.expires.map_or(false, |e| e <= now) {
             continue;
         }
         let better = match &best {
             None => true,
-            // Permanent slaat alles; anders wint de meeste speeltijd.
-            Some(b) => match (b.secs_left(now), p.secs_left(now)) {
+            Some(b) => match (b.expires, p.expires) {
                 (None, _) => false,
                 (_, None) => true,
-                (Some(bs), Some(ps)) => ps > bs,
+                (Some(be), Some(pe)) => pe > be,
             },
         };
         if better {
@@ -2520,62 +2489,6 @@ pub fn get_whitelist_linked(pool: &DbPool, uid: &str, now: f64) -> Option<PassVi
         }
     }
     best
-}
-
-/// Speler kwam ONLINE: de pauze eindigt. `expires` wordt exact `now + remaining`, zodat de
-/// in-game afteller en de kick kloppen. Doet niets bij een permanente of niet-gepauzeerde pas.
-/// Geeft het aantal aangepaste rijen (een naam kan bij meerdere grants horen).
-pub fn resume_pass(pool: &DbPool, hytale_name: &str, now: f64) -> usize {
-    let conn = pool.get().expect("db");
-    conn.execute(
-        "UPDATE hytale_whitelist
-            SET expires = ?2 + remaining, remaining = NULL
-          WHERE remaining IS NOT NULL AND expires IS NOT NULL
-            AND hytale_name = ?1 COLLATE NOCASE",
-        params![hytale_name, now],
-    )
-    .expect("resume pass")
-}
-
-/// Speler ging OFFLINE: bevries de resterende tijd. `expires` blijft in de toekomst liggen
-/// (bodem `PAUSE_KEEPALIVE_FLOOR`) zodat de tale-bot hem op de whitelist houdt.
-pub fn pause_pass(pool: &DbPool, hytale_name: &str, now: f64) -> usize {
-    let conn = pool.get().expect("db");
-    conn.execute(
-        "UPDATE hytale_whitelist
-            SET remaining = MAX(expires - ?2, 0),
-                expires   = ?2 + MAX(expires - ?2, ?3)
-          WHERE remaining IS NULL AND expires IS NOT NULL
-            AND hytale_name = ?1 COLLATE NOCASE",
-        params![hytale_name, now, PAUSE_KEEPALIVE_FLOOR],
-    )
-    .expect("pause pass")
-}
-
-/// Iedereen op pauze (serverherstart, of market weet niet meer wie online is).
-pub fn pause_all_passes(pool: &DbPool, now: f64) -> usize {
-    let conn = pool.get().expect("db");
-    conn.execute(
-        "UPDATE hytale_whitelist
-            SET remaining = MAX(expires - ?1, 0),
-                expires   = ?1 + MAX(expires - ?1, ?2)
-          WHERE remaining IS NULL AND expires IS NOT NULL",
-        params![now, PAUSE_KEEPALIVE_FLOOR],
-    )
-    .expect("pause all passes")
-}
-
-/// Houdt gepauzeerde passen whitelistbaar: schuif `expires` mee vooruit. Verandert niets
-/// aan de resterende speeltijd — dat is precies het punt van een pauze.
-pub fn keepalive_paused_passes(pool: &DbPool, now: f64) -> usize {
-    let conn = pool.get().expect("db");
-    conn.execute(
-        "UPDATE hytale_whitelist
-            SET expires = ?1 + MAX(remaining, ?2)
-          WHERE remaining IS NOT NULL AND expires IS NOT NULL",
-        params![now, PAUSE_KEEPALIVE_FLOOR],
-    )
-    .expect("keepalive paused passes")
 }
 
 /// Bewaar het Twitch-account dat aan dit Discord-lid hangt (leeg = ontkoppeld).
@@ -2609,33 +2522,20 @@ pub fn get_whitelist_name(pool: &DbPool, uid: &str) -> Option<String> {
 /// (bv. 60s) kan zetten om verloop te testen.
 pub fn grant_day_whitelist(pool: &DbPool, uid: &str, hytale_name: &str, add_secs: f64, now: f64) -> f64 {
     let conn = pool.get().expect("db");
-    let existing: Option<(Option<f64>, Option<f64>)> = conn
+    let existing: Option<Option<f64>> = conn
         .query_row(
-            "SELECT expires, remaining FROM hytale_whitelist WHERE user_id = ?1",
+            "SELECT expires FROM hytale_whitelist WHERE user_id = ?1",
             params![uid],
-            |r| Ok((r.get::<_, Option<f64>>(0)?, r.get::<_, Option<f64>>(1)?)),
+            |r| r.get::<_, Option<f64>>(0),
         )
         .optional()
         .expect("query whitelist expires");
     // Bestaande permanente grant: niets te stapelen.
-    if let Some((None, _)) = existing {
+    if let Some(None) = existing {
         return f64::INFINITY;
     }
-    // Pas staat op pauze (speler offline): stapel op de resterende SPEELTIJD, niet op de
-    // wandklok — anders zou tijd kopen terwijl je offline bent minder waard zijn.
-    if let Some((_, Some(rem))) = existing {
-        let new_rem = rem.max(0.0) + add_secs;
-        conn.execute(
-            "UPDATE hytale_whitelist
-                SET hytale_name = ?2, remaining = ?3, expires = ?4 + MAX(?3, ?5)
-              WHERE user_id = ?1",
-            params![uid, hytale_name, new_rem, now, PAUSE_KEEPALIVE_FLOOR],
-        )
-        .expect("grant day whitelist (paused)");
-        return now + new_rem;
-    }
     let base = match existing {
-        Some((Some(exp), _)) if exp > now => exp,
+        Some(Some(exp)) if exp > now => exp,
         _ => now,
     };
     let new_exp = base + add_secs;
@@ -2653,12 +2553,9 @@ pub fn grant_day_whitelist(pool: &DbPool, uid: &str, hytale_name: &str, add_secs
 pub fn grant_perma_whitelist(pool: &DbPool, uid: &str, hytale_name: &str) {
     let conn = pool.get().expect("db");
     conn.execute(
-        // Permanent kent geen pauze: `remaining` gaat mee leeg, anders zou een oude
-        // gepauzeerde rij de pas alsnog als "op pauze" tonen.
-        "INSERT INTO hytale_whitelist (user_id, hytale_name, expires, remaining)
-              VALUES (?1, ?2, NULL, NULL)
+        "INSERT INTO hytale_whitelist (user_id, hytale_name, expires) VALUES (?1, ?2, NULL)
          ON CONFLICT(user_id) DO UPDATE SET hytale_name = excluded.hytale_name,
-                                            expires = NULL, remaining = NULL",
+                                            expires = NULL",
         params![uid, hytale_name],
     )
     .expect("grant perma whitelist");
@@ -4022,98 +3919,16 @@ mod chest_counts_test {
     }
 }
 
-/// De pas die in speeltijd telt: pauzeren, hervatten, stapelen — en de brug van een
-/// Twitch-redeem naar het juiste Discord-lid.
+/// De brug van een Twitch-redeem naar het juiste Discord-lid. (De speeltijd-boekhouding
+/// zelf hoort bij de tale-kant — zie `crate::pass_ledger`.)
 #[cfg(test)]
-mod pass_playtime_test {
+mod pass_link_test {
     use super::*;
 
     fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
-        let p = std::env::temp_dir().join(format!("market-pp-{}-{tag}.db", std::process::id()));
+        let p = std::env::temp_dir().join(format!("market-pl-{}-{tag}.db", std::process::id()));
         let _ = std::fs::remove_file(&p);
         (init_pool(p.to_str().unwrap()), p)
-    }
-
-    /// De kern van de belofte: een pas van 6 uur is 6 uur ín het spel. Wandkloktijd
-    /// terwijl je offline bent mag er niets van afhalen.
-    #[test]
-    fn offline_tijd_verbruikt_geen_speeltijd() {
-        let (pool, path) = fresh("offline");
-        let t0 = 1_000_000.0;
-        grant_day_whitelist(&pool, "u1", "Speler", 6.0 * 3600.0, t0);
-
-        // Speelt één uur, en logt dan uit.
-        let t1 = t0 + 3600.0;
-        assert_eq!(pause_pass(&pool, "Speler", t1), 1);
-        let p = get_whitelist_linked(&pool, "u1", t1).expect("pas");
-        assert!(p.is_paused());
-        assert!((p.secs_left(t1).unwrap() - 5.0 * 3600.0).abs() < 1.0, "5u speeltijd over");
-
-        // Drie dagen niets doen: de resterende speeltijd staat er nog steeds.
-        let t2 = t1 + 3.0 * 86400.0;
-        keepalive_paused_passes(&pool, t2);
-        let p = get_whitelist_linked(&pool, "u1", t2).expect("pas leeft nog");
-        assert!((p.secs_left(t2).unwrap() - 5.0 * 3600.0).abs() < 1.0, "nog altijd 5u");
-
-        // ... en hij staat al die tijd op de whitelist (waar de tale-bot op kijkt),
-        // want anders zou de speler er niet meer op geraken om zijn tijd op te maken.
-        let (_n, exp) = {
-            let conn = pool.get().unwrap();
-            conn.query_row(
-                "SELECT hytale_name, expires FROM hytale_whitelist WHERE user_id='u1'",
-                [],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<f64>>(1)?)),
-            )
-            .unwrap()
-        };
-        assert!(exp.unwrap() > t2, "gepauzeerde pas blijft whitelistbaar");
-
-        // Logt weer in: vanaf nu telt hij weer af, en wel exact vanaf 5u.
-        assert_eq!(resume_pass(&pool, "Speler", t2), 1);
-        let p = get_whitelist_linked(&pool, "u1", t2).expect("pas");
-        assert!(!p.is_paused());
-        assert!((p.secs_left(t2).unwrap() - 5.0 * 3600.0).abs() < 1.0);
-        // Een uur later speelt hij nog steeds: nu is er wél een uur af.
-        let t3 = t2 + 3600.0;
-        let p = get_whitelist_linked(&pool, "u1", t3).expect("pas");
-        assert!((p.secs_left(t3).unwrap() - 4.0 * 3600.0).abs() < 1.0, "4u over");
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// Tijd bijkopen terwijl je offline bent mag niet minder waard zijn: het stapelt
-    /// op de resterende SPEELTIJD, niet op de wandklok.
-    #[test]
-    fn stapelen_tijdens_pauze_telt_bij_de_speeltijd() {
-        let (pool, path) = fresh("stack");
-        let t0 = 1_000_000.0;
-        grant_day_whitelist(&pool, "u1", "Speler", 2.0 * 3600.0, t0);
-        pause_pass(&pool, "Speler", t0); // meteen offline: 2u onaangeroerd
-
-        let later = t0 + 10.0 * 86400.0;
-        grant_day_whitelist(&pool, "u1", "Speler", 3.0 * 3600.0, later);
-        let p = get_whitelist_linked(&pool, "u1", later).expect("pas");
-        assert!(p.is_paused(), "blijft op pauze — hij is nog altijd offline");
-        assert!((p.secs_left(later).unwrap() - 5.0 * 3600.0).abs() < 1.0, "2u + 3u = 5u");
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// Een permanente pas kent geen pauze en geen teller.
-    #[test]
-    fn permanente_pas_pauzeert_niet() {
-        let (pool, path) = fresh("perma");
-        let t0 = 1_000_000.0;
-        grant_day_whitelist(&pool, "u1", "Speler", 3600.0, t0);
-        pause_pass(&pool, "Speler", t0);
-        grant_perma_whitelist(&pool, "u1", "Speler");
-
-        let p = get_whitelist_linked(&pool, "u1", t0 + 99999.0).expect("pas");
-        assert!(!p.is_paused(), "perma wist de pauze");
-        assert_eq!(p.secs_left(t0), None, "permanent = niets af te tellen");
-        assert_eq!(pause_pass(&pool, "Speler", t0), 0, "valt niet te pauzeren");
-
-        let _ = std::fs::remove_file(path);
     }
 
     /// Een Twitch-pas hoort bij een Discord-lid zodra dat lid zijn Twitch in Discord
@@ -4124,7 +3939,8 @@ mod pass_playtime_test {
         let t0 = 1_000_000.0;
         grant_day_whitelist(&pool, "twitch:497218221", "Waldstein", 2.0 * 3600.0, t0);
 
-        // Zonder koppeling weet market van niets: geen pas op de pagina.
+        // Zonder koppeling weet market van niets: geen pas op de pagina. Ook niet via de
+        // Hytale-naam — die typt de kijker zelf, dus daar kan iedereen andermans naam zetten.
         set_hytale_name(&pool, "disc1", "Waldstein", "Waldstein");
         assert!(get_whitelist_linked(&pool, "disc1", t0).is_none(), "naam alleen koppelt niet");
 
@@ -4136,12 +3952,12 @@ mod pass_playtime_test {
         set_twitch_id(&pool, "disc1", "Waldstein", "497218221");
         let p = get_whitelist_linked(&pool, "disc1", t0).expect("pas via twitch-koppeling");
         assert_eq!(p.hytale_name, "Waldstein");
-        assert!((p.secs_left(t0).unwrap() - 2.0 * 3600.0).abs() < 1.0);
+        assert!(!p.is_permanent());
 
         let _ = std::fs::remove_file(path);
     }
 
-    /// Twee passen tegelijk (gekochte dagpas + Twitch-redeem): de beste telt.
+    /// Twee passen tegelijk (gekochte dagpas + Twitch-redeem): permanent wint, anders de verste.
     #[test]
     fn beste_van_twee_passen_wint() {
         let (pool, path) = fresh("beste");
@@ -4151,25 +3967,22 @@ mod pass_playtime_test {
         set_twitch_id(&pool, "disc1", "Waldstein", "1");
 
         let p = get_whitelist_linked(&pool, "disc1", t0).expect("pas");
-        assert!((p.secs_left(t0).unwrap() - 5.0 * 3600.0).abs() < 1.0, "de langste wint");
+        assert!((p.expires.unwrap() - (t0 + 5.0 * 3600.0)).abs() < 1.0, "de verste wint");
 
-        // Permanent slaat elke tijdelijke pas, hoe lang die ook nog duurt.
         grant_perma_whitelist(&pool, "disc1", "Waldstein");
         let p = get_whitelist_linked(&pool, "disc1", t0).expect("pas");
-        assert_eq!(p.secs_left(t0), None, "permanent wint");
+        assert!(p.is_permanent(), "permanent wint");
 
         let _ = std::fs::remove_file(path);
     }
 
-    /// Een opgebruikte pas verdwijnt, ook als hij op pauze staat op 0.
+    /// Een verlopen grant telt niet mee.
     #[test]
-    fn opgebruikte_pas_telt_niet_meer() {
+    fn verlopen_grant_telt_niet_mee() {
         let (pool, path) = fresh("op");
         let t0 = 1_000_000.0;
         grant_day_whitelist(&pool, "u1", "Speler", 60.0, t0);
-        // Speelt de laatste minuut op en logt uit.
-        pause_pass(&pool, "Speler", t0 + 60.0);
-        assert!(get_whitelist_linked(&pool, "u1", t0 + 60.0).is_none(), "0 speeltijd = geen pas");
+        assert!(get_whitelist_linked(&pool, "u1", t0 + 61.0).is_none());
 
         let _ = std::fs::remove_file(path);
     }

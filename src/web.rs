@@ -1239,33 +1239,54 @@ fn inventory_home(
                {pause_mark}</div>{below}"
         )
     };
-    let pass_row = match db::get_whitelist_linked(pool, uid, now_secs()) {
-        // Gepauzeerd: geen aftellend script — de tijd staat stil, dus die zetten we
-        // één keer neer zoals hij is.
-        Some(p) if p.is_paused() => {
-            let s = p.secs_left(now_secs()).unwrap_or(0.0).max(0.0) as i64;
-            let txt = if s >= 3600 {
-                format!("{}h {}m", s / 3600, (s % 3600) / 60)
-            } else {
-                format!("{}m {}s", s / 60, s % 60)
-            };
-            pass_btn(true, format!("<span class=\"passtime\">{txt}</span>"))
+    // Countdown-script: telt af naar `data-passexp`. Enkel zinvol terwijl de klok loopt.
+    let ticker = "<script>(function(){var e=document.querySelector('[data-passexp]');if(!e)return;\
+           var exp=+e.dataset.passexp;function t(){var s=Math.max(0,exp-Date.now()/1000);\
+           var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
+           e.textContent=s>0?(h>0?h+'h '+m+'m':m+'m '+sec+'s'):'expired';\
+           e.classList.toggle('out',s<=0);\
+           if(s>0)setTimeout(t,1000);}t();})();</script>";
+    // Vaste weergave van een stilstaande teller (zelfde vorm als het script hierboven).
+    let still = |secs: f64| {
+        let s = secs.max(0.0) as i64;
+        if s >= 3600 {
+            format!("{}h {}m", s / 3600, (s % 3600) / 60)
+        } else {
+            format!("{}m {}s", s / 60, s % 60)
         }
+    };
+    let pass_row = match db::get_whitelist_linked(pool, uid, now_secs()) {
+        // Permanente pas: niets af te tellen → geen knop.
+        Some(p) if p.is_permanent() => String::new(),
+        // De resterende SPEELTIJD komt van de tale-kant. Speelt hij nu, dan loopt de teller;
+        // staat hij niet op de server, dan staat de tijd stil en zegt het pauzeteken dat.
+        Some(p) if crate::pass_ledger::lookup(&p.hytale_name).is_some() => {
+            let l = crate::pass_ledger::lookup(&p.hytale_name).expect("net nog gezien");
+            if l.online {
+                format!(
+                    "{}{ticker}",
+                    pass_btn(
+                        false,
+                        format!(
+                            "<span class=\"passtime\" data-passexp=\"{}\">…</span>",
+                            now_secs() + l.remaining
+                        )
+                    )
+                )
+            } else {
+                pass_btn(true, format!("<span class=\"passtime\">{}</span>", still(l.remaining)))
+            }
+        }
+        // Geen gegevens van de tale-kant (bestand onleesbaar, of die naam staat er niet in):
+        // val terug op de oude weergave i.p.v. een verzonnen tijd te tonen.
         Some(p) => match p.expires {
             Some(exp) => format!(
-                "{}\
-                 <script>(function(){{var e=document.querySelector('[data-passexp]');if(!e)return;\
-                   var exp=+e.dataset.passexp;function t(){{var s=Math.max(0,exp-Date.now()/1000);\
-                   var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
-                   e.textContent=s>0?(h>0?h+'h '+m+'m':m+'m '+sec+'s'):'expired';\
-                   e.classList.toggle('out',s<=0);\
-                   if(s>0)setTimeout(t,1000);}}t();}})();</script>",
+                "{}{ticker}",
                 pass_btn(
                     false,
                     format!("<span class=\"passtime\" data-passexp=\"{exp}\">…</span>")
                 )
             ),
-            // Permanente pas: niets te tellen → geen knop.
             None => String::new(),
         },
         None => String::new(),

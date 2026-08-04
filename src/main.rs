@@ -4,7 +4,7 @@ mod bot;
 mod config;
 mod db;
 mod discord_rest;
-mod presence;
+mod pass_ledger;
 mod settings;
 mod twitch;
 mod web;
@@ -38,15 +38,12 @@ async fn main() {
         });
     }
 
-    // Aanwezigheid op de Hytale-server: laat een pas enkel aftellen terwijl de speler
-    // écht speelt. Leest alleen mee in het chat-spiegel-log; zonder leesrecht meldt de
-    // taak dat één keer en stopt, en blijven passen op de wandklok lopen.
-    {
-        let pres_pool = pool.clone();
-        tokio::spawn(async move {
-            presence::run(pres_pool).await;
-        });
-    }
+    // Resterende speeltijd per pas komt van de tale-kant (passes.json) — die houdt de klok
+    // bij, want alleen de server weet wie er online is. Wij lezen enkel mee, zodat de site
+    // dezelfde tijd toont als het spel.
+    tokio::spawn(async move {
+        pass_ledger::run().await;
+    });
 
     // Web-only modus (lokaal testen): sla de bot-gateway over zodat een tweede
     // instance de live bot niet dubbel op de gateway zet (→ dubbele coins).
