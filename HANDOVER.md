@@ -56,6 +56,9 @@ niveau staan geen geheimen (`passes.json` is `644`; de bot-config met het Twitch
   Twitch-luik actief (reward heet nu **'Meadowland Pass'**, pas **6u**), site 200.
 
 ### ✅ Achteraf bevestigd op prod
+- **De whispers werken** (user, 2026-08-04): het streamer-account heeft een geverifieerd
+  telefoonnummer, dus de gevreesde 401 doet zich niet voor. Geldt voor alle drie de berichten
+  (geslaagde pas, permanente pas, afwijkende naam).
 - **De koppeling werkt**: na uitloggen + opnieuw aanmelden staat `Waldstein → twitch:497218221`
   in `coins.twitch_id`, precies de id waar de grant onder staat, en **het embleem verschijnt**.
 - **De tale-teller loopt**: `used` ging van `0.0` naar `112 s` — de mod-kant van de speeltijd is
