@@ -1966,23 +1966,33 @@ async fn login(
     }
     let state = rand_token();
     let redirect = st.cfg.oauth_redirect();
-    let url = format!(
-        "https://discord.com/oauth2/authorize?response_type=code\
-        // `connections` erbij (naast `identify`): daarmee mag market de accounts lezen die
-        // het lid zélf in Discord aan zijn profiel hing. We gebruiken er precies één ding
-        // van — het Twitch-account — om een `twitch:<id>`-pas aan het juiste lid te tonen.
-        // Bestaande leden krijgen de vraag één keer opnieuw bij hun volgende login.
-         &client_id={}&redirect_uri={}&scope=identify+connections&state={}",
-        pct(&st.cfg.client_id),
-        pct(&redirect),
-        pct(&state),
-    );
+    let url = authorize_url(&st.cfg.client_id, &redirect, &state);
     // Bewaar zowel de CSRF-state als de gewenste eindbestemming over de OAuth-roundtrip.
     let next = safe_next(q.next.as_deref());
     let sec = secure_attr(&st.cfg.base_url);
     let state_cookie = format!("oauth_state={state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600{sec}");
     let next_cookie = format!("oauth_next={next}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600{sec}");
     (set_cookies(&[&state_cookie, &next_cookie]), Redirect::to(&url)).into_response()
+}
+
+/// De Discord-autorisatie-URL waar we een lid heen sturen.
+///
+/// `connections` staat naast `identify` in de scope: daarmee mag market de accounts lezen die
+/// het lid zélf in Discord aan zijn profiel hing. We gebruiken er precies één ding van — het
+/// Twitch-account — om een `twitch:<id>`-pas aan het juiste lid te kunnen tonen. Bestaande
+/// leden krijgen die vraag één keer opnieuw bij hun volgende login.
+///
+/// Staat apart zodat er een test op kan: deze string gaat rechtstreeks in een
+/// `Location`-header, en alles wat er niet in hoort (spatie, nieuwe regel) levert een
+/// onbegrijpelijke *"failed to parse header value"* op bij het inloggen.
+fn authorize_url(client_id: &str, redirect: &str, state: &str) -> String {
+    format!(
+        "https://discord.com/oauth2/authorize?response_type=code\
+         &client_id={}&redirect_uri={}&scope=identify+connections&state={}",
+        pct(client_id),
+        pct(redirect),
+        pct(state),
+    )
 }
 
 #[derive(Deserialize)]
@@ -4778,6 +4788,32 @@ mod gem_swap_dryrun {
 
 #[cfg(test)]
 mod redirect_and_cookie {
+    use super::authorize_url;
+
+    /// Regressie 2026-08-04: er stond commentaar BINNEN de string-literal van deze URL, en
+    /// door de `\`-regelvoortzetting kwam die tekst in de URL zelf terecht. Gevolg: elke
+    /// login eindigde op *"failed to parse header value"*, want dit gaat in een
+    /// `Location`-header. Vandaar een test die de vorm van de URL vastlegt.
+    #[test]
+    fn autorisatie_url_is_een_geldige_headerwaarde() {
+        let url = authorize_url("CID", "https://magicmeadow.org/callback", "st4te");
+        assert_eq!(
+            url,
+            "https://discord.com/oauth2/authorize?response_type=code&client_id=CID\
+             &redirect_uri=https%3A%2F%2Fmagicmeadow.org%2Fcallback\
+             &scope=identify+connections&state=st4te"
+                .replace(' ', "")
+        );
+        // Wat een header kapotmaakt: witruimte of een regeleinde, waar dan ook.
+        assert!(!url.contains(' '), "geen spaties");
+        assert!(!url.contains('\n') && !url.contains('\r'), "geen regeleindes");
+        assert!(!url.contains("//") || url.matches("//").count() == 1, "geen commentaar erin");
+        // En de scope moet allebei de rechten vragen, anders blijft twitch_id leeg.
+        assert!(url.contains("scope=identify+connections"));
+        // De reqwest/axum-check die het in productie deed struikelen:
+        assert!(axum::http::HeaderValue::from_str(&url).is_ok(), "moet als header kunnen");
+    }
+
     use super::*;
 
     /// #8 — safe_next laat enkel eigen-site-paden door en weert de backslash-open-redirect.
