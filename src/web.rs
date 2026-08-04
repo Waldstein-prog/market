@@ -646,16 +646,24 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
    het slotje in het midden van het (uitgerekte) vak. */
 .slot.soon{{opacity:.5;filter:grayscale(.75);justify-content:center}}
 .slot.soon .thumb{{border:0;background:transparent;font-size:2.2rem}}
-/* Ronde Hytale-knop onderaan de Coins-tab, met de pas-timer eróver. De H in de
-   afbeelding is druk, dus de tijd krijgt een donker pilletje — anders leest hij niet. */
-.passbtn{{position:relative;width:125px;margin:1.4rem auto .2rem;line-height:0}}
+/* Ronde Hytale-knop onderaan de Coins-tab. De tijd staat ONDER het logo (niet meer
+   eróver): een pas telt in speeltijd, en het logo zelf draagt nu de toestand —
+   een pauzeteken zolang de speler niet op de server staat. */
+.passbtn{{position:relative;width:125px;margin:1.4rem auto 0;line-height:0}}
 .passbtn img{{width:100%;height:auto;border-radius:50%;display:block;
   box-shadow:0 6px 18px rgba(0,0,0,.45)}}
-.passtime{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
-  background:rgba(14,21,16,.82);color:#e8f0e4;font:800 1.9rem/1.2 system-ui,sans-serif;
-  padding:.1rem .5rem;border-radius:999px;white-space:nowrap;
-  font-variant-numeric:tabular-nums;border:1px solid rgba(232,240,228,.18)}}
-.passtime.out{{background:rgba(192,86,47,.9);color:#fff}}
+/* Pauzeteken: twee balkjes op een donkere schijf, zodat het ook op de drukke H leest.
+   Enkel zichtbaar als de pas stilstaat. */
+.passpause{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:56px;height:56px;border-radius:50%;background:rgba(14,21,16,.78);
+  border:1px solid rgba(232,240,228,.22);display:flex;align-items:center;
+  justify-content:center;gap:7px}}
+.passpause i{{display:block;width:9px;height:26px;border-radius:2px;background:#e8f0e4}}
+/* De afteller onder het logo. Tabular-nums zodat de cijfers niet zitten te wiebelen. */
+.passtime{{display:block;text-align:center;margin:.55rem auto 0;
+  color:#e8f0e4;font:800 1.35rem/1.2 system-ui,sans-serif;
+  font-variant-numeric:tabular-nums;line-height:1.2}}
+.passtime.out{{color:#e08a6a}}
 /* Zwevende naam-preview: blijft bovenaan zichtbaar terwijl je door de gems scrolt. */
 .nameshow{{display:flex;gap:.6rem;margin:.2rem 0 1rem;flex-wrap:wrap;
   position:sticky;top:.6rem;z-index:20;background:#182319;padding:.5rem;
@@ -1217,25 +1225,50 @@ fn inventory_home(
     // Eigen `data-passexp` i.p.v. de `.grant[data-exp]` van de Boosts-tab: die scripts
     // scannen het hele document, en alle tabs staan tegelijk in de HTML (enkel verborgen
     // via CSS), dus anders zouden twee timers op hetzelfde element vechten.
-    let pass_btn = |inner: String| {
+    // Het logo draagt de toestand, de tijd staat eronder. Bij een pauze (speler niet op de
+    // server) staat er een pauzeteken op het logo en blijft de teller stilstaan — een pas
+    // van N uur is N uur speeltijd.
+    let pass_btn = |paused: bool, below: String| {
+        let pause_mark = if paused {
+            "<span class=\"passpause\" aria-label=\"paused\"><i></i><i></i></span>"
+        } else {
+            ""
+        };
         format!(
             "<div class=\"passbtn\"><img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">\
-               {inner}</div>"
+               {pause_mark}</div>{below}"
         )
     };
-    let pass_row = match db::get_whitelist(pool, uid, now_secs()) {
-        Some((_n, Some(exp))) => format!(
-            "{}\
-             <script>(function(){{var e=document.querySelector('[data-passexp]');if(!e)return;\
-               var exp=+e.dataset.passexp;function t(){{var s=Math.max(0,exp-Date.now()/1000);\
-               var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
-               e.textContent=s>0?(h>0?h+'h '+m+'m':m+'m '+sec+'s'):'expired';\
-               e.classList.toggle('out',s<=0);\
-               if(s>0)setTimeout(t,1000);}}t();}})();</script>",
-            pass_btn(format!("<span class=\"passtime\" data-passexp=\"{exp}\">…</span>"))
-        ),
-        // Permanente pas (of helemaal geen pas): niets te tellen → geen knop.
-        Some((_, None)) | None => String::new(),
+    let pass_row = match db::get_whitelist_linked(pool, uid, now_secs()) {
+        // Gepauzeerd: geen aftellend script — de tijd staat stil, dus die zetten we
+        // één keer neer zoals hij is.
+        Some(p) if p.is_paused() => {
+            let s = p.secs_left(now_secs()).unwrap_or(0.0).max(0.0) as i64;
+            let txt = if s >= 3600 {
+                format!("{}h {}m", s / 3600, (s % 3600) / 60)
+            } else {
+                format!("{}m {}s", s / 60, s % 60)
+            };
+            pass_btn(true, format!("<span class=\"passtime\">{txt}</span>"))
+        }
+        Some(p) => match p.expires {
+            Some(exp) => format!(
+                "{}\
+                 <script>(function(){{var e=document.querySelector('[data-passexp]');if(!e)return;\
+                   var exp=+e.dataset.passexp;function t(){{var s=Math.max(0,exp-Date.now()/1000);\
+                   var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
+                   e.textContent=s>0?(h>0?h+'h '+m+'m':m+'m '+sec+'s'):'expired';\
+                   e.classList.toggle('out',s<=0);\
+                   if(s>0)setTimeout(t,1000);}}t();}})();</script>",
+                pass_btn(
+                    false,
+                    format!("<span class=\"passtime\" data-passexp=\"{exp}\">…</span>")
+                )
+            ),
+            // Permanente pas: niets te tellen → geen knop.
+            None => String::new(),
+        },
+        None => String::new(),
     };
     // Chest-teller onder de all-time-regel: hoeveel chests dit lid meeopende en won.
     let (opened, won) = db::chest_counts(pool, uid);
@@ -1914,7 +1947,11 @@ async fn login(
     let redirect = st.cfg.oauth_redirect();
     let url = format!(
         "https://discord.com/oauth2/authorize?response_type=code\
-         &client_id={}&redirect_uri={}&scope=identify&state={}",
+        // `connections` erbij (naast `identify`): daarmee mag market de accounts lezen die
+        // het lid zélf in Discord aan zijn profiel hing. We gebruiken er precies één ding
+        // van — het Twitch-account — om een `twitch:<id>`-pas aan het juiste lid te tonen.
+        // Bestaande leden krijgen de vraag één keer opnieuw bij hun volgende login.
+         &client_id={}&redirect_uri={}&scope=identify+connections&state={}",
         pct(&st.cfg.client_id),
         pct(&redirect),
         pct(&state),
@@ -2003,6 +2040,47 @@ async fn callback(
     if let Some(c) = me["accent_color"].as_i64() {
         let hex = format!("#{:06x}", (c as u32) & 0xff_ffff);
         db::set_discord_color(&st.pool, &uid, &name, &hex);
+    }
+
+    // Twitch-koppeling uit de Discord-verbindingen van het lid. Enkel een **geverifieerde**
+    // verbinding telt: `verified` betekent dat Discord zélf het Twitch-account bevestigd
+    // heeft, en dat is wat deze koppeling waard maakt — anders kon iemand een vreemde
+    // Twitch-id claimen en zo andermans pas op zijn pagina krijgen.
+    //
+    // Mislukt de call (scope geweigerd, Discord traag), dan is dat géén reden om de login te
+    // laten falen: we laten de bestaande koppeling dan gewoon staan.
+    match st
+        .http
+        .get("https://discord.com/api/v10/users/@me/connections")
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(r) => match r.json::<Value>().await {
+            Ok(v) => {
+                let twitch_id = v
+                    .as_array()
+                    .map(|conns| {
+                        conns
+                            .iter()
+                            .find(|c| {
+                                c["type"].as_str() == Some("twitch")
+                                    && c["verified"].as_bool() == Some(true)
+                            })
+                            .and_then(|c| c["id"].as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                db::set_twitch_id(&st.pool, &uid, &name, &twitch_id);
+                if !twitch_id.is_empty() {
+                    tracing::info!("Discord-login {name}: Twitch-koppeling {twitch_id}");
+                }
+            }
+            Err(e) => tracing::warn!("verbindingen onleesbaar voor {name}: {e}"),
+        },
+        Err(e) => tracing::warn!("kon Discord-verbindingen niet lezen voor {name}: {e}"),
     }
 
     let sess = rand_token();

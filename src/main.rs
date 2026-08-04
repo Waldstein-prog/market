@@ -4,6 +4,7 @@ mod bot;
 mod config;
 mod db;
 mod discord_rest;
+mod presence;
 mod settings;
 mod twitch;
 mod web;
@@ -34,6 +35,16 @@ async fn main() {
         let tw_pool = pool.clone();
         tokio::spawn(async move {
             twitch::run(tw_pool, tw_cfg).await;
+        });
+    }
+
+    // Aanwezigheid op de Hytale-server: laat een pas enkel aftellen terwijl de speler
+    // écht speelt. Leest alleen mee in het chat-spiegel-log; zonder leesrecht meldt de
+    // taak dat één keer en stopt, en blijven passen op de wandklok lopen.
+    {
+        let pres_pool = pool.clone();
+        tokio::spawn(async move {
+            presence::run(pres_pool).await;
         });
     }
 
