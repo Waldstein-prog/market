@@ -55,7 +55,12 @@ niveau staan geen geheimen (`passes.json` is `644`; de bot-config met het Twitch
 - **Prod na de deploy:** `Pas-grootboek: /opt/hytale/passes.json gelezen — 1 pas(sen)`,
   Twitch-luik actief (reward heet nu **'Meadowland Pass'**, pas **6u**), site 200.
 
-### ✅ Achteraf bevestigd op prod
+### ✅ Eindstand van de sessie (alles bevestigd op prod)
+- **Het embleem staat er** — user opnieuw ingelogd na de sessie-wis en de pas is zichtbaar.
+  Twee koppelingen al binnen: `Waldstein → 497218221` en `FayBelle → 934674170`.
+- **De volledige ketting is bewezen**, van begin tot eind: redeem → grant onder `twitch:<id>` →
+  tale whitelistet → speeltijd loopt af (`used` 0 → 139 s tijdens de sessie) → embleem met de
+  juiste tijd op de site → whisper bij de kijker.
 - **De whispers werken** (user, 2026-08-04): het streamer-account heeft een geverifieerd
   telefoonnummer, dus de gevreesde 401 doet zich niet voor. Geldt voor alle drie de berichten
   (geslaagde pas, permanente pas, afwijkende naam).
