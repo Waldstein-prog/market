@@ -55,11 +55,24 @@ niveau staan geen geheimen (`passes.json` is `644`; de bot-config met het Twitch
 - **Prod na de deploy:** `Pas-grootboek: /opt/hytale/passes.json gelezen — 1 pas(sen)`,
   Twitch-luik actief (reward heet nu **'Meadowland Pass'**, pas **6u**), site 200.
 
+### ✅ Achteraf bevestigd op prod
+- **De koppeling werkt**: na uitloggen + opnieuw aanmelden staat `Waldstein → twitch:497218221`
+  in `coins.twitch_id`, precies de id waar de grant onder staat, en **het embleem verschijnt**.
+- **De tale-teller loopt**: `used` ging van `0.0` naar `112 s` — de mod-kant van de speeltijd is
+  sindsdien echt aan het werk. Hele ketting rond: redeem → grant → tale telt af → market toont.
+
+### 🐛 Onderweg gefixt: login gaf *"failed to parse header value"* (`1448025`)
+Het commentaar over de nieuwe scope stond **binnen** de string-literal van de autorisatie-URL;
+door de `\`-regelvoortzetting werd die uitleg deel van de URL, en die gaat rechtstreeks in een
+`Location`-header. Compileerde probleemloos — als string klopte het. De URL-bouw zit nu in
+`authorize_url()` met een test die de vorm vastlegt én `HeaderValue::from_str` erop loslaat.
+**Les:** commentaar hoort nooit in een `\`-voortgezette literal.
+
 ### 📌 Open
-1. **Waldstein moet één keer opnieuw inloggen** op de site; dan pas staat zijn embleem er.
-2. **`pass-usage.json` bestaat nog niet** op prod en `used` is `0.0` — de mod-teller van de
-   tale-kant is dus nog niet aan het werk. Zolang die op 0 blijft, ziet market iedereen als
-   *gepauzeerd*. Dat is de juiste voorzichtige kant, maar het is nog niet bewezen.
+1. **De andere 20 leden zitten nog op een cookie van 90 dagen** en krijgen het toestemmings-
+   scherm dus voorlopig niet. Wie een Twitch-redeem doet en niet opnieuw aanmeldt, ziet zijn
+   pas niet op de site (toegang tot de server werkt wél — die staat volledig los van Discord).
+   Voorstel aan de user: één regel in de whisper-tekst i.p.v. iedereen forceren. Zijn keuze.
 3. De tale-commit `5f731cf` staat wél lokaal maar is **niet naar tale-gh gepusht** — dat is
    werk van de andere sessie, niet aan mij om te publiceren.
 
