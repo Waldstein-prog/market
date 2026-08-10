@@ -840,6 +840,9 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .sfield .stext{{flex:1 1 18rem;min-width:0;padding:.4rem .5rem;border:1px solid #2c3d2a;
   border-radius:8px;background:#0e1510;color:#e8f0e4;font:inherit}}
 .sfield textarea.stext{{resize:vertical;line-height:1.35}}
+/* `color-scheme:dark` zodat ook het uitklaplijstje zelf donker tekent — anders
+   levert de browser daar zijn eigen witte paneel voor, midden in een donkere pagina. */
+.sfield select.stext{{color-scheme:dark;cursor:pointer}}
 .sfield .shelp{{flex:1 1 100%;margin:.2rem 0 0 13.7rem;font-size:.8rem;color:#9db095}}
 .wtable{{width:100%;border-collapse:collapse;margin:.4rem 0 .8rem}}
 .wtable th{{text-align:left;font-size:.78rem;color:#9db095;font-weight:600;
@@ -3572,6 +3575,58 @@ fn unit_of(key: &str) -> &'static str {
     }
 }
 
+/// De keuzes achter een `Kind::Choice`-veld. Nu enkel de channel-points-rewards van
+/// het kanaal, zoals het Twitch-luik ze laatst ophaalde (elke 5 min). Dat luik heeft
+/// het token; deze pagina belt Twitch dus niet zelf.
+fn choice_options(pool: &DbPool, key: &str) -> Vec<(String, String)> {
+    match key {
+        "twitch_reward_id" | "twitch_perma_reward_id" => crate::twitch::cached_rewards(pool)
+            .into_iter()
+            .map(|r| (r.id, r.title))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Keuzelijst met de id als waarde en de titel als etiket. Twee dingen die makkelijk
+/// misgaan, en hier dus bewust afgevangen: een ingestelde waarde die niet (meer) in de
+/// lijst staat blijft **selecteerbaar en geselecteerd** — anders zou opslaan de keuze
+/// stil wissen zodra Twitch even onbereikbaar is. En een lege lijst zegt dat ook.
+fn choice_field(pool: &DbPool, key: &str) -> String {
+    let cur = settings::str_of(pool, key);
+    let opts = choice_options(pool, key);
+    let known = opts.iter().any(|(id, _)| id.eq_ignore_ascii_case(&cur));
+
+    let mut s = format!("<select id=\"{key}\" name=\"{key}\" class=\"stext\">");
+    s.push_str(&format!(
+        "<option value=\"\"{sel}>— niets —</option>",
+        sel = if cur.is_empty() { " selected" } else { "" }
+    ));
+    if !cur.is_empty() && !known {
+        s.push_str(&format!(
+            "<option value=\"{v}\" selected>⚠️ {v} — niet in de lijst</option>",
+            v = esc(&cur)
+        ));
+    }
+    for (id, title) in &opts {
+        let label = if title.is_empty() { id } else { title };
+        s.push_str(&format!(
+            "<option value=\"{id}\"{sel}>{label}</option>",
+            id = esc(id),
+            label = esc(label),
+            sel = if id.eq_ignore_ascii_case(&cur) { " selected" } else { "" },
+        ));
+    }
+    s.push_str("</select>");
+    if opts.is_empty() {
+        s.push_str(
+            "<div class=\"shelp\">Geen reward-lijst beschikbaar — het Twitch-luik heeft ze \
+             nog niet kunnen ophalen.</div>",
+        );
+    }
+    s
+}
+
 async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
@@ -3592,7 +3647,7 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
             current_group = sp.group;
         }
         // Tekstvelden lezen anders (str_of); f64_of paniekt er bewust op.
-        let val = if sp.kind == settings::Kind::Text {
+        let val = if matches!(sp.kind, settings::Kind::Text | settings::Kind::Choice) {
             0.0
         } else {
             settings::f64_of(&st.pool, sp.key)
@@ -3631,6 +3686,7 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
                     )
                 }
             }
+            settings::Kind::Choice => choice_field(&st.pool, sp.key),
         };
         groups.push_str(&format!(
             "<div class=\"sfield\"><label for=\"{k}\">{label}</label>{field}\
@@ -3757,10 +3813,12 @@ async fn admin_settings_save(
                     }
                     if value_of(sp.key).is_some() { "1" } else { "0" }.to_string()
                 }
-                settings::Kind::Int | settings::Kind::Text => match value_of(sp.key) {
-                    Some(v) => v,
-                    None => continue, // veld stond niet op het formulier
-                },
+                settings::Kind::Int | settings::Kind::Text | settings::Kind::Choice => {
+                    match value_of(sp.key) {
+                        Some(v) => v,
+                        None => continue, // veld stond niet op het formulier
+                    }
+                }
             };
             settings::set(&st.pool, sp.key, &raw);
         }
@@ -4777,6 +4835,53 @@ mod gem_swap_dryrun {
         let held: HashSet<String> = ["10"].iter().map(|s| s.to_string()).collect();
         let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "sapphire");
         assert_eq!(strip, vec!["10".to_string()], "Ruby weg; Sapphire niet gedragen → niet geraakt");
+    }
+}
+
+#[cfg(test)]
+mod choice_veld {
+    use super::choice_field;
+    use crate::db;
+
+    fn pool(tag: &str) -> (db::DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-cf-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (db::init_pool(p.to_str().unwrap()), p)
+    }
+
+    /// De keuzelijst toont titels maar bewaart id's, en de gekozen reward staat
+    /// geselecteerd — ook als ze intussen hernoemd is (dat is het hele punt).
+    #[test]
+    fn toont_titels_en_bewaart_ids() {
+        let (pool, path) = pool("ok");
+        db::kv_set(
+            &pool,
+            crate::twitch::REWARDS_CACHE_KEY,
+            r#"[{"id":"aaa-1","title":"🎫Meadowland Pass"},{"id":"bbb-2","title":"🌼Grow a Flower"}]"#,
+        );
+        crate::settings::set(&pool, "twitch_reward_id", "aaa-1");
+
+        let html = choice_field(&pool, "twitch_reward_id");
+        assert!(html.contains("<option value=\"aaa-1\" selected>🎫Meadowland Pass</option>"), "{html}");
+        assert!(html.contains("<option value=\"bbb-2\">🌼Grow a Flower</option>"), "{html}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Is de lijst er even niet (Twitch onbereikbaar), dan mag opslaan de keuze NIET
+    /// wissen: de ingestelde waarde blijft als geselecteerde optie staan.
+    #[test]
+    fn lege_lijst_wist_de_keuze_niet() {
+        let (pool, path) = pool("leeg");
+        crate::settings::set(&pool, "twitch_reward_id", "aaa-1");
+
+        let html = choice_field(&pool, "twitch_reward_id");
+        assert!(html.contains("value=\"aaa-1\" selected"), "{html}");
+        assert!(html.contains("niet in de lijst"), "{html}");
+        // Niets gekozen blijft ook gewoon niets.
+        crate::settings::set(&pool, "twitch_reward_id", "");
+        let html = choice_field(&pool, "twitch_reward_id");
+        assert!(html.contains("<option value=\"\" selected>"), "{html}");
+        let _ = std::fs::remove_file(path);
     }
 }
 

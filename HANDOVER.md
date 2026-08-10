@@ -1,4 +1,58 @@
-# Handover — Meadow Market (2026-08-04)
+# Handover — Meadow Market (2026-08-10)
+
+## ⏭️ Sessie (2026-08-10) — Twitch-redeem matcht op reward-**id**, niet meer op titel
+
+**Gedeployd** (market draait sinds 11:25) — nog **niet gecommit/gepusht**.
+
+### De bug van 2026-08-04 (pas nu gevonden)
+Faybelle hernoemde die ochtend haar rewards en zette er emoji's voor
+(`Meadowland Pass` → `🎫Meadowland Pass`; om 07:06 stond de oude naam nog in de log, om
+09:07 de nieuwe). `settings.twitch_reward_title` bleef `Meadowland Pass` en de vergelijking
+was exact (op trim/kapitaal na), dus **elke pas-redeem viel in de "niet van ons"-tak**:
+geen pas, geen whisper, punten weg, enkel een regel in journalctl.
+
+| tijd | kijker | wat er gebeurde |
+|---|---|---|
+| 12:28 / 12:41 / 12:46 | easycomes55 | 3× `🎫Meadowland Pass` genegeerd |
+| 13:11 | heijicat | genegeerd |
+
+Beiden geraakten uiteindelijk binnen via de site: `shop pass_day` van **500 coins** (12:33 en
+13:13), bot whitelistte binnen ~30 s. **Er staan dus nog 4 redeems open om manueel terug te
+betalen in Twitch.** De naam-mismatch-weigeringen van 07:13/07:14 (`Flupke`,
+`herr waldstein`) waren Waldsteins eigen test en werkten zoals bedoeld.
+
+### De fix
+- **`twitch_reward_title` → `twitch_reward_id`** (idem voor perma). Een reward-id verandert
+  nooit, ook niet bij hernoemen. `pass_kind_for` vergelijkt sindsdien id's.
+- **Nieuwe `Kind::Choice`** in `settings.rs`: opgeslagen als tekst (de id), in de GUI een
+  **keuzelijst met de titels** van het kanaal. Nodig, want een reward-id staat nérgens in het
+  Twitch-dashboard — die valt niet over te typen.
+- **Reward-lijst-cache** in `kv["twitch_rewards"]`, door het Twitch-luik ververst bij de start
+  en **elke 5 min**; de Settings-pagina tekent haar lijst daaruit (het web-luik heeft geen
+  token). Mislukt het ophalen, dan blijft de vorige lijst staan en blijft de gekozen optie
+  geselecteerd — **opslaan mag de keuze nooit stil wissen**.
+- **Eenmalige overgang** `adopt_reward_ids`: koppelt de oude titel aan een reward — eerst
+  letterlijk, anders op de titel herleid tot letters/cijfers (zo valt `🎫Meadowland Pass`
+  samen met `Meadowland Pass`), en **enkel bij precies één kandidaat**. Marker
+  `kv["twitch_reward_id_migrated"]`, want "niets gekozen" is een geldige keuze.
+- **Vroege waarschuwing** voor de enige stille faalmodus die overblijft: staat de ingestelde
+  id niet meer tussen de rewards (reward gewist en heraangemaakt = nieuwe id), dan zegt de
+  startregel `⚠️ STAAT NIET MEER TUSSEN DE REWARDS VAN HET KANAAL` en logt de verversing een
+  WARN. Het brede EventSub-abonnement blijft bewust breed: zo blijft élke genegeerde redeem
+  zichtbaar in de log — dat was op 04/08 het enige spoor.
+
+### Verificatie
+- **56 tests groen.** Nieuw: id-routing, "hernoemen breekt de koppeling niet", de overgang
+  tegen een echte DB (inclusief: één keer, en wachten tot er een lijst ís), het lezen van de
+  Helix-lijst, en de **echte prod-rewardlijst** van faybelle___ als anker.
+- **Prod na de deploy:** `twitch_reward_id overgenomen uit de oude titel-instelling —
+  'Meadowland Pass' is nu '🎫Meadowland Pass' (430733ab-e1fa-40a0-98ce-706743696c3e)` en
+  `Twitch-luik actief — reward='🎫Meadowland Pass' (430733ab…), pas=6u`. Cache 13 rewards,
+  marker gezet, site 200. Backup vóór de deploy: `/opt/market/coins.db.bak-20260810-rewardid`.
+- ⚠️ De oude rij `twitch_reward_title` blijft in `settings` staan (geen Spec meer, dus
+  onzichtbaar en ongelezen). Niet wissen: het is het bewijsstuk van de overgang.
+
+## Handover — Meadow Market (2026-08-04)
 
 ## ⏭️ Sessie (2026-08-04c, vanuit de tale-sessie) — passen zijn onbeperkt stapelbaar, permanente pas weg
 

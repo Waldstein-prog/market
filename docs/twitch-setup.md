@@ -30,16 +30,24 @@ Alles hier werkt **live** — geen deploy, geen herstart.
 
 | Veld | Betekenis |
 |---|---|
-| **Reward-titel (tijdelijke pas)** | Exact de titel uit stap 1 (hoofdletters/spaties eromheen maken niet uit). **Leeg = market negeert alle redeems.** |
+| **Reward (tijdelijke pas)** | Keuzelijst met de rewards van het kanaal — kies die uit stap 1. Market bewaart de **id**, niet de titel, dus hernoemen (of er een emoji voor zetten) breekt niets. **Niets gekozen = market negeert alle redeems.** |
 | **Duur van de pas** | Uren toegang per redeem. Twee keer redeemen stapelt op. |
 | **Whisper naar de kijker** | Het privébericht na een geslaagde redeem. Plaatshouders `{uren}` en `{naam}`. **Zet hier het serveradres in** — zonder adres geraakt de kijker er niet op. Leeg = geen bericht. |
 | **Whisper bij een afwijkende naam** | Bericht als de kijker bij een **volgende** redeem een **andere** Hytale-naam invult dan de naam die al aan zijn Twitch-account vastzit. Er wordt dan **géén tijd toegekend** — betaal de punten manueel terug. `{naam}` = de vastgezette naam. Leeg = geen bericht (de weigering blijft). |
-| **Reward-titel (permanente pas)** | Optionele tweede reward die permanente toegang geeft. Leeg = die redeem bestaat niet. |
+| **Reward (permanente pas)** | Optionele tweede reward die permanente toegang geeft. Niets gekozen = die redeem bestaat niet. |
 | **Whisper (permanente pas)** | Idem, met `{naam}` (geen `{uren}`). |
 
-Klopt de titel niet exact, dan gebeurt er niets en staat in de log:
-`Twitch-redeem '<titel>' … genegeerd — komt niet overeen met de ingestelde reward-titel(s)`.
-Bij de start logt market ook alle reward-titels die het kanaal heeft.
+Elke redeem van een àndere reward laat een regel na:
+`Twitch-redeem '<titel>' (<id>) … genegeerd — niet de ingestelde reward`.
+Bij de start logt market ook alle rewards die het kanaal heeft; die lijst wordt elke
+5 minuten ververst en voedt de keuzelijst hierboven.
+
+> **Waarom een id en geen titel?** Tot 2026-08-04 matchte market op de titel. Die dag
+> kreeg de reward er een emoji voor (`Meadowland Pass` → `🎫Meadowland Pass`) en vielen
+> vier redeems stil in de "niet van ons"-tak: geen pas, geen whisper, punten weg. Een
+> id verandert nooit. Wist je een reward en maak je ze opnieuw aan, dan is het wél een
+> nieuwe id — market zegt dat bij de start (`STAAT NIET MEER TUSSEN DE REWARDS`) en je
+> kiest ze gewoon opnieuw.
 
 ## 3. Twitch-app registreren (eenmalig, ontwikkelaar)
 1. <https://dev.twitch.tv/console/apps> → **Register Your Application**.
@@ -106,7 +114,7 @@ MARKET_WEB_ONLY=1 cargo run          # web_only = geen Discord-gateway (geen dub
 ```
 Verwacht in de log:
 ```
-Twitch-luik actief — kanaal=<login>, reward-titel='…', perma-titel=(uit), pas=2u
+Twitch-luik actief — kanaal=<login>, reward='…' (<id>), perma-reward=(uit), pas=2u
 Twitch-rewards op het kanaal: '…', '…'
 Twitch EventSub: geabonneerd op alle reward-redemptions van het kanaal
 ```

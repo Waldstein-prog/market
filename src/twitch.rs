@@ -16,13 +16,21 @@
 //! ## De streamer bezit de reward, wij niet (omslag 2026-08-03)
 //! Vroeger maakte deze app de reward zelf aan via Helix. Nu maakt de **streamer** ze aan
 //! in haar eigen dashboard (met "kijker moet tekst invullen" aan) en herkent market ze aan
-//! de **titel** uit `settings` (Manage → ⚙ Settings). Gevolgen, bewust aanvaard:
+//! de **id** uit `settings` (Manage → ⚙ Settings). Gevolgen, bewust aanvaard:
 //!
 //!   * We kunnen redemptions **niet** meer fulfillen of annuleren — Helix laat dat enkel toe
 //!     aan de app die de reward maakte (anders 403). **Terugbetalen gebeurt dus manueel** in
 //!     de Twitch-wachtrij; het logboek zegt wanneer dat nodig is.
-//!   * We abonneren **breed** (alle redemptions van het kanaal) en filteren zelf op titel.
-//!     Zo werkt een hernoemde of pas aangemaakte reward meteen, zonder herstart.
+//!   * We abonneren **breed** (alle redemptions van het kanaal) en filteren zelf op id.
+//!     Zo werkt een pas aangemaakte reward meteen na een keuze in Settings, zonder herstart.
+//!
+//! ## Waarom id en niet titel (2026-08-10)
+//! Tot 2026-08-04 herkenden we de reward aan haar **titel**. Die dag zette Faybelle er een
+//! emoji voor ('Meadowland Pass' → '🎫Meadowland Pass') en daarmee viel elke pas-redeem stil
+//! in de "niet van ons"-tak: vier redeems (3× easycomes55, 1× heijicat), geen pas, geen
+//! whisper, punten weg. Een reward-id verandert nooit — ook niet bij hernoemen — dus daar
+//! matchen we sindsdien op. De titel dient enkel nog om de keuzelijst leesbaar te maken.
+//! Zo'n id staat nergens in het Twitch-dashboard, vandaar de keuzelijst i.p.v. een tekstveld.
 //!
 //! Bevestiging gaat als **whisper** (Twitch-DM) naar de kijker — daar past ook het
 //! serveradres in, want zonder adres geraakt hij er niet op. De tekst zelf staat in de
@@ -88,11 +96,98 @@ fn is_loopback_ws(url: &str) -> bool {
     url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]")
 }
 
-/// Titels vergelijken zoals een mens ze bedoelt: spaties eromheen en hoofdletters
-/// mogen niet uitmaken. De streamer typt de titel twee keer over (in Twitch en in de
-/// settings) — een verschil in kapitaal mag de pas niet stil laten mislukken.
-fn title_matches(a: &str, b: &str) -> bool {
+// --- De rewards van het kanaal ----------------------------------------------
+/// Waar de laatst opgehaalde reward-lijst ligt (`kv`). De Settings-pagina tekent haar
+/// keuzelijst hieruit: het web-luik heeft geen Twitch-token, en een Helix-call bij elk
+/// paginabezoek zou de streamer op Twitch laten wachten. Faalt het ophalen, dan blijft
+/// de vorige lijst staan — beter een dag oude lijst dan een leeg keuzemenu.
+pub const REWARDS_CACHE_KEY: &str = "twitch_rewards";
+/// Marker voor de eenmalige overgang titel → id. Eenmalig omdat "niets gekozen" een
+/// geldige keuze is: zonder deze marker zou een leeggemaakte keuzelijst bij de
+/// volgende herstart weer gevuld worden vanuit de oude titel-instelling.
+const MIGRATED_KEY: &str = "twitch_reward_id_migrated";
+/// De lijst blijft vers zonder herstart: maakt de streamer een nieuwe reward aan, dan
+/// staat ze binnen dit interval in de keuzelijst. Eén Helix-call, dus goedkoop.
+const REWARDS_EVERY: Duration = Duration::from_secs(300);
+
+/// Eén channel-points-reward van het kanaal: de id waar we op matchen, en de titel
+/// waaraan een mens ze herkent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reward {
+    pub id: String,
+    pub title: String,
+}
+
+fn parse_rewards(v: &Value) -> Vec<Reward> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let id = r["id"].as_str()?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some(Reward {
+                        id: id.to_string(),
+                        title: r["title"].as_str().unwrap_or("").trim().to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// De rewards zoals ze bij de laatste geslaagde ophaling waren. Voor de Settings-pagina.
+pub fn cached_rewards(pool: &DbPool) -> Vec<Reward> {
+    db::kv_get(pool, REWARDS_CACHE_KEY)
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(|v| parse_rewards(&v))
+        .unwrap_or_default()
+}
+
+fn store_rewards(pool: &DbPool, rewards: &[Reward]) {
+    let v: Vec<Value> = rewards
+        .iter()
+        .map(|r| json!({ "id": r.id, "title": r.title }))
+        .collect();
+    db::kv_set(pool, REWARDS_CACHE_KEY, &Value::Array(v).to_string());
+}
+
+/// Id's vergelijken. Een lege ingestelde id matcht nooit — dat is precies hoe je zo'n
+/// redeem uitzet. Hoofdletter-ongevoelig, want zo'n id kan ook geplakt zijn.
+fn id_matches(a: &str, b: &str) -> bool {
     !b.trim().is_empty() && a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// Titel herleiden tot wat er echt staat: enkel letters en cijfers, kleingeschreven.
+/// Zo valt '🎫Meadowland Pass' samen met 'Meadowland Pass' — precies het verschil dat
+/// op 2026-08-04 vier redeems kostte. Enkel gebruikt om de oude titel-instelling
+/// éénmalig aan een id te koppelen, nooit om een redeem te beoordelen.
+fn norm_title(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
+}
+
+/// Welke reward bedoelde de oude titel-instelling? Eerst letterlijk (op hoofdletters
+/// en spaties na), daarna op de herleide titel — maar dan enkel als **precies één**
+/// reward past. Twee kandidaten betekent gokken, en een verkeerde koppeling deelt
+/// stil passen uit op de verkeerde reward.
+fn find_by_title<'a>(rewards: &'a [Reward], title: &str) -> Option<&'a Reward> {
+    let want = title.trim();
+    if want.is_empty() {
+        return None;
+    }
+    if let Some(r) = rewards.iter().find(|r| r.title.eq_ignore_ascii_case(want)) {
+        return Some(r);
+    }
+    let want = norm_title(want);
+    if want.is_empty() {
+        return None;
+    }
+    let mut hits = rewards.iter().filter(|r| norm_title(&r.title) == want);
+    match (hits.next(), hits.next()) {
+        (Some(r), None) => Some(r),
+        _ => None,
+    }
 }
 
 /// Vul de door de user geschreven whisper-tekst in. Onbekende accolades blijven
@@ -191,7 +286,7 @@ struct Ctx {
     tokens_file: PathBuf,
     tok: Mutex<Tokens>,
     broadcaster_id: String,
-    /// De reward-titels, de pasduur en de whisper-tekst staan bewust NIET hier: die
+    /// De gekozen rewards, de pasduur en de whisper-tekst staan bewust NIET hier: die
     /// worden per redeem vers uit `settings` gelezen, zodat een wijziging op de
     /// Settings-pagina meteen geldt (geen herstart).
     pool: DbPool,
@@ -325,12 +420,13 @@ enum PassKind {
     Perma,
 }
 
-fn pass_kind_for(title: &str, day_title: &str, perma_title: &str) -> Option<PassKind> {
-    // Perma eerst: staan beide titels per ongeluk gelijk, dan is permanent geven
-    // erger dan een paar uur geven — maar de keuze moet vastliggen, niet toevallig zijn.
-    if title_matches(title, perma_title) {
+fn pass_kind_for(reward_id: &str, day_id: &str, perma_id: &str) -> Option<PassKind> {
+    // Perma eerst: staan beide instellingen per ongeluk op dezelfde reward, dan is
+    // permanent geven erger dan een paar uur geven — maar de keuze moet vastliggen,
+    // niet toevallig zijn.
+    if id_matches(reward_id, perma_id) {
         Some(PassKind::Perma)
-    } else if title_matches(title, day_title) {
+    } else if id_matches(reward_id, day_id) {
         Some(PassKind::Day)
     } else {
         None
@@ -340,8 +436,14 @@ fn pass_kind_for(title: &str, day_title: &str, perma_title: &str) -> Option<Pass
 async fn on_redeem(ctx: &Ctx, event: &Value) {
     let tid = event.get("user_id").and_then(|x| x.as_str()).unwrap_or("");
     let login = event.get("user_login").and_then(|x| x.as_str()).unwrap_or("");
-    let title = event
-        .get("reward")
+    let reward = event.get("reward");
+    let reward_id = reward
+        .and_then(|r| r.get("id"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    // De titel doet niet meer mee aan de beslissing; ze staat er enkel voor de log,
+    // zodat een mens ziet wélke reward er langskwam.
+    let title = reward
         .and_then(|r| r.get("title"))
         .and_then(|x| x.as_str())
         .unwrap_or("");
@@ -354,16 +456,16 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
         return;
     }
 
-    // Titels vers uit de settings: hernoemt de streamer haar reward, dan volstaat het
-    // veld op de Settings-pagina aanpassen.
-    let day_title = settings::str_of(&ctx.pool, "twitch_reward_title");
-    let perma_title = settings::str_of(&ctx.pool, "twitch_perma_reward_title");
-    let Some(kind) = pass_kind_for(title, &day_title, &perma_title) else {
+    // Vers uit de settings: kiest de streamer een andere reward, dan geldt dat meteen.
+    let day_id = settings::str_of(&ctx.pool, "twitch_reward_id");
+    let perma_id = settings::str_of(&ctx.pool, "twitch_perma_reward_id");
+    let Some(kind) = pass_kind_for(reward_id, &day_id, &perma_id) else {
         // Elke andere beloning van het kanaal komt hier ook binnen; dat is geen fout.
-        // Wel loggen wát er langskwam: bij een titelverschil is dit de enige aanwijzing.
+        // Wel loggen wát er langskwam, mét id: is de gekozen reward per ongeluk
+        // gewist en opnieuw aangemaakt, dan is dit de enige aanwijzing.
         tracing::info!(
-            "Twitch-redeem '{title}' van {login} genegeerd — komt niet overeen met de \
-             ingestelde reward-titel(s)"
+            "Twitch-redeem '{title}' ({reward_id}) van {login} genegeerd — niet de \
+             ingestelde reward"
         );
         return;
     };
@@ -515,51 +617,121 @@ async fn bootstrap(cfg: &Config, pool: DbPool, mock: bool) -> Result<Ctx, String
     }
 
     let ctx = Ctx { broadcaster_id, ..ctx };
-    let day = settings::str_of(&ctx.pool, "twitch_reward_title");
-    let perma = settings::str_of(&ctx.pool, "twitch_perma_reward_title");
+    // Eerst de lijst ophalen: de eenmalige titel→id-overgang hieronder heeft ze nodig,
+    // en de startregel moet de titel van de gekozen reward kunnen tonen.
+    refresh_rewards(&ctx, true).await;
+    let rewards = cached_rewards(&ctx.pool);
+    adopt_reward_ids(&ctx.pool, &rewards);
     tracing::info!(
-        "Twitch-luik actief — kanaal={broadcaster_login}, reward-titel={}, perma-titel={}, pas={}u",
-        if day.is_empty() { "(leeg — redeems worden genegeerd)".into() } else { format!("'{day}'") },
-        if perma.is_empty() { "(uit)".into() } else { format!("'{perma}'") },
+        "Twitch-luik actief — kanaal={broadcaster_login}, reward={}, perma-reward={}, pas={}u",
+        describe_choice(&ctx.pool, "twitch_reward_id", &rewards, "(niets gekozen — redeems worden genegeerd)"),
+        describe_choice(&ctx.pool, "twitch_perma_reward_id", &rewards, "(uit)"),
         settings::i64_of(&ctx.pool, "twitch_pass_hours"),
     );
-    // Diagnose-hulp: wélke rewards het kanaal heeft. Een titel die net niet klopt is
-    // anders enkel te zien aan redeems die stil genegeerd worden.
-    log_channel_rewards(&ctx).await;
 
     Ok(ctx)
 }
 
-/// Log de titels van de channel-points-rewards van het kanaal. Puur informatief: we
-/// maken en beheren ze niet meer, maar zo staat in de log waar de titel op moet lijken.
-/// Mislukt de call (scope/rechten), dan is dat geen reden om het luik niet te starten.
-async fn log_channel_rewards(ctx: &Ctx) {
+/// Hoe de gekozen reward in de log komt: met haar huidige titel, zodat een mens kan
+/// nakijken of dat de bedoelde is. Staat de ingestelde id niet meer tussen de rewards
+/// van het kanaal, dan zeggen we dat expliciet — dat is de enige stille faalmodus die
+/// overblijft nu we op id matchen (reward gewist en opnieuw aangemaakt).
+fn describe_choice(pool: &DbPool, key: &str, rewards: &[Reward], empty: &str) -> String {
+    let id = settings::str_of(pool, key);
+    if id.is_empty() {
+        return empty.to_string();
+    }
+    match rewards.iter().find(|r| r.id.eq_ignore_ascii_case(&id)) {
+        Some(r) => format!("'{}' ({id})", r.title),
+        None if rewards.is_empty() => format!("{id} (reward-lijst niet beschikbaar)"),
+        None => format!("{id} ⚠️ STAAT NIET MEER TUSSEN DE REWARDS VAN HET KANAAL"),
+    }
+}
+
+/// Haal de channel-points-rewards op en leg ze in de cache voor de Settings-pagina.
+/// Mislukt de call (scope/rechten/netwerk), dan blijft de vorige lijst staan en is dat
+/// geen reden om het luik niet te starten — de matching hangt aan de opgeslagen id, niet
+/// aan deze lijst. Loggen doen we enkel bij de start en bij een wijziging: dit draait om
+/// de vijf minuten en een onveranderde lijst is geen nieuws.
+async fn refresh_rewards(ctx: &Ctx, first: bool) {
     let url = format!(
         "{HELIX}/helix/channel_points/custom_rewards?broadcaster_id={}",
         ctx.broadcaster_id
     );
-    match ctx.helix(reqwest::Method::GET, &url, None).await {
-        Ok(v) => {
-            let titles: Vec<String> = v["data"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|r| r["title"].as_str())
-                        .map(|t| format!("'{t}'"))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if titles.is_empty() {
+    let v = match ctx.helix(reqwest::Method::GET, &url, None).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("kon de reward-lijst niet ophalen: {e}");
+            return;
+        }
+    };
+    let rewards = parse_rewards(&v["data"]);
+    if rewards.is_empty() {
+        // Niet de cache leegmaken: een leeg antwoord is even vaak "geen rechten" als
+        // "geen rewards", en een leeggemaakte cache betekent een leeg keuzemenu.
+        tracing::warn!(
+            "Twitch: geen channel-points-rewards ontvangen — de streamer moet ze zelf \
+             aanmaken, met 'kijker moet tekst invullen' aan."
+        );
+        return;
+    }
+    let changed = cached_rewards(&ctx.pool) != rewards;
+    store_rewards(&ctx.pool, &rewards);
+    if first || changed {
+        let titles: Vec<String> = rewards.iter().map(|r| format!("'{}'", r.title)).collect();
+        tracing::info!("Twitch-rewards op het kanaal: {}", titles.join(", "));
+        // Enkel bij een wijziging opnieuw waarschuwen: hernoemen is ongevaarlijk
+        // geworden, maar wissen-en-heraanmaken geeft een nieuwe id.
+        for key in ["twitch_reward_id", "twitch_perma_reward_id"] {
+            let id = settings::str_of(&ctx.pool, key);
+            if !id.is_empty() && !rewards.iter().any(|r| r.id.eq_ignore_ascii_case(&id)) {
                 tracing::warn!(
-                    "Twitch: het kanaal heeft (nog) geen channel-points-rewards — de streamer \
-                     moet ze zelf aanmaken, met 'kijker moet tekst invullen' aan."
+                    "Twitch: de ingestelde reward ({key} = {id}) staat niet tussen de rewards \
+                     van het kanaal — redeems ervan worden genegeerd. Kies ze opnieuw in \
+                     Manage → ⚙ Settings."
                 );
-            } else {
-                tracing::info!("Twitch-rewards op het kanaal: {}", titles.join(", "));
             }
         }
-        Err(e) => tracing::warn!("kon de reward-lijst niet ophalen (enkel diagnose): {e}"),
     }
+}
+
+/// Eenmalige overgang van de oude titel-instelling naar een id (2026-08-10). Draait
+/// enkel zolang de marker niet staat, want "niets gekozen" is een geldige keuze: zonder
+/// die marker zou een bewust leeggemaakte keuzelijst bij elke herstart terugspringen.
+/// Zonder reward-lijst gebeurt er niets — dan is de overgang gewoon nog niet aan de beurt.
+fn adopt_reward_ids(pool: &DbPool, rewards: &[Reward]) {
+    if rewards.is_empty() || db::kv_get(pool, MIGRATED_KEY).is_some() {
+        return;
+    }
+    for (id_key, title_key) in [
+        ("twitch_reward_id", "twitch_reward_title"),
+        ("twitch_perma_reward_id", "twitch_perma_reward_title"),
+    ] {
+        if !settings::str_of(pool, id_key).is_empty() {
+            continue; // al gekozen — de keuze van de streamer wint
+        }
+        // De oude sleutel heeft geen Spec meer, dus rechtstreeks uit de tabel.
+        let old = db::setting_get(pool, title_key).unwrap_or_default();
+        if old.trim().is_empty() {
+            continue;
+        }
+        match find_by_title(rewards, &old) {
+            Some(r) => {
+                settings::set(pool, id_key, &r.id);
+                tracing::info!(
+                    "Twitch: {id_key} overgenomen uit de oude titel-instelling — '{old}' is nu \
+                     '{}' ({})",
+                    r.title,
+                    r.id
+                );
+            }
+            None => tracing::warn!(
+                "Twitch: geen reward gevonden voor de oude titel '{old}' ({title_key}) — kies de \
+                 juiste reward in Manage → ⚙ Settings."
+            ),
+        }
+    }
+    db::kv_set(pool, MIGRATED_KEY, "1");
 }
 
 // --- EventSub-WebSocket-loop ------------------------------------------------
@@ -653,10 +825,10 @@ async fn ws_session(ctx: &Ctx, url: &str) -> Result<Option<String>, String> {
 async fn subscribe_redemptions(ctx: &Ctx, session_id: &str) -> Result<(), String> {
     let url = format!("{HELIX}/helix/eventsub/subscriptions");
     // Eén breed abonnement: `reward_id` in de condition is optioneel (Twitch-docs) en we
-    // laten het weg, want we kénnen de id van de streamer haar reward niet — zij maakt ze
-    // aan, niet wij. We krijgen dus álle redemptions van het kanaal binnen en `on_redeem`
-    // filtert op titel. Bijkomend voordeel: een reward die pas ná de start wordt aangemaakt
-    // of hernoemd werkt meteen, zonder herstart.
+    // laten het bewust weg, ook al kennen we de id nu wél. Twee redenen: een andere keuze
+    // in ⚙ Settings geldt dan meteen i.p.v. na een herstart, en we blijven élke redeem
+    // zien — dus ook eentje die we negeren. Die logregel was op 2026-08-04 het enige
+    // spoor van de kapotte koppeling; met een strak abonnement was er niets geweest.
     let body = json!({
         "type": "channel.channel_points_custom_reward_redemption.add",
         "version": "1",
@@ -706,6 +878,19 @@ pub async fn run(pool: DbPool, cfg: Config) {
         });
     }
 
+    // Achtergrond: de reward-lijst vers houden voor de keuzelijst in ⚙ Settings.
+    // Zonder dit zou een reward die de streamer vandaag aanmaakt pas na een deploy
+    // te kiezen zijn.
+    if !ctx.mock {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(REWARDS_EVERY).await;
+                refresh_rewards(&ctx, false).await;
+            }
+        });
+    }
+
     let mut url = start_url.clone();
     let mut backoff = 1u64;
     loop {
@@ -733,9 +918,18 @@ pub async fn run(pool: DbPool, cfg: Config) {
 #[cfg(test)]
 mod dedup {
     use super::{
-        cap_whisper, fill_template, is_loopback_ws, name_conflicts, pass_kind_for, PassKind, Seen,
-        EVENTSUB_WS, HELIX, SEEN_CAP, TOKEN_URL,
+        cap_whisper, fill_template, find_by_title, is_loopback_ws, name_conflicts, parse_rewards,
+        pass_kind_for, PassKind, Reward, Seen, EVENTSUB_WS, HELIX, SEEN_CAP, TOKEN_URL,
     };
+    use serde_json::json;
+
+    fn rewards() -> Vec<Reward> {
+        vec![
+            Reward { id: "aaa-1".into(), title: "🎫Meadowland Pass".into() },
+            Reward { id: "bbb-2".into(), title: "🌼Grow a Flower".into() },
+            Reward { id: "ccc-3".into(), title: "Meadowland Forever".into() },
+        ]
+    }
 
     /// De naam ligt na de eerste redeem vast. Typt de kijker later een àndere naam, dan mag er
     /// geen tijd toegekend worden — maar "anders getypt" is niet hetzelfde als "andere speler".
@@ -767,24 +961,148 @@ mod dedup {
         assert_eq!(EVENTSUB_WS, "wss://eventsub.wss.twitch.tv/ws");
     }
 
-    /// De reward-TITEL bepaalt dag vs. permanent vs. "niet van ons". Een lege
-    /// ingestelde titel matcht nooit — dat is precies hoe je zo'n redeem uitzet.
+    /// De reward-ID bepaalt dag vs. permanent vs. "niet van ons". Een lege
+    /// ingestelde id matcht nooit — dat is precies hoe je zo'n redeem uitzet.
     #[test]
     fn pass_kind_routing() {
-        let day = "Hytale pass";
-        let perma = "Hytale forever";
+        let day = "aaa-1";
+        let perma = "ccc-3";
         assert_eq!(pass_kind_for(day, day, perma), Some(PassKind::Day));
         assert_eq!(pass_kind_for(perma, day, perma), Some(PassKind::Perma));
         // Elke andere beloning van het kanaal → niets doen.
-        assert_eq!(pass_kind_for("Song request", day, perma), None);
-        // Hoofdletters/spaties mogen niet uitmaken: de titel wordt twee keer overgetypt.
-        assert_eq!(pass_kind_for("  hytale PASS ", day, perma), Some(PassKind::Day));
-        // Perma-titel leeg = die redeem bestaat niet; een lege reward-titel matcht nooit.
+        assert_eq!(pass_kind_for("bbb-2", day, perma), None);
+        // Spaties eromheen en kapitaal mogen niet uitmaken (geplakte id).
+        assert_eq!(pass_kind_for("  AAA-1 ", day, perma), Some(PassKind::Day));
+        // Perma-id leeg = die redeem bestaat niet; een lege reward-id matcht nooit.
         assert_eq!(pass_kind_for(perma, day, ""), None);
         assert_eq!(pass_kind_for("", day, perma), None);
-        // Beide instellingen leeg ⇒ market doet niets, ook niet bij een lege titel.
+        // Beide instellingen leeg ⇒ market doet niets, ook niet bij een lege id.
         assert_eq!(pass_kind_for("", "", ""), None);
-        assert_eq!(pass_kind_for("Anything", "", ""), None);
+        assert_eq!(pass_kind_for("whatever", "", ""), None);
+    }
+
+    /// Regressie 2026-08-04: de reward heette 'Meadowland Pass' en kreeg er een emoji
+    /// voor. Op de titel matchen brak daarmee stil; op de id matchen niet. Dit is
+    /// precies dat scenario.
+    #[test]
+    fn hernoemen_breekt_de_koppeling_niet() {
+        let gekozen = "aaa-1"; // ooit gekozen toen ze nog 'Meadowland Pass' heette
+        // De redeem komt binnen met de NIEUWE titel, maar dezelfde id.
+        assert_eq!(pass_kind_for("aaa-1", gekozen, ""), Some(PassKind::Day));
+        // En een andere reward van hetzelfde kanaal blijft buiten schot.
+        assert_eq!(pass_kind_for("bbb-2", gekozen, ""), None);
+    }
+
+    /// De eenmalige overgang titel → id. Een emoji vooraan mag de koppeling niet
+    /// tegenhouden, maar gokken bij twijfel evenmin.
+    #[test]
+    fn oude_titel_koppelen_aan_een_reward() {
+        let rw = rewards();
+        // Letterlijk (op kapitaal na).
+        assert_eq!(find_by_title(&rw, "meadowland forever").map(|r| &*r.id), Some("ccc-3"));
+        // Dit is de echte prod-situatie: ingesteld zonder emoji, reward mét.
+        assert_eq!(find_by_title(&rw, "Meadowland Pass").map(|r| &*r.id), Some("aaa-1"));
+        // Niets ingesteld, of een titel die nergens op slaat → geen koppeling.
+        assert_eq!(find_by_title(&rw, "  "), None);
+        assert_eq!(find_by_title(&rw, "Song request"), None);
+        // Twee kandidaten na het strippen ⇒ liever niets dan de verkeerde reward.
+        let dubbel = vec![
+            Reward { id: "x".into(), title: "🎫Pass".into() },
+            Reward { id: "y".into(), title: "Pass!".into() },
+        ];
+        assert_eq!(find_by_title(&dubbel, "pass"), None);
+    }
+
+    /// De échte lijst van faybelle___ (uit de prod-log van 2026-08-04) tegen de titel
+    /// die er die dag in de settings stond. Dit is de situatie die de overgang moet
+    /// oplossen, dus staat ze hier letterlijk.
+    #[test]
+    fn prod_lijst_koppelt_de_pas_reward_eenduidig() {
+        let echt: Vec<Reward> = [
+            "⬆️Stand up!",
+            "Craft a Fay Orb",
+            "👋New here!",
+            "🍝Feed The Lady!",
+            "💧Drink Dear!",
+            "🎫Meadowland Pass",
+            "Partyblower!!",
+            "👓Wear glasses",
+            "Fireworks!",
+            "🥇First!",
+            "👀BirthLang",
+            "WIP (do not redeem) Buy a Drink",
+            "🌼Grow a Flower",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| Reward { id: format!("id-{i}"), title: (*t).into() })
+        .collect();
+
+        assert_eq!(find_by_title(&echt, "Meadowland Pass").map(|r| &*r.id), Some("id-5"));
+        // De perma-instelling stond leeg en moet leeg blijven.
+        assert_eq!(find_by_title(&echt, ""), None);
+    }
+
+    /// De eenmalige overgang tegen een echte DB — dit is wat de prod-instelling van
+    /// 2026-08-04 weer aan de praat krijgt, zonder dat iemand een id moet opzoeken.
+    #[test]
+    fn overgang_titel_naar_id_gebeurt_precies_een_keer() {
+        use crate::db;
+        let p = std::env::temp_dir().join(format!("market-tw-{}-adopt.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let pool = db::init_pool(p.to_str().unwrap());
+
+        // De prod-toestand: titel zonder emoji, reward mét.
+        db::setting_set(&pool, "twitch_reward_title", "Meadowland Pass");
+        super::adopt_reward_ids(&pool, &rewards());
+        assert_eq!(crate::settings::str_of(&pool, "twitch_reward_id"), "aaa-1");
+        // De perma-titel stond leeg → niets gekozen, en dat blijft zo.
+        assert_eq!(crate::settings::str_of(&pool, "twitch_perma_reward_id"), "");
+
+        // Zet Faybelle de keuze bewust terug op "niets", dan mag de oude titel ze niet
+        // opnieuw invullen bij de volgende herstart.
+        crate::settings::set(&pool, "twitch_reward_id", "");
+        super::adopt_reward_ids(&pool, &rewards());
+        assert_eq!(crate::settings::str_of(&pool, "twitch_reward_id"), "");
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Zonder reward-lijst (Helix onbereikbaar bij de start) is de overgang gewoon nog
+    /// niet aan de beurt — ze mag haar enige kans niet opgebruiken.
+    #[test]
+    fn overgang_wacht_op_een_reward_lijst() {
+        use crate::db;
+        let p = std::env::temp_dir().join(format!("market-tw-{}-wait.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let pool = db::init_pool(p.to_str().unwrap());
+
+        db::setting_set(&pool, "twitch_reward_title", "Meadowland Pass");
+        super::adopt_reward_ids(&pool, &[]);
+        assert_eq!(crate::settings::str_of(&pool, "twitch_reward_id"), "");
+        // Lijst binnen ⇒ alsnog.
+        super::adopt_reward_ids(&pool, &rewards());
+        assert_eq!(crate::settings::str_of(&pool, "twitch_reward_id"), "aaa-1");
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// De reward-lijst uit Helix wordt gelezen zoals ze binnenkomt; een rij zonder
+    /// bruikbare id is geen keuze en valt weg.
+    #[test]
+    fn reward_lijst_lezen() {
+        let v = json!([
+            { "id": "aaa-1", "title": "🎫Meadowland Pass" },
+            { "id": "", "title": "kapot" },
+            { "title": "geen id" },
+            { "id": "bbb-2" }
+        ]);
+        let got = parse_rewards(&v);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], Reward { id: "aaa-1".into(), title: "🎫Meadowland Pass".into() });
+        // Een titelloze reward blijft kiesbaar — de id is wat telt.
+        assert_eq!(got[1], Reward { id: "bbb-2".into(), title: String::new() });
+        assert!(parse_rewards(&json!({})).is_empty());
     }
 
     /// De whisper-tekst is van de user; wij vullen enkel de plaatshouders in.

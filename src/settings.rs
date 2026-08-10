@@ -24,6 +24,12 @@ pub enum Kind {
     /// `f64_of` paniekt bewust op een tekst-sleutel. Een sleutel die op `_text`
     /// eindigt krijgt in de GUI een meerregelig veld i.p.v. één regel.
     Text,
+    /// Keuze uit een lijst die pas op de pagina zelf bekend is (nu: de
+    /// channel-points-rewards van het kanaal). Opgeslagen als vrije tekst — de
+    /// **id** van het gekozene — en dus ook met `str_of` te lezen. In de GUI een
+    /// keuzelijst, want zo'n id staat nergens in het Twitch-dashboard: die valt
+    /// niet over te typen, enkel te kiezen. Leeg = niets gekozen.
+    Choice,
 }
 
 pub struct Spec {
@@ -217,19 +223,22 @@ pub const SPECS: &[Spec] = &[
     // --- Twitch ------------------------------------------------------------------
     // De streamer maakt de channel-points-reward ZELF aan in haar Twitch-dashboard
     // (met "kijker moet tekst invullen" aan). Market maakt of beheert géén rewards
-    // meer; het herkent de juiste redeem aan de **titel** hieronder. Vandaar dat die
-    // titel hier staat en niet in secrets.json: verandert ze de reward-naam, dan past
-    // ze dit veld aan en werkt het meteen — geen deploy.
+    // meer; het herkent de juiste redeem aan haar **id**.
+    //
+    // ⚠️ Dit was ooit de titel, en dat brak op 2026-08-04 stil: de reward kreeg een
+    // emoji vooraan ('Meadowland Pass' → '🎫Meadowland Pass') en elke redeem viel
+    // vanaf dan in de "niet van ons"-tak. Vier redeems, geen pas, geen bericht. De id
+    // van een reward verandert nooit, ook niet bij hernoemen — vandaar de omslag.
     Spec {
-        key: "twitch_reward_title",
-        label: "Reward-titel (tijdelijke pas)",
+        key: "twitch_reward_id",
+        label: "Reward (tijdelijke pas)",
         group: TWITCH,
-        kind: Kind::Text,
+        kind: Kind::Choice,
         default: 0.0,
         text_default: "",
         min: 0.0,
         max: 0.0,
-        help: "Exact de titel van de channel-points-reward in Twitch (hoofdletters maken niet uit). Leeg = market doet niets met redeems.",
+        help: "De channel-points-reward die een pas geeft. De lijst komt rechtstreeks van het kanaal; hernoemen in Twitch verandert hier niets. Niets gekozen = market doet niets met redeems.",
     },
     Spec {
         key: "twitch_pass_hours",
@@ -269,15 +278,15 @@ pub const SPECS: &[Spec] = &[
         help: "Privébericht als de kijker bij een volgende redeem een andere Hytale-naam invult dan de naam die al aan zijn Twitch-account vastzit. Er wordt dan géén tijd toegekend. {naam} = de vastgezette naam. Leeg = geen bericht.",
     },
     Spec {
-        key: "twitch_perma_reward_title",
-        label: "Reward-titel (permanente pas)",
+        key: "twitch_perma_reward_id",
+        label: "Reward (permanente pas)",
         group: TWITCH,
-        kind: Kind::Text,
+        kind: Kind::Choice,
         default: 0.0,
         text_default: "",
         min: 0.0,
         max: 0.0,
-        help: "Optionele tweede reward die permanente toegang geeft. Leeg = die redeem bestaat niet.",
+        help: "Optionele tweede reward die permanente toegang geeft. Niets gekozen = die redeem bestaat niet.",
     },
     Spec {
         key: "twitch_perma_whisper_text",
@@ -301,7 +310,10 @@ pub fn spec(key: &str) -> Option<&'static Spec> {
 /// is een programmeerfout en paniekt (de SPECS-lijst is de waarheid).
 pub fn f64_of(pool: &DbPool, key: &str) -> f64 {
     let sp = spec(key).unwrap_or_else(|| panic!("onbekende setting: {key}"));
-    assert!(sp.kind != Kind::Text, "setting {key} is tekst — lees ze met str_of");
+    assert!(
+        !matches!(sp.kind, Kind::Text | Kind::Choice),
+        "setting {key} is tekst — lees ze met str_of"
+    );
     db::setting_get(pool, key)
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| v.is_finite())
@@ -328,11 +340,11 @@ pub fn bool_of(pool: &DbPool, key: &str) -> bool {
     f64_of(pool, key) != 0.0
 }
 
-/// De waarde van een `Kind::Text`-setting, getrimd. Nooit gezet ⇒ leeg — en leeg
-/// betekent bij elk van die velden "uit", nooit een verzonnen default.
+/// De waarde van een `Kind::Text`- of `Kind::Choice`-setting, getrimd. Nooit gezet ⇒
+/// leeg — en leeg betekent bij elk van die velden "uit", nooit een verzonnen default.
 pub fn str_of(pool: &DbPool, key: &str) -> String {
     let sp = spec(key).unwrap_or_else(|| panic!("onbekende setting: {key}"));
-    assert!(sp.kind == Kind::Text, "setting {key} is geen tekst");
+    assert!(matches!(sp.kind, Kind::Text | Kind::Choice), "setting {key} is geen tekst");
     match db::setting_get(pool, key) {
         Some(v) => v.trim().to_string(),
         None => sp.text_default.to_string(),
@@ -345,8 +357,9 @@ pub fn str_of(pool: &DbPool, key: &str) -> String {
 pub fn set(pool: &DbPool, key: &str, raw: &str) -> bool {
     let Some(sp) = spec(key) else { return false };
     // Tekst gaat er getrimd in zoals ze getypt is — geen grenzen, en leeg mag
-    // (dat is bij deze velden juist de manier om ze uit te zetten).
-    if sp.kind == Kind::Text {
+    // (dat is bij deze velden juist de manier om ze uit te zetten). Een keuze is
+    // opgeslagen tekst (de id van het gekozene) en volgt exact dezelfde weg.
+    if matches!(sp.kind, Kind::Text | Kind::Choice) {
         db::setting_set(pool, key, raw.trim());
         return true;
     }
@@ -358,7 +371,7 @@ pub fn set(pool: &DbPool, key: &str, raw: &str) -> bool {
         }),
         // Komma als decimaalteken: op een Belgisch toetsenbord typ je 0,5.
         Kind::Int => raw.trim().replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite()),
-        Kind::Text => unreachable!("tekst is hierboven al afgehandeld"),
+        Kind::Text | Kind::Choice => unreachable!("tekst is hierboven al afgehandeld"),
     };
     let Some(v) = parsed else { return false };
     let v = clamp_bounds(v, sp.min, sp.max);
