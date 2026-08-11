@@ -35,7 +35,28 @@ ongeluk een tweede naam bij te maken.
 **Verificatie:** 58 tests groen (nieuw: het slot in beide richtingen, inclusief "ongekoppeld =
 geen slot" en "andermans Twitch-id levert niets op"). Prod-check vóór de deploy: geen enkel
 lid heeft een lege `hytale_name` naast een Twitch-grant, dus de overname vuurt nergens
-met terugwerkende kracht.
+met terugwerkende kracht. Gedeployd 09:49, gecommit `bee64f4`, subtree → `f1048ef`.
+
+### 📌 Eindstand van de sessie — open punten voor de volgende
+
+1. **Vier redeems staan nog open om manueel terug te betalen** in de Twitch-wachtrij:
+   easycomes55 (04/08 12:28, 12:41, 12:46) en heijicat (04/08 13:11). Beiden kochten daarna
+   zelf een pas van 500 coins op de site, dus ze zijn wél binnengeraakt.
+2. **Waldstein houdt zijn resterende testtegoed** (~6 u 34 van de 7 u): user zei uitdrukkelijk
+   **neen** op wissen (11/08). Verder is hij een gewone speler — `protected_names` op de VPS
+   staat al op enkel `["Faybelle"]` en er bestaat nergens nog een permanente pas.
+3. **De server stond op 11/08 op slot** (`/opt/hytale/access-lock.json`: `locked: true`, enkel
+   Faybelle). Niet door deze sessie gezet; met dat slot aan komt niemand binnen, ook niet met
+   een geldige pas.
+4. **Hoofdletters maken niets uit, de rest van de spelling wel.** De toegangslijst van de
+   server bewaart UUID's; de naam dient enkel om het account op te zoeken, en die opzoeking is
+   hoofdletter-ongevoelig (bewijs 04/08: `whitelist add easycomes` → speler `EasyComes` kwam
+   binnen). Onze eigen lagen sleutelen allemaal op de naam in kleine letters, dus kapitaal kan
+   een speeltijd-klok nooit splitsen.
+5. **Stale commentaar aan tale-kant** (niet aangeraakt — andere sessie): de docstring van
+   `observe_grants` in `/opt/hytale/bot/bot.py` zegt nog dat er niets bijgeboekt wordt als het
+   grootboek de naam al kent. De code doet dat wél, en dát is het gewenste gedrag (een tweede
+   bron moet zijn tijd krijgen). Enkel het commentaar is achtergebleven bij de omslag van 04/08.
 
 # Handover — Meadow Market (2026-08-10)
 
