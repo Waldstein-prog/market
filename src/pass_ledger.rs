@@ -42,6 +42,11 @@ pub struct Ledger {
     pub remaining: f64,
     /// Speelt hij nu? (afgeleid uit een stijgende `used`-teller)
     pub online: bool,
+    /// Is dit **testtijd**? Tijdens de testfase houdt de tale-kant een apart tegoed bij
+    /// (`"kind": "test"`), en staat het gewone tegoed stil. Market gebruikt dit om een
+    /// tweede testpas te weigeren zolang de eerste nog loopt. Ontbreekt het veld (oudere
+    /// tale-bot), dan is het `false` en verandert er hier niets.
+    pub test: bool,
 }
 
 #[derive(Default)]
@@ -56,6 +61,8 @@ struct State {
 struct Entry {
     remaining: f64,
     used: f64,
+    /// `kind == "test"`: de tale-kant telt nu testtijd af (zie `Ledger::test`).
+    test: bool,
     /// Wanneer `used` voor het laatst stéég — het bewijs dat iemand aan het spelen is.
     last_rise: Option<Instant>,
 }
@@ -76,6 +83,7 @@ pub fn lookup(hytale_name: &str) -> Option<Ledger> {
     Some(Ledger {
         remaining: e.remaining.max(0.0),
         online: e.last_rise.is_some_and(|t| t.elapsed() < ONLINE_GRACE),
+        test: e.test,
     })
 }
 
@@ -94,6 +102,7 @@ fn sample(path: &str) -> Result<usize, String> {
             .and_then(|r| r.as_f64())
             // Ouder formaat of half ingevuld: dan zelf uitrekenen.
             .unwrap_or_else(|| p.get("granted").and_then(|g| g.as_f64()).unwrap_or(0.0) - used);
+        let test = p.get("kind").and_then(|k| k.as_str()) == Some("test");
         let key = name.to_lowercase();
         let prev = st.passes.get(&key);
         let last_rise = match prev {
@@ -102,7 +111,7 @@ fn sample(path: &str) -> Result<usize, String> {
             Some(old) => old.last_rise,
             None => None,
         };
-        fresh.insert(key, Entry { remaining, used, last_rise });
+        fresh.insert(key, Entry { remaining, used, last_rise, test });
     }
     st.passes = fresh;
     st.have_data = true;
@@ -174,6 +183,36 @@ mod tests {
         sample(p.to_str().unwrap()).unwrap();
         let l = lookup("Waldstein").expect("pas");
         assert_eq!(l.remaining, 6600.0, "gepauzeerd verandert er niets aan het tegoed");
+
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// Testfase: de tale-kant merkt de entry als testtijd. Zonder dat merkje blijft het
+    /// gewone tijd — een oudere bot schrijft het veld niet, en dan mag er niets veranderen.
+    #[test]
+    fn herkent_testtijd_aan_het_merkje() {
+        let p = std::env::temp_dir().join(format!("passes-kind-{}.json", std::process::id()));
+        write(
+            &p,
+            r#"{"version":2,"passes":{
+                 "Tester":{"granted":900.0,"used":0.0,"remaining":900.0,"kind":"test"},
+                 "Gewoon":{"granted":7200.0,"used":0.0,"remaining":7200.0,"kind":"normal"},
+                 "Oud":{"granted":7200.0,"used":0.0,"remaining":7200.0}}}"#,
+        );
+        assert_eq!(sample(p.to_str().unwrap()).unwrap(), 3);
+        assert!(lookup("Tester").unwrap().test, "kind=test ⇒ testtijd");
+        assert!(!lookup("Gewoon").unwrap().test);
+        assert!(!lookup("Oud").unwrap().test, "veld ontbreekt ⇒ gewone tijd, geen slot");
+
+        // Testtijd opgebruikt: het merkje blijft, maar er loopt niets meer — dán mag er
+        // weer een testpas gekocht worden.
+        write(
+            &p,
+            r#"{"version":2,"passes":{"Tester":{"granted":900.0,"used":900.0,"remaining":0.0,"kind":"test"}}}"#,
+        );
+        sample(p.to_str().unwrap()).unwrap();
+        let l = lookup("Tester").unwrap();
+        assert!(l.test && l.remaining == 0.0);
 
         let _ = std::fs::remove_file(p);
     }

@@ -1731,7 +1731,30 @@ fn item_thumb(it: &db::Item) -> String {
 /// zo ziet Faybelle op de shop letterlijk wat een gewoon lid ziet, en zet ze zichzelf
 /// gewoon op de lijst om te testen.
 fn may_buy_pass(pool: &DbPool, uid: &str) -> bool {
-    !settings::bool_of(pool, "pass_allowlist_on") || db::pass_allow_has(pool, uid)
+    if !settings::bool_of(pool, "pass_allowlist_on") {
+        return true; // geen testfase: de pas staat gewoon te koop
+    }
+    if !db::pass_allow_has(pool, uid) {
+        return false;
+    }
+    // Tester, maar zijn vorige testpas loopt nog: geen tweede erbovenop. Anders zou hij
+    // tijd stapelen die hij tijdens de test nooit opmaakt, en is "15 minuten testen" geen
+    // 15 minuten meer. Zodra de tijd op is (of hij van de lijst gaat) komt de knop terug.
+    !test_pass_running(&db::get_hytale_name(pool, uid))
+}
+
+/// Loopt er nu testtijd op deze Hytale-naam? Antwoord komt van de tale-kant
+/// (`passes.json`, `"kind": "test"`), want die houdt de klok bij.
+///
+/// **Nee bij twijfel**: geen naam, geen gegevens, of een tale-bot die het veld nog niet
+/// schrijft ⇒ geen slot. Een verkeerd "ja" zou een tester zonder tijd laten vastzitten
+/// zonder dat hij iets kan doen; een verkeerd "nee" kost hoogstens dat hij een tweede pas
+/// koopt die gewoon bij zijn testtijd komt.
+fn test_pass_running(hytale_name: &str) -> bool {
+    if hytale_name.is_empty() {
+        return false;
+    }
+    crate::pass_ledger::lookup(hytale_name).is_some_and(|l| l.test && l.remaining > 0.0)
 }
 
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
@@ -5342,5 +5365,22 @@ mod pass_testfase {
         gem.category = "inventory".to_string();
         gem.duration = 0;
         assert!(shop_slot(&gem, false, true, false, 10_000, false).contains("action=\"/buy\""));
+    }
+
+    /// Zet Faybelle de pas handmatig op Out of stock, dan geldt dat ook voor de testers:
+    /// de testerslijst opent enkel wat verder open staat, ze forceert niets.
+    #[test]
+    fn out_of_stock_wint_van_de_testerslijst() {
+        let mut it = pas();
+        it.sold_out = true;
+        let s = shop_slot(&it, false, true, false, 10_000, true);
+        assert!(s.contains("Out of Stock"), "tester ziet 'm ook dicht");
+        assert!(!s.contains("action=\"/buy\""));
+
+        // Idem voor een voorraad die op nul staat.
+        let mut op = pas();
+        op.sold_out = false;
+        op.stock = 0;
+        assert!(!shop_slot(&op, false, true, false, 10_000, true).contains("action=\"/buy\""));
     }
 }

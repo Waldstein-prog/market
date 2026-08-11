@@ -41,6 +41,38 @@ Gedeployd 23:11, site 200, geen warnings; `pass_allow` staat er (leeg) en
 > Er kan dus op dit moment **niemand** een pas kopen tot Faybelle testers toevoegt. De
 > Settings-pagina zegt dat ook met een rode banner boven de tabel.
 
+### ➕ Vervolg dezelfde sessie — aparte testklok, en het koopslot
+
+Jo's aanvullingen: (a) de testfase krijgt een **eigen timer** — koop je 15 min testtijd, dan
+loopt díe af en word je gekickt, terwijl je gewone tegoed **onaangeroerd stil blijft staan**;
+(b) zet Faybelle de pas op Out of stock, dan zien testers dat óók; (c) zolang je testpas
+loopt kan je er geen tweede kopen; (d) de lijst hoort naast het vinkje.
+
+**Wat er aan market-kant bij kwam** (LIVE, deploy 23:59, site 200):
+- **(b) was al zo** en is nu vastgelegd met een test: `sold_out` en voorraad 0 winnen van de
+  testerslijst — die opent enkel wat verder open staat.
+- **(d)** de groep "Hytale-passen — testfase" staat nu **achteraan** in `SPECS`, zodat het
+  vinkje en het lijst-blok onder elkaar staan (enkel de Opslaan-knop ertussen; het blok heeft
+  eigen formuliertjes en kan dus niet ín dat formulier).
+- **(c)** `may_buy_pass` weigert een pas zolang er **testtijd loopt** op de Hytale-naam van de
+  koper. Dat komt van de tale-kant: `passes.json` krijgt per speler `"kind": "test"|"normal"`,
+  en `pass_ledger.rs` leest dat mee (`Ledger::test`). **Nee bij twijfel** — geen naam, geen
+  gegevens, of een tale-bot die het veld nog niet schrijft ⇒ geen slot. De kaart toont dan
+  gewoon Out of Stock; opnieuw geen nieuwe speler-zichtbare tekst.
+- **(a) zit volledig aan tale-kant** — zie `tale/HANDOVER.md`. Kort: `pass_ledger` heeft twee
+  potjes (`granted/used_normal` en `test_granted/test_used`); tijdens de testfase gaat álle
+  nieuwe tijd én al het verbruik naar het testpotje. **De testfase-vlag is market's
+  `settings.pass_allowlist_on`**, die de bot read-only meeleest — sleutel afwezig = aan, net
+  als hier. Eén schakelaar voor beide kanten, geen tweede waarheid.
+
+**Verificatie:** 67 tests (nieuw: `kind` lezen incl. ontbrekend veld = geen slot, en out of
+stock wint van de lijst). Lokaal e2e met een nagemaakte `passes.json`: tester met 600s
+testtijd → pas dicht; testtijd op → pas open; `kind: normal` → geen slot.
+
+> ⚠️ **De tale-kant is bewust NIET gedeployd** (Jo test eerst op zijn gewone tijd). Zolang dat
+> zo is, schrijft de bot geen `kind` en is het koopslot inert — market gedraagt zich exact
+> zoals hierboven beschreven, met enkel de testerslijst als rem.
+
 **Niet lokaal te bewijzen:** de weigering in `buy()` zelf — die route eist een échte
 Flowerborn-rolcheck bij Discord, en een lokale instance heeft geen geldig bot-token. De
 poort die ze gebruikt (`may_buy_pass`) is wel getest, in beide standen.
