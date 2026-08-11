@@ -293,6 +293,8 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/settings/save", post(admin_settings_save))
         .route("/admin/settings/weight/set", post(admin_settings_weight_set))
         .route("/admin/settings/weight/delete", post(admin_settings_weight_delete))
+        .route("/admin/settings/pass/add", post(admin_settings_pass_add))
+        .route("/admin/settings/pass/remove", post(admin_settings_pass_remove))
         .route("/admin/settings/tier/add", post(admin_settings_tier_add))
         .route("/admin/settings/tier/update", post(admin_settings_tier_update))
         .route("/admin/settings/tier/delete", post(admin_settings_tier_delete))
@@ -1469,7 +1471,10 @@ async fn market(
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
 
-    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins);
+    // Testfase: enkel de leden op de testerslijst zien de pas als koopbaar.
+    let pass_ok = may_buy_pass(&st.pool, &uid);
+    let slot =
+        |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins, pass_ok);
 
     // Volledig shop-ontwerp (zoals de Admin shop preview): dagrotatie + Hytale-passen.
     // Twee onderdelen zijn nog niet vrijgegeven en staan grijs (zie de flags bovenaan).
@@ -1565,7 +1570,10 @@ async fn admin_shop_preview(
         db::owned_item_ids(&st.pool, &uid).into_iter().collect();
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
-    let slot = |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins);
+    // Testfase: enkel de leden op de testerslijst zien de pas als koopbaar.
+    let pass_ok = may_buy_pass(&st.pool, &uid);
+    let slot =
+        |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins, pass_ok);
 
     let offers: String =
         db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
@@ -1718,9 +1726,24 @@ fn item_thumb(it: &db::Item) -> String {
     thumb_html(&it.image, &it.color)
 }
 
+/// Mag dit lid een Hytale-pas kopen? Staat de testfase-schakelaar aan, dan enkel de
+/// leden op de testerslijst (Manage → ⚙ Settings). **Admins zijn niet uitgezonderd**:
+/// zo ziet Faybelle op de shop letterlijk wat een gewoon lid ziet, en zet ze zichzelf
+/// gewoon op de lijst om te testen.
+fn may_buy_pass(pool: &DbPool, uid: &str) -> bool {
+    !settings::bool_of(pool, "pass_allowlist_on") || db::pass_allow_has(pool, uid)
+}
+
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
 /// reeds verzamelde gems).
-fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, coins: i64) -> String {
+fn shop_slot(
+    it: &db::Item,
+    owned: bool,
+    has_name: bool,
+    has_perma: bool,
+    coins: i64,
+    pass_ok: bool,
+) -> String {
     // NB (2026-08-04): een pas met looptijd toonde hier "Bought" zolang je er een had
     // lopen — één tegelijk. Dat is geschrapt (user-wens): een pas is nu een tegoed aan
     // speeltijd, dus je mag er altijd bijkopen en de uren stapelen. De kaart blijft dus
@@ -1729,12 +1752,18 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, coins:
     // verzamel-items en voor de permanente pas (bij permanente toegang).
     let bought = (owned && (it.category == "inventory" || it.category == "booster"))
         || (it.category == "boost" && it.duration == 0 && has_perma);
-    // Dicht voor iedereen, om twee redenen:
+    // Tijdens de testfase van de server is de pas enkel voor de leden op de testerslijst
+    // (Manage → ⚙ Settings). Voor de rest staat ze permanent dicht — vandaar dat dit
+    // langs dezelfde weg loopt als "uitverkocht" en niet als een aparte knop: de shop
+    // hoort er hetzelfde uit te zien, wat de reden ook is.
+    let testfase_dicht = it.category == "boost" && !pass_ok;
+    // Dicht voor iedereen, om drie redenen:
     //  * handmatig op Out of stock gezet (sold_out);
-    //  * voorraad op 0 → dicht tot een admin aanvult.
+    //  * voorraad op 0 → dicht tot een admin aanvult;
+    //  * pas tijdens de testfase, en dit lid staat niet op de testerslijst.
     // Item blijft wél staan: je ziet wát er te koop is. De échte rem zit in buy()/purchase() —
     // een grijze knop houdt niemand tegen die zelf een POST stuurt.
-    let dicht = it.sold_out || it.stock == 0;
+    let dicht = it.sold_out || testfase_dicht || it.stock == 0;
     // Te weinig coins → Buy-knop grijs/uitgeschakeld (dan hoeft de "not enough coins"-banner
     // niet meer te verschijnen in de normale flow). buy()/purchase() blijft server-side de
     // rem als vangnet (race of handmatige POST).
@@ -1791,7 +1820,7 @@ fn shop_slot(it: &db::Item, owned: bool, has_name: bool, has_perma: bool, coins:
     // admin het item handmatig op "Out of stock" (`sold_out`), dan verbergen we het
     // resterende aantal — de knop zegt dan al Out of Stock en "1 left" ernaast zou
     // tegenstrijdig zijn.
-    let stock = if it.sold_out || it.stock < 0 {
+    let stock = if it.sold_out || testfase_dicht || it.stock < 0 {
         String::new()
     } else if it.stock == 0 {
         "<div class=\"stock none\">out of stock</div>".to_string()
@@ -2361,6 +2390,21 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
     // de browser; deze POST kan iedereen zelf sturen. (De voorraad en de één-pas-per-persoon
     // -regel zitten in `db::purchase`, atomisch samen met het afboeken van de coins.)
     if item.sold_out {
+        return Redirect::to(&format!(
+            "/market?err={}",
+            pct(&format!("{} is out of stock.", item.name))
+        ))
+        .into_response();
+    }
+    // Testfase: een pas is enkel voor de leden op de testerslijst. Dezelfde weigering en
+    // exact dezelfde zin als "uitverkocht" — voor wie er niet op staat ís de pas dicht, en
+    // een aparte tekst zou enkel verklappen dat er een lijst bestaat. De knop staat al grijs;
+    // dit is de rem voor een zelfgemaakte POST.
+    if item.category == "boost" && !may_buy_pass(&st.pool, &uid) {
+        tracing::info!(
+            "{name} probeerde '{}' te kopen maar staat niet op de testerslijst",
+            item.name
+        );
         return Redirect::to(&format!(
             "/market?err={}",
             pct(&format!("{} is out of stock.", item.name))
@@ -3320,6 +3364,7 @@ async fn admin_log(
             ("admin", "correction") => ("#c92a2a", "🩹 correction"),
             ("admin", "shop_reroll") => ("#3b5bdb", "↻ shop reroll"),
             ("admin", "rotation") => ("#2f6f4e", "🎲 rotation"),
+            ("admin", "pass_allow") => ("#0b7285", "🎟 testers"),
             _ => ("#868e96", event),
         };
         format!(
@@ -3733,6 +3778,68 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
         groups.push_str("</div>");
     }
 
+    // Testfase-lijst: wie mag er een Hytale-pas kopen. Hoort visueel bij de schakelaar
+    // `pass_allowlist_on` hierboven, maar is een lijst en dus een eigen blok — zoals de
+    // twee weegsystemen. Elke rij heeft zijn eigen formuliertje (toevoegen/verwijderen
+    // gaat meteen, niet pas bij "Opslaan").
+    let pa_on = settings::bool_of(&st.pool, "pass_allowlist_on");
+    let allow = db::pass_allow_list(&st.pool);
+    let on_list: std::collections::HashSet<&str> =
+        allow.iter().map(|(uid, _)| uid.as_str()).collect();
+    let pa_rows: String = allow
+        .iter()
+        .map(|(uid, uname)| {
+            format!(
+                "<tr><td>{n}</td><td class=\"muted\">{u}</td>\
+                 <td><form method=\"post\" action=\"/admin/settings/pass/remove\" class=\"iform\">\
+                   <input type=\"hidden\" name=\"uid\" value=\"{u}\">\
+                   <button class=\"chrm\" type=\"submit\" title=\"Van de lijst halen\">✕</button>\
+                 </form></td></tr>",
+                n = esc(uname),
+                u = esc(uid),
+            )
+        })
+        .collect();
+    // Enkel leden die er nog niet op staan aanbieden: twee keer dezelfde persoon
+    // toevoegen doet niets, en dat hoort de lijst dan ook niet voor te stellen.
+    let pa_options: String = db::all_member_names(&st.pool)
+        .iter()
+        .filter(|(uid, _)| !on_list.contains(uid.as_str()))
+        .map(|(uid, uname)| {
+            format!("<option value=\"{u}\">{n}</option>", u = esc(uid), n = esc(uname))
+        })
+        .collect();
+    let pa_body = if allow.is_empty() {
+        "<tr><td colspan=\"3\" class=\"muted\">Nog niemand op de lijst.</td></tr>".to_string()
+    } else {
+        pa_rows
+    };
+    // De enige stille faalmodus van dit hele blok: schakelaar aan + lege lijst = de pas is
+    // voor iedereen dicht. Dat mag je niet moeten afleiden uit een lege tabel.
+    let pa_warn = if pa_on && allow.is_empty() {
+        "<div class=\"notice err\">⚠️ De testfase staat aan en de lijst is leeg: op dit \
+         moment kan <b>niemand</b> een Hytale-pas kopen.</div>"
+            .to_string()
+    } else if !pa_on {
+        "<div class=\"notice ok\">De testfase staat uit — de pas is gewoon voor iedereen \
+         te koop en deze lijst doet even niets.</div>"
+            .to_string()
+    } else {
+        String::new()
+    };
+    let pa_block = format!(
+        "<div class=\"sgroup\"><h2>Hytale-passen — wie mag er kopen</h2>\
+         <p class=\"shelp\" style=\"margin:0 0 .6rem\">Zolang de testfase aanstaat (schakelaar \
+          hierboven) kunnen enkel deze leden een pas kopen. Voor al de rest staat de pas \
+          permanent op <b>Out of Stock</b>. Twitch-redeems staan hier los van.</p>\
+         {pa_warn}\
+         <table class=\"wtable\"><thead><tr><th>Lid</th><th>Discord-id</th><th></th></tr></thead>\
+         <tbody>{pa_body}</tbody></table>\
+         <form method=\"post\" action=\"/admin/settings/pass/add\" class=\"addbar\">\
+           <select name=\"uid\" required><option value=\"\">— kies een lid —</option>{pa_options}</select>\
+           <button class=\"btn\" type=\"submit\">＋ Tester</button></form></div>"
+    );
+
     // Weegsysteem 1 — coins per bericht.
     let cw = db::coin_weights_all(&st.pool);
     let cw_total: f64 = cw.iter().map(|(_, w)| w.max(0.0)).sum();
@@ -3786,6 +3893,7 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
          <form method=\"post\" action=\"/admin/settings/save\">{groups}\
            <div class=\"ctoolbar\" style=\"margin-top:1.2rem\">\
              <button class=\"btn\" type=\"submit\">Opslaan</button></div></form>\
+         {pa_block}\
          <div class=\"sgroup\"><h2>Coins per bericht — verdeling</h2>\
           <p class=\"shelp\" style=\"margin:0 0 .6rem\">Gewichten zijn <b>relatief</b>: de som mag alles \
            zijn. Een gewicht van 0,5 naast een 1 betekent gewoon 'half zoveel kans'. Het percentage \
@@ -3852,6 +3960,65 @@ async fn admin_settings_save(
                 }
             };
             settings::set(&st.pool, sp.key, &raw);
+        }
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
+}
+
+#[derive(Deserialize)]
+struct PassAllowForm {
+    uid: String,
+}
+
+/// Zet één lid op de testfase-lijst voor de passen (Manage → ⚙ Settings).
+/// De naam wordt erbij bewaard voor de weergave; de uid is wat telt.
+async fn admin_settings_pass_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<PassAllowForm>,
+) -> Response {
+    if let Some((admin_uid, admin_name)) = require_admin(&st, &headers) {
+        let uid = f.uid.trim().to_string();
+        let uname = db::all_member_names(&st.pool)
+            .into_iter()
+            .find(|(u, _)| *u == uid)
+            .map(|(_, n)| n)
+            .unwrap_or_else(|| uid.clone());
+        if db::pass_allow_add(&st.pool, &uid, &uname, now_secs()) {
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "pass_allow")
+                    .actor(&admin_uid, &admin_name)
+                    .detail(format!("＋ {uname} ({uid}) mag passen kopen")),
+            );
+        }
+    }
+    Redirect::to("/admin/settings?saved=1").into_response()
+}
+
+/// Haal één lid van de testfase-lijst. Vanaf dat moment ziet hij de pas op Out of Stock.
+async fn admin_settings_pass_remove(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<PassAllowForm>,
+) -> Response {
+    if let Some((admin_uid, admin_name)) = require_admin(&st, &headers) {
+        let uid = f.uid.trim().to_string();
+        // Naam vóór het verwijderen ophalen — daarna staat ze niet meer in de lijst.
+        let uname = db::pass_allow_list(&st.pool)
+            .into_iter()
+            .find(|(u, _)| *u == uid)
+            .map(|(_, n)| n)
+            .unwrap_or_else(|| uid.clone());
+        if db::pass_allow_remove(&st.pool, &uid) {
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "pass_allow")
+                    .actor(&admin_uid, &admin_name)
+                    .detail(format!("✕ {uname} ({uid}) mag geen passen meer kopen")),
+            );
         }
     }
     Redirect::to("/admin/settings?saved=1").into_response()
@@ -5097,5 +5264,83 @@ mod auto_refresh_script {
             js.chars().filter(|c| *c == open).count() == js.chars().filter(|c| *c == close).count()
         };
         assert!(bal('{', '}') && bal('(', ')') && bal('[', ']'), "onbalans in JS: {js}");
+    }
+}
+
+/// De testfase-poort op de passen: wie mag er kopen, en wat ziet de rest?
+#[cfg(test)]
+mod pass_testfase {
+    use super::{may_buy_pass, shop_slot};
+    use crate::{db, settings};
+
+    fn pool(tag: &str) -> (db::DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-pt-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (db::init_pool(p.to_str().unwrap()), p)
+    }
+
+    fn pas() -> db::Item {
+        db::Item {
+            id: 7,
+            name: "Hytale Day Pass".to_string(),
+            price: 500,
+            image: String::new(),
+            image2: String::new(),
+            color: String::new(),
+            role_id: String::new(),
+            duration: 6 * 3600,
+            category: "boost".to_string(),
+            description: String::new(),
+            zone: "shelf".to_string(),
+            shelf_id: None,
+            sold_out: false,
+            stock: -1,
+            shop_weight: 10.0,
+            in_rotation: false,
+        }
+    }
+
+    /// Schakelaar aan: enkel wie op de lijst staat mag kopen. Uit: iedereen.
+    /// Admins krijgen bewust géén uitzondering — die zetten zichzelf op de lijst.
+    #[test]
+    fn de_lijst_beslist_zolang_de_schakelaar_aanstaat() {
+        let (pool, path) = pool("gate");
+
+        // Default: de testfase staat aan. Lege lijst ⇒ niemand.
+        assert!(settings::bool_of(&pool, "pass_allowlist_on"), "staat standaard aan");
+        assert!(!may_buy_pass(&pool, "u1"));
+
+        db::pass_allow_add(&pool, "u1", "Tester", 100.0);
+        assert!(may_buy_pass(&pool, "u1"));
+        assert!(!may_buy_pass(&pool, "u2"), "de rest niet");
+
+        // Schakelaar uit ⇒ de lijst doet niets meer, de pas staat voor iedereen te koop.
+        settings::set(&pool, "pass_allowlist_on", "0");
+        assert!(may_buy_pass(&pool, "u2"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Wie niet op de lijst staat ziet Out of Stock — en geen voorraadgetal ernaast,
+    /// want "3 left" naast een dichte knop is tegenstrijdig.
+    #[test]
+    fn zonder_pas_recht_toont_de_kaart_out_of_stock() {
+        let mut it = pas();
+        it.stock = 3;
+
+        let dicht = shop_slot(&it, false, true, false, 10_000, false);
+        assert!(dicht.contains("Out of Stock"), "geen tester ⇒ dicht");
+        assert!(!dicht.contains("action=\"/buy\""), "en geen koopformulier");
+        assert!(!dicht.contains("3 left"), "voorraad verzwijgen naast een dichte knop");
+
+        let open = shop_slot(&it, false, true, false, 10_000, true);
+        assert!(open.contains("action=\"/buy\""), "tester ⇒ gewoon koopbaar");
+        assert!(open.contains("3 left"));
+
+        // Een gewoon shopitem staat volledig los van de pas-poort.
+        let mut gem = pas();
+        gem.category = "inventory".to_string();
+        gem.duration = 0;
+        assert!(shop_slot(&gem, false, true, false, 10_000, false).contains("action=\"/buy\""));
     }
 }

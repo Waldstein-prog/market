@@ -1,5 +1,50 @@
 # Handover — Meadow Market (2026-08-11)
 
+## ⏭️ Sessie (2026-08-11c) — testfase: enkel een lijst van leden mag een Hytale-pas kopen
+
+**Waarom.** Jo: Faybelle moet tijdens de testfase van de server kunnen aanduiden wie er
+een pas mag kopen; al de rest ziet de pas **permanent op Out of Stock**.
+
+**Wat er nu is.**
+- **Nieuwe tabel `pass_allow`** (uid + naam + moment van toevoegen) — een lijst, dus een
+  tabel en geen instelling, net zoals `coin_weights`/`chest_tiers`.
+- **Manage → ⚙ Settings** heeft onderaan het blok *"Hytale-passen — wie mag er kopen"*:
+  een tabel met de testers (✕ om iemand eraf te halen) en een keuzelijst met de leden die
+  er nog niet op staan (＋ Tester). Toevoegen/verwijderen werkt meteen, niet pas bij
+  "Opslaan" — dezelfde vorm als de twee weegsystemen eronder.
+- **Schakelaar `pass_allowlist_on`** (groep "Hytale-passen — testfase", **default AAN**).
+  Nodig omdat een lege lijst anders even goed "iedereen" als "niemand" kan betekenen; nu
+  staat het er expliciet. Uit = de pas staat gewoon voor iedereen te koop.
+- **De poort zelf** (`web::may_buy_pass`) hangt op twee plekken: de kaart in de shop toont
+  **Out of Stock** (en verzwijgt het voorraadgetal — "3 left" naast een dichte knop is
+  tegenstrijdig), en `buy()` weigert de POST met **exact dezelfde zin** als een uitverkocht
+  item. Bewust dezelfde zin: voor wie er niet op staat *is* de pas dicht, en een aparte
+  tekst zou enkel verklappen dat er een lijst bestaat. Geen nieuwe speler-zichtbare tekst.
+- **Admins krijgen géén uitzondering.** Faybelle ziet op de shop dus letterlijk wat een lid
+  ziet; wil ze zelf kopen, dan zet ze zichzelf op de lijst.
+- **Geldt voor alle pas-items** (`category = 'boost'`), niet enkel de 6u-pas.
+- **Twitch-redeems staan hier volledig los van**: die geven hun tijd zoals voorheen. De
+  lijst gaat enkel over kopen in de shop.
+- Elke wijziging logt als `admin/pass_allow` ("🎟 testers") met naam + uid.
+
+**Verificatie.** 65 tests groen (nieuw: 4 — toevoegen/dubbel/lege uid/verwijderen, naam die
+`coins` volgt met de bewaarde naam als terugval, de poort in beide standen van de
+schakelaar, en de kaart die Out of Stock toont zonder voorraadregel). Lokaal end-to-end op
+8701 tegen een kopie van de DB: lege lijst + schakelaar aan → 2 pas-kaarten dicht, 4 gewone
+items koopbaar; tester toegevoegd → alles koopbaar; schakelaar uit → alles koopbaar,
+ongeacht de lijst; niet-admin die post verandert niets; dubbel toevoegen en een lege keuze
+schrijven geen rij. Backup vóór de deploy: `/opt/market/coins.db.bak-20260811-passallow`.
+Gedeployd 23:11, site 200, geen warnings; `pass_allow` staat er (leeg) en
+`pass_allowlist_on` is niet bewaard ⇒ de default (aan) geldt.
+
+> ⚠️ **Startstand op prod (bewust, door Jo gekozen): testfase AAN met een lege lijst.**
+> Er kan dus op dit moment **niemand** een pas kopen tot Faybelle testers toevoegt. De
+> Settings-pagina zegt dat ook met een rode banner boven de tabel.
+
+**Niet lokaal te bewijzen:** de weigering in `buy()` zelf — die route eist een échte
+Flowerborn-rolcheck bij Discord, en een lokale instance heeft geen geldig bot-token. De
+poort die ze gebruikt (`may_buy_pass`) is wel getest, in beide standen.
+
 ## ⏭️ Sessie (2026-08-11b) — een verkeerde Hytale-naam is nu recht te zetten
 
 **Waarom.** Sinds de vorige sessie ligt de Hytale-naam vast zodra er ergens speeltijd op

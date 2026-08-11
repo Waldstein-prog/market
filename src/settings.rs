@@ -55,6 +55,7 @@ pub const COINS: &str = "Coins per bericht";
 pub const DAILY: &str = "Daily-beloning";
 pub const CHEST: &str = "Treasure chest";
 pub const TWITCH: &str = "Twitch-redeem → Hytale-pas";
+pub const PASSES: &str = "Hytale-passen — testfase";
 // (Er was ook een groep "Shop"; die staat leeg sinds de shoprotatie per item geregeld
 // wordt in Manage → Shop i.p.v. met een instelling hier.)
 
@@ -215,6 +216,26 @@ pub const SPECS: &[Spec] = &[
         min: 1.0,
         max: 100.0,
         help: "Minder klikkers dan dit → de chest despawnt en er wordt niets uitbetaald.",
+    },
+    // --- Passen: testfase --------------------------------------------------------
+    // De lijst zelf is een tabel (`pass_allow`) met een eigen blok onderaan de
+    // Settings-pagina; hier staat enkel de schakelaar die bepaalt of ze geldt.
+    // Zonder die schakelaar zou een lege lijst even goed "iedereen" als "niemand"
+    // kunnen betekenen — en dat is precies het soort stilte waar een dichte shop
+    // in verstopt raakt.
+    Spec {
+        key: "pass_allowlist_on",
+        label: "Enkel testers mogen passen kopen",
+        group: PASSES,
+        kind: Kind::Bool,
+        default: 1.0,
+        text_default: "",
+        min: 0.0,
+        max: 1.0,
+        help: "Aan = enkel de leden op de testerslijst hieronder kunnen een Hytale-pas kopen; \
+               al de rest ziet de pas permanent op Out of Stock. Een lege lijst betekent dus \
+               dat niemand er een kan kopen. Uit = de pas staat gewoon voor iedereen te koop. \
+               Geldt niet voor Twitch-redeems: die geven hun pas los van deze lijst.",
     },
     // NB: de zeldzaamheid van de Lucky Horseshoe stond hier ooit als één instelling
     // (`horseshoe_shop_odds_days`, 1-op-N per dag). Vervangen door een gewicht **per item**

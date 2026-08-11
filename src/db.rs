@@ -199,7 +199,20 @@ pub fn init_pool(path: &str) -> DbPool {
             claimed INTEGER NOT NULL DEFAULT 0,
             ts      REAL NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_level_gifts_uid ON level_gifts(uid, claimed);",
+        CREATE INDEX IF NOT EXISTS idx_level_gifts_uid ON level_gifts(uid, claimed);
+        -- Testfase-toegangslijst voor de Hytale-passen: wie hier NIET op staat, ziet de
+        -- pas permanent op Out of Stock en kan er ook geen kopen. Beheerd in Manage →
+        -- ⚙ Settings. Een aparte tabel en geen instelling, want het is een lijst — net
+        -- zoals coin_weights en chest_tiers. De schakelaar die bepaalt of de lijst
+        -- überhaupt geldt is wél een instelling (`pass_allowlist_on`): zonder die
+        -- schakelaar zou 'lege lijst' evengoed 'iedereen' als 'niemand' kunnen betekenen.
+        -- `username` is enkel de naam zoals ze bij het toevoegen bekend was (weergave);
+        -- de uid is de sleutel.
+        CREATE TABLE IF NOT EXISTS pass_allow (
+            user_id  TEXT PRIMARY KEY,
+            username TEXT NOT NULL DEFAULT '',
+            added    REAL NOT NULL DEFAULT 0
+        );",
     )
     .expect("kan tabel niet aanmaken");
 
@@ -641,6 +654,81 @@ pub fn boost_items(pool: &DbPool) -> Vec<Item> {
         .filter_map(Result::ok)
         .collect();
     ids.iter().filter_map(|id| get_item(pool, *id)).collect()
+}
+
+// --- testfase-toegangslijst voor de passen --------------------------------
+//
+// Tijdens de testfase van de Hytale-server mag niet iedereen een pas kopen. Wie op
+// deze lijst staat wel, de rest ziet de pas op Out of Stock. De lijst geldt enkel
+// zolang de schakelaar `pass_allowlist_on` aanstaat — zie `settings.rs`.
+
+/// De leden op de testfase-lijst, alfabetisch op naam (NOCASE). De naam komt bij
+/// voorkeur uit `coins` (die volgt hernoemingen op Discord); wat bij het toevoegen
+/// bewaard werd, is de terugval voor een uid die niet (meer) in `coins` staat.
+pub fn pass_allow_list(pool: &DbPool) -> Vec<(String, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.user_id, COALESCE(NULLIF(c.username, ''), NULLIF(a.username, ''), a.user_id)
+               FROM pass_allow a LEFT JOIN coins c ON c.user_id = a.user_id
+              ORDER BY 2 COLLATE NOCASE",
+        )
+        .expect("prepare pass_allow_list");
+    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query pass_allow_list")
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Zet één lid op de lijst. `false` = niets gedaan (lege uid, of stond er al op) —
+/// de GUI toont dan geen "toegevoegd"-melding die niet klopt.
+pub fn pass_allow_add(pool: &DbPool, uid: &str, username: &str, ts: f64) -> bool {
+    let uid = uid.trim();
+    if uid.is_empty() {
+        return false;
+    }
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT OR IGNORE INTO pass_allow (user_id, username, added) VALUES (?1, ?2, ?3)",
+        params![uid, username.trim(), ts],
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+/// Haal één lid van de lijst. `false` = stond er niet op.
+pub fn pass_allow_remove(pool: &DbPool, uid: &str) -> bool {
+    let conn = pool.get().expect("db");
+    conn.execute("DELETE FROM pass_allow WHERE user_id = ?1", params![uid.trim()])
+        .map(|n| n > 0)
+        .unwrap_or(false)
+}
+
+/// Staat dit lid op de testfase-lijst? Zegt **niets** over of de lijst geldt — dat
+/// beslist de schakelaar, en die leest de aanroeper (web.rs) erbij.
+pub fn pass_allow_has(pool: &DbPool, uid: &str) -> bool {
+    let conn = pool.get().expect("db");
+    conn.query_row("SELECT 1 FROM pass_allow WHERE user_id = ?1", params![uid.trim()], |_| Ok(()))
+        .optional()
+        .unwrap_or(None)
+        .is_some()
+}
+
+/// Alle gekende leden (uid, naam) uit `coins`, alfabetisch — de keuzelijst waaruit een
+/// admin iemand op de testfase-lijst zet. Uit `coins` en niet uit `inventory`, want ook
+/// wie nog nooit iets kocht moet als tester te kiezen zijn.
+pub fn all_member_names(pool: &DbPool) -> Vec<(String, String)> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare(
+            "SELECT user_id, COALESCE(NULLIF(username, ''), user_id) FROM coins
+              ORDER BY 2 COLLATE NOCASE",
+        )
+        .expect("prepare all_member_names");
+    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query all_member_names")
+        .filter_map(Result::ok)
+        .collect()
 }
 
 /// Seed de gem-catalogus één keer (idempotent): 3 primary, 5 secondary, 5 prism.
@@ -4255,6 +4343,66 @@ mod pass_link_test {
         let rows = list_accounts(&pool, 1_000_000.0);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hytale_name, "Bob", "de naam uit coins telt mee");
+
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// De testfase-lijst: wie mag er een Hytale-pas kopen.
+#[cfg(test)]
+mod pass_allow_test {
+    use super::*;
+
+    fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-pa-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (init_pool(p.to_str().unwrap()), p)
+    }
+
+    /// Toevoegen, dubbel toevoegen, verwijderen — en wie er niet op staat, staat er niet op.
+    #[test]
+    fn toevoegen_en_verwijderen() {
+        let (pool, path) = fresh("basis");
+        set_hytale_name(&pool, "u1", "Waldstein", "Waldstein");
+        set_hytale_name(&pool, "u2", "FayBelle", "FayBelle");
+
+        assert!(!pass_allow_has(&pool, "u1"), "lege lijst = niemand erop");
+        assert!(pass_allow_add(&pool, "u1", "Waldstein", 100.0));
+        assert!(pass_allow_has(&pool, "u1"));
+        assert!(!pass_allow_has(&pool, "u2"), "de rest staat er niet op");
+
+        // Twee keer dezelfde persoon is géén tweede rij — en zegt dat ook.
+        assert!(!pass_allow_add(&pool, "u1", "Waldstein", 200.0), "dubbel = niets gedaan");
+        assert_eq!(pass_allow_list(&pool).len(), 1);
+
+        // Een lege uid is nooit een lid (een niet-ingevulde keuzelijst mag geen spookrij zetten).
+        assert!(!pass_allow_add(&pool, "  ", "", 100.0));
+        assert_eq!(pass_allow_list(&pool).len(), 1);
+
+        assert!(pass_allow_remove(&pool, "u1"));
+        assert!(!pass_allow_has(&pool, "u1"));
+        assert!(!pass_allow_remove(&pool, "u1"), "twee keer verwijderen = niets meer te doen");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// De weergegeven naam volgt `coins` (hernoemen op Discord), met de bewaarde naam
+    /// als terugval voor een uid die daar niet (meer) in staat. Sortering op naam.
+    #[test]
+    fn naam_volgt_coins_en_valt_anders_terug() {
+        let (pool, path) = fresh("naam");
+        set_hytale_name(&pool, "u1", "Zoe", "Zoe");
+        pass_allow_add(&pool, "u1", "OudeNaam", 100.0);
+        pass_allow_add(&pool, "u9", "Alleen hier gekend", 100.0);
+
+        let l = pass_allow_list(&pool);
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0], ("u9".to_string(), "Alleen hier gekend".to_string()), "alfabetisch eerst");
+        assert_eq!(l[1].1, "Zoe", "coins wint van de naam die bij het toevoegen bewaard werd");
+
+        // De keuzelijst put uit coins — ook wie nog nooit iets kocht moet te kiezen zijn.
+        let leden = all_member_names(&pool);
+        assert_eq!(leden, vec![("u1".to_string(), "Zoe".to_string())]);
 
         let _ = std::fs::remove_file(path);
     }
