@@ -3696,14 +3696,22 @@ mod horseshoe_dryrun {
         let (pool, path) = fresh("pool");
         gems(&pool, &["Ruby", "Sapphire", "Topaz"]);
         let hid = horseshoe_id(&pool);
+        // De pas wordt hier zelf gezet: passen worden manueel in Manage Shop beheerd, een
+        // verse DB heeft er geen. Moet vóór `rotation_pool` staan, anders zegt de assert
+        // hieronder enkel dat een net aangemaakt id nog niet in een oude lijst zat.
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO items (zone, name, price, color, duration, category, description,
+                                position, in_rotation)
+             VALUES ('shelf', 'Testpas', 100, '#fff', 86400, 'boost', '', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let pas = conn.last_insert_rowid();
+        drop(conn);
         let in_pool: Vec<i64> = rotation_pool(&pool).into_iter().map(|(id, _)| id).collect();
 
-        // De geseede Hytale-passen zitten er niet in, de gems en de horseshoe wel.
-        let pas: i64 = pool
-            .get()
-            .unwrap()
-            .query_row("SELECT id FROM items WHERE category='boost' LIMIT 1", [], |r| r.get(0))
-            .unwrap();
+        // Een pas zit niet in de pot, de gems en de horseshoe wel.
         assert!(!in_pool.contains(&pas), "een Hytale-pas hoort niet in de dagtrekking");
         assert!(in_pool.contains(&hid));
 

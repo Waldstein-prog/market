@@ -1,3 +1,60 @@
+# Handover — Meadow Market (2026-08-12)
+
+## ⏭️ Sessie (2026-08-12) — het spook-schap "Hytale Access", en de shop-kop
+
+**Waarom.** Jo: in Manage Shop staat naast *Permanent Collection* (met de twee passen —
+prima) telkens weer een schap **Hytale Access** met een oude pas. Het is al een paar keer
+verwijderd en komt steeds terug.
+
+**De oorzaak.** `db::seed_hytale()` draaide bij **elke start** en keek enkel of er items met
+de namen `Hytale Day Pass` / `Hytale Permanent Pass` bestonden. De echte passen heten
+intussen *Meadowland Pass* en *Hytale Test Pass*, dus die check faalde altijd → schap +
+twee items werden bij iedere restart opnieuw geseed. Verwijderen in Manage Shop hield het
+dus maar tot de volgende deploy vol.
+
+**De fix.** Seeder geschrapt (zelfde beweging als `seed_gems`, dat al niet meer draait:
+items worden manueel beheerd). In de plaats `db::drop_legacy_hytale_shelf()`, éénmalig
+gemarkeerd via de settings-sleutel `hytale_shelf_dropped_v1`:
+- wist enkel items met die twee seed-namen, **op een schap `Hytale Access`**, en enkel als
+  ze in **niemands inventory** zitten;
+- wist het schap pas als het daarna leeg is;
+- zet dan de sleutel, dus daarna nooit meer — een schap dat later bewust weer zo heet,
+  blijft staan.
+
+**Prod.** Backup `/opt/market/coins.db.bak-hytale-shelf`. Vooraf droog getest op een kopie
+van de prod-DB (binary in een aparte map met een dummy-token: DB-init draait vóór de
+gateway-login, dus de opruiming is te zien zonder de bot te laten verbinden). Na de deploy
+geverifieerd: shelves = *Permanent Collection / Geel / Rood / Blauw / Trinkets*, items 63+64
+weg (van niemand), sleutel staat op 1.
+
+### Shop-weergave, in dezelfde beweging (allemaal LIVE)
+
+1. **Kop hernoemd**: de hardgecodeerde `🎟 Hytale access` boven de passen-rij heet nu
+   `🎟 Permanent Collection`, op de shop én de admin shop-preview. (De statusregel
+   "🔑 Permanent Hytale access — whitelisted as …" is iets anders en bleef.)
+2. **Rijen uitgelijnd**: de dagpicks stonden gecentreerd, de passen-rij links — met vier
+   gems boven en twee passen eronder viel dat op. `justify-content:safe center` verhuisd van
+   `.shelf.picks` naar `.shelf.shop`, dus beide rijen delen één as. `safe` blijft: te brede
+   rijen vallen terug op links i.p.v. iets weg te snijden.
+3. **Titels mee gecentreerd**: `✨ Today's picks` en `🎟 Permanent Collection` krijgen
+   `.center` (de afteller/reroll schuift als één blok mee), en de h1 `🛒 Shop` staat
+   gecentreerd in de sier-font — nieuwe regels `.shoptitle.center` / `.shoptitle.fancy`.
+4. **Zelfde grootte als Basic Gems**: `.shoptitle.fancy` kreeg ook `font-size:1.9rem`; de
+   h1 erfde anders 1.35rem (1.2rem onder de mobiel-breakpoint). De klasse-selector wint van
+   de `h1`-regel in de media-query, dus ook op mobiel blijft hij gelijk aan Basic Gems.
+
+**Verificatie.** 67 tests groen. Eén bestaande test hing aan de seeder
+(`passen_staan_buiten_de_rotatie…` haalde "een pas" uit de DB en kreeg `QueryReturnedNoRows`
+op een verse DB) — die maakt nu zelf een pas-item aan, **vóór** `rotation_pool()` wordt
+gelezen, anders zegt de assert enkel dat een nieuw id nog niet in een oude lijst zat.
+Gecommit + gepusht: `8701fea` (schap), `c8f3f1f` (uitlijning), `919b894` + `7bbe00a`
+(titels).
+
+**Let op bij volgende sessies.**
+- Er staat geen sqlite3 op de VPS: de prod-DB inspecteren gaat via `scp` naar een kopie.
+- `git subtree push --prefix=market market-gh main` spuwt ~900 voortgangsregels; met
+  `| tr '\r' '\n' | tail -2` hou je het leesbaar.
+
 # Handover — Meadow Market (2026-08-11)
 
 ## ⏭️ Sessie (2026-08-11c) — testfase: enkel een lijst van leden mag een Hytale-pas kopen
