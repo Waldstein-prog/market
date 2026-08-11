@@ -269,6 +269,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/stock", post(admin_item_stock))
         .route("/admin/item/rotation", post(admin_item_rotation))
         .route("/admin/accounts", get(admin_accounts))
+        .route("/admin/accounts/name", post(admin_account_name))
         .route("/admin/absent", get(admin_absent))
         .route("/admin/absent/backfill", post(admin_absent_backfill))
         .route("/admin/item/move", post(admin_item_move))
@@ -801,6 +802,10 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .coinform{{display:flex;gap:.4rem;align-items:center;margin:0;flex-wrap:wrap}}
 .coinform .cbx{{font-size:.72rem;color:#9db095;display:inline-flex;align-items:center;gap:.2rem;white-space:nowrap;cursor:pointer}}
 .coinform input[type=number]{{width:90px;padding:.32rem;border:1px solid #2c3d2a;border-radius:7px;background:#0e1510;color:#e8f0e4;font:inherit}}
+.namefix{{display:flex;gap:.35rem;align-items:center;margin:0}}
+.namefix input{{width:11rem;padding:.32rem .45rem;border:1px solid #2c3d2a;border-radius:7px;
+  background:#0e1510;color:#e8f0e4;font:inherit}}
+.namefix input:invalid{{border-color:#6e352c}}
 .undoform{{margin:0}}
 .undonote{{font-size:.8rem}}
 .archline{{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-top:.35rem;font-size:.8rem}}
@@ -4294,10 +4299,20 @@ fn fmt_dur(secs: i64) -> String {
     }
 }
 
+#[derive(Deserialize)]
+struct AccountsQuery {
+    msg: Option<String>,
+    err: Option<String>,
+}
+
 /// Manage → Accounts: alle leden die ooit iets kochten, met hun pas-status.
-/// Kolommen (voorlopig): lid, dagpas actief (+ resterende tijd), permanente pas.
-/// Later uit te breiden met meer info per account.
-async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Response {
+/// Kolommen: lid, **Hytale-naam** (aanpasbaar), dagpas actief (+ resterende tijd),
+/// permanente pas. Later uit te breiden met meer info per account.
+async fn admin_accounts(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AccountsQuery>,
+) -> Response {
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
@@ -4305,11 +4320,22 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
     let rows: String = accounts
         .iter()
         .map(|a| {
-            let member = if a.hytale_name.is_empty() {
-                esc(&a.username)
-            } else {
-                format!("{} <span class=\"hint\">({})</span>", esc(&a.username), esc(&a.hytale_name))
-            };
+            let member = esc(&a.username);
+            // De naam is bewust rechtstreeks aanpasbaar: voor het lid zelf ligt ze vast
+            // zodra er tijd op staat, dus een typo bij de eerste redeem is enkel hier nog
+            // recht te zetten.
+            let namefix = format!(
+                "<form method=\"post\" action=\"/admin/accounts/name\" class=\"namefix\">\
+                   <input type=\"hidden\" name=\"uid\" value=\"{uid}\">\
+                   <input name=\"hytale_name\" value=\"{hn}\" maxlength=\"32\" required \
+                          pattern=\"[A-Za-z0-9_]{{1,32}}\" \
+                          title=\"letters, cijfers en _ — max 32 tekens\" \
+                          placeholder=\"(nog geen naam)\">\
+                   <button class=\"btn\" type=\"submit\">Opslaan</button>\
+                 </form>",
+                uid = esc(&a.user_id),
+                hn = esc(&a.hytale_name),
+            );
             let daypass = match a.day_pass_secs_left {
                 Some(secs) => format!(
                     "<span class=\"yes\">Ja</span> <span class=\"hint\">— {} resterend</span>",
@@ -4324,7 +4350,8 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
             };
             // `data-uid` alvast meegeven: haakje voor de latere extra info / per-account acties.
             format!(
-                "<tr data-uid=\"{uid}\"><td>{member}</td><td>{daypass}</td><td>{perma}</td></tr>",
+                "<tr data-uid=\"{uid}\"><td>{member}</td><td>{namefix}</td>\
+                 <td>{daypass}</td><td>{perma}</td></tr>",
                 uid = esc(&a.user_id),
             )
         })
@@ -4334,12 +4361,21 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
     } else {
         format!(
             "<table class=\"ctable\"><thead><tr>\
-               <th>Lid</th><th>Dagpas actief</th><th>Permanente pas</th>\
+               <th>Lid</th><th>Hytale-naam</th><th>Dagpas actief</th><th>Permanente pas</th>\
              </tr></thead><tbody>{rows}</tbody></table>"
         )
     };
+    let notice = match (&q.msg, &q.err) {
+        (Some(m), _) => format!("<div class=\"notice ok\">✅ {}</div>", esc(m)),
+        (_, Some(e)) => format!("<div class=\"notice err\">⚠️ {}</div>", esc(e)),
+        _ => String::new(),
+    };
     let body = format!(
-        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Accounts</div>{table}",
+        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Accounts</div>{notice}{table}\
+         <p class=\"muted\" style=\"margin-top:.8rem\">De Hytale-naam ligt voor het lid zelf \
+          vast zodra er speeltijd op staat — hier is ze recht te zetten. De correctie loopt \
+          mee over de Twitch↔Discord-koppeling, zodat er nergens een tweede naam achterblijft. \
+          Let op: speeltijd die aan serverkant al onder de oude naam staat, verhuist niet mee.</p>",
         admin_subtabs("accounts"),
     );
     Html(shell(
@@ -4349,6 +4385,65 @@ async fn admin_accounts(State(st): State<AppState>, headers: HeaderMap) -> Respo
         &body,
     ))
     .into_response()
+}
+
+#[derive(Deserialize)]
+struct AccountName {
+    uid: String,
+    hytale_name: String,
+}
+
+/// Manage → Accounts: de Hytale-naam van één account rechtzetten.
+///
+/// Bestaat omdat de naam voor het lid zelf vastligt zodra er tijd op staat: typt een kijker
+/// zich bij zijn eerste Twitch-redeem mis, dan zou hij zonder dit voor altijd op de verkeerde
+/// naam spelen — of erger, een tweede naam ernaast krijgen en zijn tijd over twee klokken
+/// verdelen. Zie `db::correct_hytale_name` voor wat er precies meeverzet wordt.
+async fn admin_account_name(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<AccountName>,
+) -> Response {
+    let Some((admin_uid, admin_name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let want = f.hytale_name.trim().to_string();
+    let uid = f.uid.trim().to_string();
+    if !valid_hytale_name(&want) {
+        let err = format!(
+            "'{want}' is geen geldige Hytale-naam — enkel letters, cijfers en _, hoogstens 32 tekens."
+        );
+        return Redirect::to(&format!("/admin/accounts?err={}", pct(&err))).into_response();
+    }
+    match db::correct_hytale_name(&st.pool, &uid, &want) {
+        Ok(fix) => {
+            let was = if fix.old.is_empty() {
+                "(nog geen naam)".to_string()
+            } else {
+                fix.old.join(", ")
+            };
+            db::log_event(
+                &st.pool,
+                now_secs(),
+                &db::LogEntry::new("admin", "hytale_name")
+                    .actor(&admin_uid, &admin_name)
+                    .detail(format!(
+                        "{uid} → '{want}' (was: {was}) · accounts: {}",
+                        fix.uids.join(" + ")
+                    )),
+            );
+            // Meldt uitdrukkelijk of de tegenhanger meeging: dát is het stuk dat een admin
+            // niet kan zien en waar de hele correctie om draait.
+            let ook = if fix.uids.len() > 1 {
+                format!(" — ook op {} (gekoppeld account)", fix.uids[1..].join(", "))
+            } else {
+                String::new()
+            };
+            let msg = format!("Hytale-naam staat nu op '{want}' (was: {was}){ook}.");
+            Redirect::to(&format!("/admin/accounts?msg={}", pct(&msg))).into_response()
+        }
+        Err(e) => Redirect::to(&format!("/admin/accounts?err={}", pct(&e))).into_response(),
+    }
 }
 
 /// Manage → Absent: alle gevolgde leden, **aflopend op dagen afwezig** (langst weg bovenaan).

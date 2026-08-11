@@ -1,5 +1,39 @@
 # Handover — Meadow Market (2026-08-11)
 
+## ⏭️ Sessie (2026-08-11b) — een verkeerde Hytale-naam is nu recht te zetten
+
+**Waarom.** Sinds de vorige sessie ligt de Hytale-naam vast zodra er ergens speeltijd op
+staat — precies om te verhinderen dat er een tweede naam naast ontstaat en de klok splitst.
+Daardoor was er ook geen enkele weg meer terug: typte een kijker zich mis bij zijn eerste
+redeem, dan speelde hij voorgoed onder die typo, en enkel handwerk in `coins.db` op de VPS
+kon dat nog rechtzetten.
+
+**Wat er nu is.** Manage → Accounts heeft een kolom **Hytale-naam** met een invulveld per
+account (`POST /admin/accounts/name`, admin-gated). De correctie loopt via
+`db::correct_hytale_name` en verzet in **één transactie** alle plekken waar die naam staat:
+`coins.hytale_name` én elke grant-rij, aan **beide kanten** van de Twitch↔Discord-koppeling
+(`twitch:<id>` ⇄ Discord-uid, via `coins.twitch_id`). Bleef er één achter, dan landde de
+eerstvolgende aankoop of redeem alsnog op de oude naam. Zonder koppeling blijft de correctie
+bij het gekozen account — twee vreemden zijn geen zelfde persoon. Een `twitch:`-pseudo-account
+krijgt nooit een eigen `coins`-rij (enkel UPDATE, geen INSERT): dat zou een spookaccount in
+het leaderboard zetten. Elke correctie schrijft `admin/hytale_name` in het logboek, met de
+oude naam en de geraakte accounts erbij.
+
+**Nevenfix.** `list_accounts` toonde de naam enkel uit de **grant**. Wie zijn naam op de site
+zette maar nog niets kocht, kreeg dus een leeg vakje naast een vastgezette naam — misleidend
+zodra je dat vakje kan bewerken. De query neemt nu `coins.hytale_name` als terugval.
+
+**⚠️ Wat NIET meeverhuist:** speeltijd die aan tale-kant al onder de oude naam staat. Die
+boekhouding is van de server (per naam in kleine letters); deze correctie stuurt enkel waar
+**nieuwe** tijd landt. Een correctie ná opgebouwde tijd vraagt dus nog een ingreep aan
+tale-kant. Dat staat ook als waarschuwing onder de tabel.
+
+**Verificatie:** 61 tests groen (nieuw: beide kanten van de koppeling, "zonder koppeling blijft
+het bij één account", en de naam-terugval in de accountlijst). Lokaal end-to-end gedraaid tegen
+een kopie van de DB: gekoppeld paar met typo → één POST zet beide grant-rijen + de coins-rij
+recht, ongeldige naam en onbekend account geven een foutbanner, niet-admin wordt weggestuurd.
+Gedeployd 12:53, site 200, geen warnings in journalctl.
+
 ## ⏭️ Sessie (2026-08-11) — één Hytale-naam per persoon, over beide pas-bronnen heen
 
 **Waarom.** Tale telt speeltijd **per Hytale-naam** (`pass_ledger.name_lc`): alle grant-rijen

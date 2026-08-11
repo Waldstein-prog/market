@@ -2528,6 +2528,105 @@ pub fn linked_discord_name(pool: &DbPool, twitch_id: &str) -> Option<String> {
     .filter(|n| !n.is_empty())
 }
 
+/// Wat een naamcorrectie geraakt heeft — genoeg om er een eerlijke logregel van te maken.
+pub struct NameFix {
+    /// De accounts waar écht een rij verzet is: het gekozen account, en bij een gekoppeld
+    /// paar ook zijn tegenhanger (`twitch:<id>` ⇄ Discord-uid).
+    pub uids: Vec<String>,
+    /// De namen die er stonden (ontdubbeld, hoofdletter-ongevoelig).
+    pub old: Vec<String>,
+}
+
+/// Zet de Hytale-naam van een account recht. Dit is de **enige** weg om een typo te
+/// herstellen: voor het lid zelf ligt de naam vast zodra er ergens tijd op staat, precies
+/// om te verhinderen dat er een tweede naam naast ontstaat.
+///
+/// Corrigeert alle plekken waar de naam van deze persoon staat — zijn `coins`-rij én elke
+/// grant-rij, aan beide kanten van de Twitch↔Discord-koppeling. Bleef er één achter, dan
+/// zou de eerstvolgende aankoop of redeem alsnog op de oude naam landen.
+///
+/// ⚠️ Wat hier **niet** meeverhuist: de speeltijd die aan tale-kant al onder de oude naam
+/// staat. Die boekhouding is van de server (per naam in kleine letters); deze correctie
+/// stuurt enkel waar nieuwe tijd landt.
+pub fn correct_hytale_name(pool: &DbPool, uid: &str, new_name: &str) -> Result<NameFix, String> {
+    let uid = uid.trim();
+    let new_name = new_name.trim();
+    if uid.is_empty() || new_name.is_empty() {
+        return Err("leeg account of lege naam".into());
+    }
+    let mut conn = pool.get().map_err(|e| e.to_string())?;
+
+    // Wie hoort er nog bij? De koppeling loopt beide kanten op.
+    let mut family = vec![uid.to_string()];
+    if let Some(tid) = uid.strip_prefix("twitch:") {
+        let mut stmt = conn
+            .prepare("SELECT user_id FROM coins WHERE twitch_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let found: Vec<String> = stmt
+            .query_map(params![tid.trim()], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        family.extend(found);
+    } else {
+        let tid: String = conn
+            .query_row("SELECT twitch_id FROM coins WHERE user_id = ?1", params![uid], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        if !tid.trim().is_empty() {
+            family.push(format!("twitch:{}", tid.trim()));
+        }
+    }
+
+    // Eerst opschrijven wat er stond: na de UPDATE is dat niet meer te achterhalen.
+    let mut old: Vec<String> = Vec::new();
+    for u in &family {
+        for sql in [
+            "SELECT hytale_name FROM coins WHERE user_id = ?1",
+            "SELECT hytale_name FROM hytale_whitelist WHERE user_id = ?1",
+        ] {
+            let n: Option<String> = conn
+                .query_row(sql, params![u], |r| r.get::<_, String>(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let n = n.unwrap_or_default().trim().to_string();
+            if !n.is_empty() && !old.iter().any(|o| o.eq_ignore_ascii_case(&n)) {
+                old.push(n);
+            }
+        }
+    }
+
+    // Alles in één transactie: half gecorrigeerd is erger dan niet gecorrigeerd, want dan
+    // staan de twee bronnen uit elkaar en splitst de klok alsnog.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut touched: Vec<String> = Vec::new();
+    for u in &family {
+        // Enkel UPDATE, nooit INSERT: een `twitch:`-pseudo-account hoort geen `coins`-rij
+        // te krijgen (dat zou een spookaccount in het leaderboard zetten).
+        let a = tx
+            .execute("UPDATE coins SET hytale_name = ?2 WHERE user_id = ?1", params![u, new_name])
+            .map_err(|e| e.to_string())?;
+        let b = tx
+            .execute(
+                "UPDATE hytale_whitelist SET hytale_name = ?2 WHERE user_id = ?1",
+                params![u, new_name],
+            )
+            .map_err(|e| e.to_string())?;
+        if a + b > 0 {
+            touched.push(u.clone());
+        }
+    }
+    if touched.is_empty() {
+        // De transactie valt hiermee weg (rollback) — er viel toch niets te wijzigen.
+        return Err(format!("onbekend account '{uid}' — niets bijgewerkt"));
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(NameFix { uids: touched, old })
+}
+
 /// Bewaar het Twitch-account dat aan dit Discord-lid hangt (leeg = ontkoppeld).
 pub fn set_twitch_id(pool: &DbPool, uid: &str, username: &str, twitch_id: &str) {
     let conn = pool.get().expect("db");
@@ -2613,13 +2712,18 @@ pub struct AccountRow {
 /// Alle leden die ooit iets kochten (een inventory-item of een pas), met hun
 /// pas-status. Bron = `inventory` ∪ `hytale_whitelist`; naam uit `coins.username`.
 /// Gesorteerd alfabetisch op naam (NOCASE).
+///
+/// De Hytale-naam komt bij voorkeur van de **grant** (daar staat wat er naar de server
+/// gaat), en anders uit `coins` — wie zijn naam op de site zette maar nog niets kocht,
+/// heeft er nog geen grant-rij bij. Beide tonen is nodig sinds een admin die naam hier
+/// kan rechtzetten: een leeg vakje naast een vastgezette naam zou misleiden.
 pub fn list_accounts(pool: &DbPool, now: f64) -> Vec<AccountRow> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
             "SELECT b.user_id,
                     COALESCE(c.username, b.user_id) AS username,
-                    COALESCE(w.hytale_name, '')     AS hytale_name,
+                    COALESCE(NULLIF(w.hytale_name, ''), c.hytale_name, '') AS hytale_name,
                     w.expires                       AS expires,
                     COALESCE(c.perma_access, 0)     AS perma
                FROM (SELECT user_id FROM inventory
@@ -4071,6 +4175,86 @@ mod pass_link_test {
         // Een lid zonder ingevulde naam telt niet als slot.
         set_twitch_id(&pool, "disc3", "Leeg", "77");
         assert_eq!(linked_discord_name(&pool, "77"), None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// De admin-correctie moet **alle** sporen van de oude naam meenemen, aan beide kanten
+    /// van de koppeling. Blijft er één staan, dan landt de volgende aankoop of redeem
+    /// alsnog op de oude naam en splitst de speeltijd-klok toch nog.
+    #[test]
+    fn naamcorrectie_verzet_beide_kanten_van_de_koppeling() {
+        let (pool, path) = fresh("naamfix");
+        let t0 = 1_000_000.0;
+        // Kijker typt zich mis bij zijn eerste redeem, koopt daarna ook op de site.
+        grant_day_whitelist(&pool, "twitch:42", "Waldstien", 2.0 * 3600.0, t0);
+        set_hytale_name(&pool, "disc1", "Waldstein", "Waldstien");
+        grant_day_whitelist(&pool, "disc1", "Waldstien", 3600.0, t0);
+        set_twitch_id(&pool, "disc1", "Waldstein", "42");
+
+        let fix = correct_hytale_name(&pool, "disc1", " Waldstein ").expect("correctie");
+        assert_eq!(fix.old, vec!["Waldstien".to_string()], "de oude naam wordt gerapporteerd");
+        assert!(fix.uids.contains(&"twitch:42".to_string()), "de Twitch-grant gaat mee");
+
+        assert_eq!(get_hytale_name(&pool, "disc1"), "Waldstein");
+        assert_eq!(get_whitelist_name(&pool, "disc1"), Some("Waldstein".into()));
+        assert_eq!(get_whitelist_name(&pool, "twitch:42"), Some("Waldstein".into()));
+
+        // Andersom werkt even goed: corrigeren op de Twitch-rij raakt het Discord-lid.
+        correct_hytale_name(&pool, "twitch:42", "Waldstein2").expect("correctie andersom");
+        assert_eq!(get_hytale_name(&pool, "disc1"), "Waldstein2");
+        assert_eq!(get_whitelist_name(&pool, "disc1"), Some("Waldstein2".into()));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Zonder koppeling blijft de correctie bij het gekozen account — market mag niet
+    /// gokken dat twee vreemden dezelfde persoon zijn.
+    #[test]
+    fn naamcorrectie_blijft_bij_het_gekozen_account() {
+        let (pool, path) = fresh("naamfix2");
+        let t0 = 1_000_000.0;
+        grant_day_whitelist(&pool, "twitch:42", "Bob", 3600.0, t0);
+        set_hytale_name(&pool, "disc1", "Bob", "Bob"); // zelfde naam, géén koppeling
+
+        let fix = correct_hytale_name(&pool, "twitch:42", "Bobby").expect("correctie");
+        assert_eq!(fix.uids, vec!["twitch:42".to_string()]);
+        assert_eq!(get_whitelist_name(&pool, "twitch:42"), Some("Bobby".into()));
+        assert_eq!(get_hytale_name(&pool, "disc1"), "Bob", "de vreemde blijft ongemoeid");
+
+        // Een Twitch-account krijgt nooit een eigen coins-rij van deze correctie: dat zou
+        // een spookaccount in het leaderboard zetten.
+        assert_eq!(get_hytale_name(&pool, "twitch:42"), "");
+
+        // Een account dat nergens bestaat levert een fout op, geen stille no-op.
+        assert!(correct_hytale_name(&pool, "spook", "Iets").is_err());
+        assert!(correct_hytale_name(&pool, "disc1", "  ").is_err(), "lege naam is geen correctie");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Wie zijn naam op de site zette maar nog niets kocht, hoort ze op de Accounts-pagina
+    /// tóch te zien staan — anders corrigeert een admin een leeg vakje naar iets nieuws
+    /// terwijl er al een naam vastligt.
+    #[test]
+    fn accounts_toont_ook_een_naam_zonder_grant() {
+        let (pool, path) = fresh("acclijst");
+        set_hytale_name(&pool, "disc1", "Bob", "Bob");
+        assert!(list_accounts(&pool, 1_000_000.0).is_empty(), "zonder aankoop geen rij");
+
+        // Eén gekocht item volstaat om in de lijst te komen — een pas is er niet, dus er
+        // is ook geen grant-rij die de naam kan aanleveren.
+        pool.get()
+            .unwrap()
+            .execute(
+                "INSERT INTO inventory (user_id, item_id, name, image, price, acquired)
+                 VALUES ('disc1', 1, 'Gem', '', 10, 1.0)",
+                [],
+            )
+            .unwrap();
+        let rows = list_accounts(&pool, 1_000_000.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hytale_name, "Bob", "de naam uit coins telt mee");
 
         let _ = std::fs::remove_file(path);
     }
