@@ -77,6 +77,38 @@ testtijd → pas dicht; testtijd op → pas open; `kind: normal` → geen slot.
 Flowerborn-rolcheck bij Discord, en een lokale instance heeft geen geldig bot-token. De
 poort die ze gebruikt (`may_buy_pass`) is wel getest, in beide standen.
 
+### 📌 Eindstand van de sessie — open punten voor de volgende
+
+**Waar het staat.** Market: `cf5d703` gedeployd (23:59) en gepusht (subtree `7c93d08`);
+vóór de eerste deploy een backup `/opt/market/coins.db.bak-20260811-passallow`.
+Tale: `3b96acc` **gecommit maar niet gepusht en niet gedeployd**.
+
+1. **De tale-bot moet nog live** — dát is de enige stap die de testfase écht doet werken.
+   Recept: `bot/bot.py` naar `/opt/hytale/bot/` kopiëren + `systemctl restart hytale-bot`
+   (raakt de gameserver niet; de regel "geen restart met spelers online" gaat over
+   `hytale-server`, niet over de bot). Jo wilde eerst zelf op zijn **gewone** tijd testen —
+   **vraag hem of het intussen mag.** Zolang dit wacht, is het koopslot in market inert.
+2. **Wat er gebeurt op het moment van die deploy** (met de schakelaar aan): iedereen die
+   enkel gewóne tijd heeft, valt van de whitelist en wordt gekickt zodra hij binnen is —
+   zijn tegoed blijft volledig staan. Op prod gaat dat vandaag over easycomes (≈1u23),
+   Heiji_Cat (≈3u10) en Waldstein (≈6u34). Faybelle is beschermd (`protected_names`).
+3. **De testerslijst op prod is leeg.** Zolang dat zo is kan niemand een pas kopen — ook
+   Jo en Faybelle niet (admins hebben bewust geen uitzondering). Zetten in
+   Manage → ⚙ Settings.
+4. **Item 22 `Hytale Test Pass`** (900 s = 15 min) staat nog op **Out of stock** met
+   plaatshouder-prijs 100. Faybelle beslist prijs/duur/omschrijving en zet hem open; zolang
+   hij dicht staat helpt de testerslijst niemand vooruit.
+5. **Onbeslist gelaten, want het viel niet uit de vraag af te leiden:** een Twitch-redeem
+   tijdens de testfase levert nu óók **testtijd** op. Reden: wie binnen is moet van een
+   lopende klok eten, anders speelt hij gratis. Wil Jo dat redeems gewone tijd blijven
+   geven, dan is dat één regel in `observe_grants` — maar dan kan die speler tijdens de
+   testfase niet binnen.
+6. **De server stond op slot** (`/opt/hytale/access-lock.json`, enkel Faybelle) — met dat
+   slot aan komt er sowieso niemand binnen, ook niet met testtijd.
+7. Nog altijd open van eerder: **vier redeems manueel terug te betalen** in Twitch
+   (easycomes55 ×3, heijicat ×1, van de bug van 04/08), en de bevestigingszin na een
+   aankoop rekent nog met wandkloktijd i.p.v. speeltijd (tekstkeuze is aan Jo).
+
 ## ⏭️ Sessie (2026-08-11b) — een verkeerde Hytale-naam is nu recht te zetten
 
 **Waarom.** Sinds de vorige sessie ligt de Hytale-naam vast zodra er ergens speeltijd op
