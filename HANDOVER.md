@@ -32,7 +32,28 @@ tale-kant. Dat staat ook als waarschuwing onder de tabel.
 het bij één account", en de naam-terugval in de accountlijst). Lokaal end-to-end gedraaid tegen
 een kopie van de DB: gekoppeld paar met typo → één POST zet beide grant-rijen + de coins-rij
 recht, ongeldige naam en onbekend account geven een foutbanner, niet-admin wordt weggestuurd.
-Gedeployd 12:53, site 200, geen warnings in journalctl.
+Gedeployd 12:53, site 200, geen warnings in journalctl. Gecommit `f72fae1`, subtree → `12eb742`.
+
+### 📌 Eindstand van de sessie — open punten voor de volgende
+
+1. **Het naam-model is nu af**, en het is precies wat Jo beschreef: bij een Twitch-redeem
+   (a) ligt de naam van dat Twitch-account vast vanaf de eerste keer, (b) moet een volgende
+   redeem diezelfde naam typen — anders geen tijd, een whisper en een `twitch/name_mismatch`,
+   (c) landt de tijd op die naam, en telt tale alle grants van dezelfde naam bij elkaar op.
+   De Twitch↔Discord-koppeling (`coins.twitch_id`) dient enkel om de teller in de juiste
+   Discord-inventaris te tonen. **Enige weg om een naam te wijzigen: Manage → Accounts.**
+2. **Onoplosbaar en bewust zo gelaten:** dezelfde persoon met **ongekoppelde** accounts die
+   op Twitch een andere naam typt dan op de site. Market kan niet weten dat het één iemand is.
+3. **Vier redeems staan nog open om manueel terug te betalen** in de Twitch-wachtrij (van de
+   bug van 04/08): easycomes55 (12:28, 12:41, 12:46) en heijicat (13:11). Beiden geraakten
+   nadien wél binnen via een aankoop van 500 coins op de site.
+4. **Waldstein houdt zijn resterende testtegoed** (~6 u 34): user zei uitdrukkelijk neen op
+   wissen (11/08). `protected_names` op de VPS staat op enkel `["Faybelle"]`.
+5. **De server stond op 11/08 op slot** (`/opt/hytale/access-lock.json`: `locked: true`, enkel
+   Faybelle). Met dat slot aan komt niemand binnen, ook niet met een geldige pas.
+6. **Stale commentaar aan tale-kant** (niet aangeraakt — andere sessie): de docstring van
+   `observe_grants` in `/opt/hytale/bot/bot.py` zegt nog dat er niets bijgeboekt wordt als het
+   grootboek de naam al kent. De code doet dat wél, en dát is het gewenste gedrag.
 
 ## ⏭️ Sessie (2026-08-11) — één Hytale-naam per persoon, over beide pas-bronnen heen
 
