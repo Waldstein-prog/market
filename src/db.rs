@@ -374,7 +374,7 @@ pub fn init_pool(path: &str) -> DbPool {
         conn.execute("PRAGMA user_version = 1", []).expect("set user_version");
     }
     drop(conn);
-    seed_hytale(&pool);
+    drop_legacy_hytale_shelf(&pool);
     // seed_gems is bewust NIET meer aangeroepen: items worden nu manueel beheerd in Manage
     // Shop, en de categorie-migratie hierboven zou een re-seed telkens naar 'inventory'
     // omzetten. Bestaande (geseede + eigen) items blijven gewoon staan.
@@ -799,45 +799,45 @@ fn seed_gems(pool: &DbPool) {
     }
 }
 
-/// Voeg de twee Hytale-tickets één keer toe (idempotent op naam): een dagpas
-/// (24u) en een permanent ticket. `role_id` laat de admin invullen in Beheer.
-fn seed_hytale(pool: &DbPool) {
+/// Ruimt het oude, geseede schap **Hytale Access** op (eenmalig, gemarkeerd in
+/// `settings`). Vroeger zette een seeder dat schap met 'Hytale Day Pass' +
+/// 'Hytale Permanent Pass' bij elke start terug zodra die twee namen weg waren —
+/// dus ook nadat de admin ze in Manage Shop had verwijderd of hernoemd. De passen
+/// worden nu manueel beheerd (zoals de gems, zie `seed_gems`), dus het schap moet
+/// definitief weg kunnen. Enkel niet-bezeten seed-items sneuvelen; het schap zelf
+/// verdwijnt pas als het daarna leeg is.
+fn drop_legacy_hytale_shelf(pool: &DbPool) {
     let conn = pool.get().expect("db");
-    let exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM items WHERE name IN ('Hytale Day Pass','Hytale Permanent Pass')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    if exists > 0 {
+    let done: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'hytale_shelf_dropped_v1'", [], |r| {
+            r.get(0)
+        })
+        .optional()
+        .unwrap_or(None);
+    if done.is_some() {
         return;
     }
-    // Eigen schap voor de Hytale-toegang, bovenaan (position -1).
     conn.execute(
-        "INSERT INTO shelves (title, position) VALUES ('Hytale Access', -1)",
+        "DELETE FROM items
+          WHERE name IN ('Hytale Day Pass','Hytale Permanent Pass')
+            AND shelf_id IN (SELECT id FROM shelves WHERE title = 'Hytale Access')
+            AND id NOT IN (SELECT item_id FROM inventory)",
         [],
     )
-    .expect("seed hytale shelf");
-    let shelf_id = conn.last_insert_rowid();
-    // Dagpas: blauw, 24u. Permanent: goud, permanent. Beide buiten de dagrotatie
-    // (in_rotation 0): de passen hebben hun eigen vaste rij op de shop.
+    .ok();
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description,
-                            position, in_rotation)
-         VALUES ('shelf', ?1, 'Hytale Day Pass', 100, '#4a86e8', 86400, 'boost',
-                 '24h access to the Hytale server.', 0, 0)",
-        params![shelf_id],
+        "DELETE FROM shelves
+          WHERE title = 'Hytale Access'
+            AND id NOT IN (SELECT shelf_id FROM items WHERE shelf_id IS NOT NULL)",
+        [],
     )
-    .expect("seed daypass");
+    .ok();
     conn.execute(
-        "INSERT INTO items (zone, shelf_id, name, price, color, duration, category, description,
-                            position, in_rotation)
-         VALUES ('shelf', ?1, 'Hytale Permanent Pass', 1000, '#d4af37', 0, 'boost',
-                 'Permanent access to the Hytale server.', 1, 0)",
-        params![shelf_id],
+        "INSERT INTO settings (key, value) VALUES ('hytale_shelf_dropped_v1', '1')
+         ON CONFLICT(key) DO UPDATE SET value = '1'",
+        [],
     )
-    .expect("seed permpass");
+    .ok();
 }
 
 /// Bestaat kolom `col` in `table`? (voor idempotente migraties.)

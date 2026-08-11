@@ -1514,7 +1514,7 @@ async fn market(
         .collect();
     let shelves = format!(
         "{picks}\
-         <h2 class=\"shelf-title\">🎟 Hytale access</h2>\
+         <h2 class=\"shelf-title\">🎟 Permanent Collection</h2>\
          <div class=\"shelf shop\">{passes}</div>"
     );
 
@@ -1585,7 +1585,7 @@ async fn admin_shop_preview(
     let shelves = format!(
         "<h2 class=\"shelf-title\">✨ Today's picks{reroll}</h2>\
          <div class=\"shelf shop\">{offers}</div>\
-         <h2 class=\"shelf-title\">🎟 Hytale access</h2>\
+         <h2 class=\"shelf-title\">🎟 Permanent Collection</h2>\
          <div class=\"shelf shop\">{passes}</div>"
     );
 
