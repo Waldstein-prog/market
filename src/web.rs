@@ -600,6 +600,10 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   position:sticky;top:.6rem;z-index:30;box-shadow:0 4px 16px rgba(0,0,0,.45);
   width:fit-content;margin-left:auto}}
 .shoptitle{{margin:.1rem 0 .6rem}}
+/* De shop-kop deelt de sier-font en de centrering van de schaptitels eronder, zodat
+   kop + rijen op één as staan. (Zelfde font als 'Basic Gems' in de Inventory.) */
+.shoptitle.center{{text-align:center}}
+.shoptitle.fancy{{font-family:'Spicy Sale',cursive;font-weight:400;letter-spacing:.02em}}
 .purse-box .purse-n{{color:{MEADOW};font-variant-numeric:tabular-nums}}
 .notice{{padding:.6rem .9rem;border-radius:10px;margin:.2rem 0 1rem;font-size:.92rem}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
@@ -1490,14 +1494,14 @@ async fn market(
         // GEEN reroll-knop op de publieke shop (de admin-reroll leeft enkel op de
         // Admin shop preview). De publieke shop toont enkel de afteller.
         format!(
-            "<h2 class=\"shelf-title\">✨ Today's picks{countdown}</h2>\
+            "<h2 class=\"shelf-title center\">✨ Today's picks{countdown}</h2>\
              <div class=\"shelf shop picks\">{offers}</div>"
         )
     } else {
         // Nog niet vrijgegeven: SHOP_DAILY_N grijze 🔒-placeholders i.p.v. echte gems.
         let ph: String = (0..SHOP_DAILY_N).map(|_| placeholder_slot()).collect();
         format!(
-            "<h2 class=\"shelf-title\">✨ Today's picks{countdown}</h2>\
+            "<h2 class=\"shelf-title center\">✨ Today's picks{countdown}</h2>\
              <div class=\"shelf shop picks\">{ph}</div>"
         )
     };
@@ -1515,7 +1519,7 @@ async fn market(
         .collect();
     let shelves = format!(
         "{picks}\
-         <h2 class=\"shelf-title\">🎟 Permanent Collection</h2>\
+         <h2 class=\"shelf-title center\">🎟 Permanent Collection</h2>\
          <div class=\"shelf shop\">{passes}</div>"
     );
 
@@ -1524,7 +1528,7 @@ async fn market(
     let body = format!(
         "<div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
            <span class=\"purse-n\" data-bal>{coins}</span></div>\
-         <h1 class=\"shoptitle\">🛒 Shop</h1>{notice}{shelves}\
+         <h1 class=\"shoptitle center fancy\">🛒 Shop</h1>{notice}{shelves}\
          <script>(function(){{\
            try{{var u=new URL(location.href);if(u.searchParams.has('from')){{\
              u.searchParams.delete('from');\
@@ -1584,9 +1588,9 @@ async fn admin_shop_preview(
                    <button class=\"reroll\" title=\"Roll a new daily selection (admin)\">↻</button></form>";
     let passes: String = db::boost_items(&st.pool).iter().map(slot).collect();
     let shelves = format!(
-        "<h2 class=\"shelf-title\">✨ Today's picks{reroll}</h2>\
+        "<h2 class=\"shelf-title center\">✨ Today's picks{reroll}</h2>\
          <div class=\"shelf shop\">{offers}</div>\
-         <h2 class=\"shelf-title\">🎟 Permanent Collection</h2>\
+         <h2 class=\"shelf-title center\">🎟 Permanent Collection</h2>\
          <div class=\"shelf shop\">{passes}</div>"
     );
 
@@ -1595,7 +1599,7 @@ async fn admin_shop_preview(
         "{subtabs}\
          <div class=\"purse-box\" data-from=\"{from}\">Purse {MC} \
            <span class=\"purse-n\" data-bal>{coins}</span></div>\
-         <h1 class=\"shoptitle\">🛒 Shop preview</h1>\
+         <h1 class=\"shoptitle center fancy\">🛒 Shop preview</h1>\
          {notice}{shelves}{KEEP_SCROLL_JS}{refresh}",
         subtabs = admin_subtabs("shop_preview"),
     );
