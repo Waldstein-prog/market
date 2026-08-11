@@ -2473,6 +2473,61 @@ pub fn get_whitelist_linked(pool: &DbPool, uid: &str, now: f64) -> Option<PassVi
     best
 }
 
+// --- Eén Hytale-naam per persoon, over beide bronnen heen --------------------
+// De tale-kant houdt het speeltijd-tegoed bij **per Hytale-naam**: alle passen van
+// dezelfde naam voeden één klok. Twee namen betekent dus twee klokken, en de tijd
+// onder de naam waarmee je niet inlogt is onbereikbaar. Vandaar: wie ergens al een
+// naam heeft vastgezet, houdt die — ook als de tweede pas via de andere weg binnenkomt.
+//
+// ⚠️ Dit kan enkel als de accounts gekoppeld zijn (`coins.twitch_id`, uit de
+// **geverifieerde** Discord-verbindingen). Zonder koppeling valt niet te wéten dat het
+// dezelfde persoon is; dan blijven het twee vreemden voor market, en dat is de juiste
+// uitkomst — liever twee losse klokken dan andermans pas op jouw naam.
+
+/// De naam die de **Twitch-pas** van dit Discord-lid al vastzette, als het lid gekoppeld
+/// is en die pas een naam draagt. Leeg/onbekend ⇒ None.
+pub fn linked_twitch_name(pool: &DbPool, uid: &str) -> Option<String> {
+    let conn = pool.get().expect("db");
+    let twitch_id: String = conn
+        .query_row("SELECT twitch_id FROM coins WHERE user_id = ?1", params![uid], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .expect("query twitch_id")
+        .unwrap_or_default();
+    if twitch_id.is_empty() {
+        return None;
+    }
+    conn.query_row(
+        "SELECT hytale_name FROM hytale_whitelist WHERE user_id = ?1",
+        params![format!("twitch:{twitch_id}")],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .expect("query twitch grant name")
+    .map(|n| n.trim().to_string())
+    .filter(|n| !n.is_empty())
+}
+
+/// Spiegelbeeld: de Hytale-naam van het Discord-lid dat aan dít Twitch-account hangt.
+/// Voor de Twitch-kant, zodat een redeem op de naam landt die het lid op de site al
+/// gebruikt i.p.v. een tweede klok te openen.
+pub fn linked_discord_name(pool: &DbPool, twitch_id: &str) -> Option<String> {
+    if twitch_id.trim().is_empty() {
+        return None;
+    }
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT hytale_name FROM coins WHERE twitch_id = ?1 AND hytale_name <> ''",
+        params![twitch_id.trim()],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .expect("query linked discord name")
+    .map(|n| n.trim().to_string())
+    .filter(|n| !n.is_empty())
+}
+
 /// Bewaar het Twitch-account dat aan dit Discord-lid hangt (leeg = ontkoppeld).
 pub fn set_twitch_id(pool: &DbPool, uid: &str, username: &str, twitch_id: &str) {
     let conn = pool.get().expect("db");
@@ -3965,6 +4020,57 @@ mod pass_link_test {
         let t0 = 1_000_000.0;
         grant_day_whitelist(&pool, "u1", "Speler", 60.0, t0);
         assert!(get_whitelist_linked(&pool, "u1", t0 + 61.0).is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// De naam ligt vast zodra er érgens tijd op staat: haalt iemand eerst een
+    /// Twitch-pas en koopt hij daarna op de site, dan moet die aankoop op dezélfde naam
+    /// landen. Anders draait tale twee speeltijd-klokken en is de tijd onder de naam
+    /// waarmee hij niet inlogt onbereikbaar.
+    #[test]
+    fn de_naam_ligt_vast_over_beide_bronnen_heen() {
+        let (pool, path) = fresh("naamslot");
+        let t0 = 1_000_000.0;
+        // Kijker wisselt in op Twitch en zet daarmee 'Bob' vast.
+        grant_day_whitelist(&pool, "twitch:42", "Bob", 2.0 * 3600.0, t0);
+
+        // Zolang de accounts niet gekoppeld zijn, is er niets te weten: geen slot.
+        assert_eq!(linked_twitch_name(&pool, "disc1"), None);
+        assert_eq!(linked_discord_name(&pool, "42"), None);
+
+        // Na de koppeling geldt 'Bob' ook op de site — dat is het slot dat de
+        // aankoop-route en de login gebruiken.
+        set_twitch_id(&pool, "disc1", "Bob", "42");
+        assert_eq!(linked_twitch_name(&pool, "disc1"), Some("Bob".into()));
+
+        // Andermans Twitch-id levert nooit een naam op.
+        set_twitch_id(&pool, "disc2", "Vreemde", "999");
+        assert_eq!(linked_twitch_name(&pool, "disc2"), None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Andersom: wie op de site al een naam heeft en dán pas op Twitch inwisselt, krijgt
+    /// die tijd op zijn bestaande naam — de Twitch-kant leest dit slot.
+    #[test]
+    fn de_site_naam_geldt_ook_voor_een_latere_redeem() {
+        let (pool, path) = fresh("naamslot2");
+        set_hytale_name(&pool, "disc1", "Bob", "Bob");
+
+        // Zonder koppeling: niets te weten.
+        assert_eq!(linked_discord_name(&pool, "42"), None);
+
+        set_twitch_id(&pool, "disc1", "Bob", "42");
+        assert_eq!(linked_discord_name(&pool, "42"), Some("Bob".into()));
+        // Een leeg of onbekend Twitch-account geeft nooit een naam.
+        assert_eq!(linked_discord_name(&pool, ""), None);
+        assert_eq!(linked_discord_name(&pool, "  "), None);
+        assert_eq!(linked_discord_name(&pool, "999"), None);
+
+        // Een lid zonder ingevulde naam telt niet als slot.
+        set_twitch_id(&pool, "disc3", "Leeg", "77");
+        assert_eq!(linked_discord_name(&pool, "77"), None);
 
         let _ = std::fs::remove_file(path);
     }

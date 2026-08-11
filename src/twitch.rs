@@ -471,9 +471,19 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
     };
     let uid = format!("twitch:{tid}");
 
-    // Naam vastzetten: bestaat er al een naam voor deze Twitch-id, dan blijft die gelden.
+    // Welke naam ligt voor deze persoon al vast? Eerst zijn eigen Twitch-grant. Anders de
+    // naam die het Discord-lid áchter dit Twitch-account op de site gebruikt — dat is
+    // dezelfde persoon (de koppeling komt uit zijn geverifieerde Discord-verbindingen), en
+    // tale telt speeltijd per Hytale-naam. Een tweede naam zou dus een tweede klok openen
+    // en de tijd verdelen over twee namen waarvan hij er maar één kan spelen.
+    let own = db::get_whitelist_name(&ctx.pool, &uid);
+    // Komt de naam van de koppeling, dan wordt ze nú pas op deze Twitch-id vastgelegd.
+    let from_link = own.is_none();
+    let registered = own.or_else(|| db::linked_discord_name(&ctx.pool, tid));
+
+    // Naam vastzetten: ligt er al een naam vast, dan blijft die gelden.
     // Anders de getypte naam opschonen en vastzetten.
-    let (name, first_time) = match db::get_whitelist_name(&ctx.pool, &uid) {
+    let (name, first_time) = match registered {
         Some(n) => {
             // Tweede redeem met een ANDERE naam: niets toekennen. De naam ligt na de eerste
             // keer vast (tegen doorgeven aan derden), dus stilzwijgend de tijd op de oude
@@ -495,7 +505,7 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
                 ctx.whisper(tid, &fill_template(&tpl, &n, None)).await;
                 return;
             }
-            (n, false)
+            (n, from_link)
         }
         None => match clean_name(user_input) {
             Some(n) => (n, true),

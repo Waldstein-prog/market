@@ -1,3 +1,42 @@
+# Handover — Meadow Market (2026-08-11)
+
+## ⏭️ Sessie (2026-08-11) — één Hytale-naam per persoon, over beide pas-bronnen heen
+
+**Waarom.** Tale telt speeltijd **per Hytale-naam** (`pass_ledger.name_lc`): alle grant-rijen
+van dezelfde naam voeden één klok, dus een Twitch-redeem + een shop-aankoop stapelen vanzelf
+op. Live bewijs: Waldstein heeft twee grant-rijen (`391337551543271433` + `twitch:497218221`)
+en één klok van 25 238 s. **Twee verschillende namen** = twee klokken, en de tijd onder de
+naam waarmee je niet inlogt is onbereikbaar. De naam moest dus vastliggen zodra er tijd op
+staat — en dat gold nog niet over de bronnen heen.
+
+**Wat er nu gebeurt** (enkel mogelijk bij een **gekoppeld** account — `coins.twitch_id` uit de
+geverifieerde Discord-verbindingen; zonder koppeling valt niet te wéten dat het dezelfde
+persoon is, en dan blijven het bewust twee vreemden):
+1. **Bij de login** — is `coins.hytale_name` leeg en zette zijn Twitch-pas al een naam vast,
+   dan wordt die overgenomen. Gevolg: de shop vraagt niet meer om een naam en er kan er geen
+   tweede naast getypt worden. (`db::linked_twitch_name`)
+2. **Bij de aankoop** — hetzelfde, als vangnet voor wie sinds de koppeling niet opnieuw
+   inlogde. Een meegestuurde naam wordt dan genegeerd, net zoals dat al gold voor wie al een
+   naam had.
+3. **Bij een redeem** — de "geregistreerde naam" is voortaan de eigen Twitch-grant **of**, als
+   die er niet is, de naam die het gekoppelde Discord-lid op de site gebruikt
+   (`db::linked_discord_name`). Typt hij dan iets anders, dan geldt de bestaande
+   mismatch-weg: **geen tijd**, de whisper die Faybelle daarvoor schreef, en een
+   `twitch/name_mismatch`-regel. Geen nieuwe speler-zichtbare tekst nodig.
+
+**Niet opgelost, en niet oplosbaar:** dezelfde persoon met **ongekoppelde** accounts die op
+Twitch een andere naam typt dan op de site. Market kan niet weten dat het één iemand is. Enige
+verweer blijft dat de whisper en de site dezelfde naam vragen.
+
+**Randgeval dat blijft:** de naam later wijzigen verplaatst een bestaand tegoed niet — dat
+blijft aan tale-kant onder de oude naam staan. Er is nu alleen geen weg meer om er per
+ongeluk een tweede naam bij te maken.
+
+**Verificatie:** 58 tests groen (nieuw: het slot in beide richtingen, inclusief "ongekoppeld =
+geen slot" en "andermans Twitch-id levert niets op"). Prod-check vóór de deploy: geen enkel
+lid heeft een lege `hytale_name` naast een Twitch-grant, dus de overname vuurt nergens
+met terugwerkende kracht.
+
 # Handover — Meadow Market (2026-08-10)
 
 ## ⏭️ Sessie (2026-08-10) — Twitch-redeem matcht op reward-**id**, niet meer op titel

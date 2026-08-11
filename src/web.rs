@@ -2102,6 +2102,19 @@ async fn callback(
                 db::set_twitch_id(&st.pool, &uid, &name, &twitch_id);
                 if !twitch_id.is_empty() {
                     tracing::info!("Discord-login {name}: Twitch-koppeling {twitch_id}");
+                    // Zette zijn Twitch-pas al een Hytale-naam vast, dan is dát zijn naam.
+                    // Hier overnemen i.p.v. pas bij de aankoop: zo vraagt de shop er niet
+                    // meer naar en kan hij er geen tweede naast typen. Twee namen = twee
+                    // speeltijd-klokken aan tale-kant, en de tijd onder de naam waarmee hij
+                    // niet inlogt is weg.
+                    if db::get_hytale_name(&st.pool, &uid).is_empty() {
+                        if let Some(pinned) = db::linked_twitch_name(&st.pool, &uid) {
+                            db::set_hytale_name(&st.pool, &uid, &name, &pinned);
+                            tracing::info!(
+                                "Hytale-naam van {name} overgenomen van zijn Twitch-pas: {pinned}"
+                            );
+                        }
+                    }
                 }
             }
             Err(e) => tracing::warn!("verbindingen onleesbaar voor {name}: {e}"),
@@ -2356,11 +2369,24 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         // naam, dan wordt een meegestuurde waarde genegeerd (ook bij een zelf-gemaakte
         // POST). Een lid mag zijn naam niet meer wijzigen, anders kan hij zijn pas
         // doorgeven door een andere naam te whitelisten.
+        //
+        // Zette zijn gekoppelde Twitch-pas al een naam vast, dan telt díe — ook al typte
+        // hij hier iets anders. Normaal is de naam al bij de login overgenomen; dit is het
+        // vangnet voor wie sinds de koppeling niet opnieuw inlogde. Zonder dit koopt hij
+        // een pas op een tweede naam, en dat is aan tale-kant een tweede speeltijd-klok.
         if db::get_hytale_name(&st.pool, &uid).is_empty() {
-            if let Some(raw) = f.hytale_name.as_deref() {
-                let n = raw.trim();
-                if valid_hytale_name(n) {
-                    db::set_hytale_name(&st.pool, &uid, &name, n);
+            match db::linked_twitch_name(&st.pool, &uid) {
+                Some(pinned) => {
+                    db::set_hytale_name(&st.pool, &uid, &name, &pinned);
+                    tracing::info!("Hytale-naam van {name} volgt zijn Twitch-pas: {pinned}");
+                }
+                None => {
+                    if let Some(raw) = f.hytale_name.as_deref() {
+                        let n = raw.trim();
+                        if valid_hytale_name(n) {
+                            db::set_hytale_name(&st.pool, &uid, &name, n);
+                        }
+                    }
                 }
             }
         }
