@@ -620,9 +620,10 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .shelf .slot .thumb{{font-size:1.2rem}}
 .shelf .slot .name{{white-space:normal;overflow:visible}}
 .shelf.shop .slot{{width:210px}}
-/* Enkel de dagpicks horizontaal centreren (de passen-rij blijft links). `safe` valt terug
+/* Alle shop-rijen horizontaal centreren: met een links uitgelijnde passen-rij ónder de
+   gecentreerde dagpicks stonden de twee blokken zichtbaar uit elkaar. `safe` valt terug
    op links als de rij te breed wordt, zodat er op smalle schermen niks wegvalt. */
-.shelf.picks{{justify-content:safe center}}
+.shelf.shop{{justify-content:safe center}}
 .shelf.shop .slot .name{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .shelf-title{{margin:1.3rem 0 .2rem;font-size:1rem;color:#cfe0c8;font-weight:700;
   display:flex;align-items:center;gap:.5rem}}
