@@ -603,7 +603,7 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 /* De shop-kop deelt de sier-font en de centrering van de schaptitels eronder, zodat
    kop + rijen op één as staan. (Zelfde font als 'Basic Gems' in de Inventory.) */
 .shoptitle.center{{text-align:center}}
-.shoptitle.fancy{{font-family:'Spicy Sale',cursive;font-weight:400;letter-spacing:.02em}}
+.shoptitle.fancy{{font-family:'Spicy Sale',cursive;font-size:1.9rem;font-weight:400;letter-spacing:.02em}}
 .purse-box .purse-n{{color:{MEADOW};font-variant-numeric:tabular-nums}}
 .notice{{padding:.6rem .9rem;border-radius:10px;margin:.2rem 0 1rem;font-size:.92rem}}
 .notice.ok{{background:#1f3320;color:#bfe3b0;border:1px solid #2f5a2c}}
