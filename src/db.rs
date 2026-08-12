@@ -307,6 +307,20 @@ pub fn init_pool(path: &str) -> DbPool {
         // daar bij 12 gems + 4 slots vlak bij uit, zodat er bij de overgang niets verspringt.
         conn.execute("UPDATE items SET shop_weight = 2.0 WHERE category = 'booster'", []).ok();
     }
+    // Testpas: een pas die enkel voor goedgekeurde testers is (de testerslijst in
+    // Manage → ⚙ Settings). Dit is een eigenschap van het ítem, niet van de categorie:
+    // de gewone Meadowland Pass staat gewoon te koop en heeft aan `sold_out`/`stock`
+    // genoeg als rem — vóór deze kolom hing de testerspoort aan `category = 'boost'`,
+    // waardoor een lege testerslijst óók de gewone pas op Out of Stock zette.
+    let testpas_is_new = !column_exists(&conn, "items", "test_pass");
+    ensure_column(&conn, "items", "test_pass", "INTEGER NOT NULL DEFAULT 0");
+    if testpas_is_new {
+        // Eenmalige overname bij het invoeren van de kolom: de bestaande testpas was de
+        // gratis pas (prijs 0) — een pas die niets kost is er nooit een om te verkopen.
+        // Alleen hier, één keer; daarna beslist het vinkje in Manage → Shop.
+        conn.execute("UPDATE items SET test_pass = 1 WHERE category = 'boost' AND price = 0", [])
+            .ok();
+    }
     // Voorloper van `stock` (2026-07-15, één sessie geleefd): een vinkje dat na élke
     // aankoop Out of stock aanzette. Vervangen door een echte teller — die toont de speler
     // ook wát er nog is. Kolom weg, anders staan er twee mechanismen naast elkaar.
@@ -1831,13 +1845,17 @@ pub struct Item {
     /// Doet dit item mee in de dagrotatie? Los van het gewicht, zodat uitzetten het
     /// ingestelde gewicht niet wist. De passen staan hier standaard op `false`.
     pub in_rotation: bool,
+    /// Testpas: enkel te koop voor wie op de testerslijst staat (Manage → ⚙ Settings,
+    /// zolang `pass_allowlist_on` aanstaat). Staat volledig los van de gewone pas, die
+    /// enkel door `sold_out`/`stock` gestuurd wordt.
+    pub test_pass: bool,
 }
 
 /// De kolomlijst van `items`, één keer uitgeschreven: hij stond vier keer letterlijk in
 /// een query en dan is een nieuwe kolom vergeten op één plek een kwestie van tijd.
 const ITEM_COLS: &str = "id, name, price, image, image2, color, role_id, duration, \
                          category, description, zone, shelf_id, sold_out, stock, \
-                         shop_weight, in_rotation";
+                         shop_weight, in_rotation, test_pass";
 
 fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -1857,6 +1875,7 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         stock: r.get("stock")?,
         shop_weight: r.get("shop_weight")?,
         in_rotation: r.get::<_, i64>("in_rotation")? != 0,
+        test_pass: r.get::<_, i64>("test_pass")? != 0,
     })
 }
 
@@ -1969,12 +1988,23 @@ pub fn update_item(
     category: &str,
     description: &str,
     sold_out: bool,
+    test_pass: bool,
 ) {
     let conn = pool.get().expect("db");
     conn.execute(
         "UPDATE items SET name = ?2, price = ?3, role_id = ?4, duration = ?5,
-             category = ?6, description = ?7, sold_out = ?8 WHERE id = ?1",
-        params![id, name, price, role_id, duration, category, description, sold_out as i64],
+             category = ?6, description = ?7, sold_out = ?8, test_pass = ?9 WHERE id = ?1",
+        params![
+            id,
+            name,
+            price,
+            role_id,
+            duration,
+            category,
+            description,
+            sold_out as i64,
+            test_pass as i64
+        ],
     )
     .expect("update item");
 }
@@ -3088,8 +3118,9 @@ pub fn gems_by_category(pool: &DbPool, category: &str) -> Vec<Item> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, price, image, image2, color, role_id, duration, category, description, zone, shelf_id, sold_out, stock FROM items
-             WHERE category = ?1 ORDER BY position, id",
+            &format!(
+                "SELECT {ITEM_COLS} FROM items WHERE category = ?1 ORDER BY position, id"
+            ),
         )
         .expect("prepare gems_by_category");
     let rows = stmt.query_map(params![category], row_to_item).expect("query gems");

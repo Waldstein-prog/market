@@ -1780,15 +1780,20 @@ fn shop_slot(
     // verzamel-items en voor de permanente pas (bij permanente toegang).
     let bought = (owned && (it.category == "inventory" || it.category == "booster"))
         || (it.category == "boost" && it.duration == 0 && has_perma);
-    // Tijdens de testfase van de server is de pas enkel voor de leden op de testerslijst
+    // Een tèstpas (vinkje in Manage → Shop) is enkel voor de leden op de testerslijst
     // (Manage → ⚙ Settings). Voor de rest staat ze permanent dicht — vandaar dat dit
     // langs dezelfde weg loopt als "uitverkocht" en niet als een aparte knop: de shop
     // hoort er hetzelfde uit te zien, wat de reden ook is.
-    let testfase_dicht = it.category == "boost" && !pass_ok;
+    //
+    // NB: dit hing vroeger aan `category == "boost"`, dus aan élke pas. Gevolg: een lege
+    // testerslijst zette óók de gewone Meadowland Pass op Out of Stock, terwijl die
+    // niets met het testerssysteem te maken heeft — die staat gewoon te koop tot een
+    // admin hem op Out of stock zet. Twee aparte systemen, twee aparte remmen.
+    let testfase_dicht = it.test_pass && !pass_ok;
     // Dicht voor iedereen, om drie redenen:
     //  * handmatig op Out of stock gezet (sold_out);
     //  * voorraad op 0 → dicht tot een admin aanvult;
-    //  * pas tijdens de testfase, en dit lid staat niet op de testerslijst.
+    //  * testpas, en dit lid staat niet op de testerslijst.
     // Item blijft wél staan: je ziet wát er te koop is. De échte rem zit in buy()/purchase() —
     // een grijze knop houdt niemand tegen die zelf een POST stuurt.
     let dicht = it.sold_out || testfase_dicht || it.stock == 0;
@@ -2424,11 +2429,11 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         ))
         .into_response();
     }
-    // Testfase: een pas is enkel voor de leden op de testerslijst. Dezelfde weigering en
-    // exact dezelfde zin als "uitverkocht" — voor wie er niet op staat ís de pas dicht, en
+    // Testpas: enkel voor de leden op de testerslijst. Dezelfde weigering en exact
+    // dezelfde zin als "uitverkocht" — voor wie er niet op staat ís de pas dicht, en
     // een aparte tekst zou enkel verklappen dat er een lijst bestaat. De knop staat al grijs;
-    // dit is de rem voor een zelfgemaakte POST.
-    if item.category == "boost" && !may_buy_pass(&st.pool, &uid) {
+    // dit is de rem voor een zelfgemaakte POST. Een gewone pas komt hier niet langs.
+    if item.test_pass && !may_buy_pass(&st.pool, &uid) {
         tracing::info!(
             "{name} probeerde '{}' te kopen maar staat niet op de testerslijst",
             item.name
@@ -2802,6 +2807,19 @@ fn admin_item(
         String::new()
     };
 
+    // Testpas-vinkje: enkel zinvol op een pas, dus enkel daar getoond. Een pas zonder dit
+    // vinkje (de gewone Meadowland Pass) staat gewoon te koop; de testerslijst raakt hem
+    // niet. Staat het vinkje aan, dan is de pas enkel voor de leden op de testerslijst
+    // (Manage → ⚙ Settings, zolang die schakelaar aanstaat).
+    let tp_field = if it.category == "boost" {
+        let tp = if it.test_pass { " checked" } else { "" };
+        format!(
+            "<label class=\"chk\"><input type=\"checkbox\" name=\"test_pass\" value=\"1\"{tp}>\
+               Test pass <span class=\"hint\">(enkel voor de testerslijst)</span></label>"
+        )
+    } else {
+        String::new()
+    };
 
     // Bevestigings-flits na een bewaaractie (?saved=<id>).
     let flash = if saved == Some(it.id) {
@@ -2898,6 +2916,7 @@ fn admin_item(
            {dur_field}\
            <label class=\"chk\"><input type=\"checkbox\" name=\"sold_out\" value=\"1\"{so}>\
              Out of stock <span class=\"hint\">(zichtbaar, maar niet koopbaar)</span></label>\
+           {tp_field}\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{rot_ui}{stock_ui}{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
@@ -4208,6 +4227,10 @@ struct ItemUpdate {
     /// HTML-checkbox). Aanwezigheid = uitverkocht.
     #[serde(default)]
     sold_out: Option<String>,
+    /// Idem: aanwezig ⇒ dit is een testpas (enkel voor de testerslijst). Het vinkje
+    /// bestaat enkel op passen; bij andere items is het afwezig en dus uit.
+    #[serde(default)]
+    test_pass: Option<String>,
     #[serde(default)]
     category: String,
     #[serde(default)]
@@ -4298,6 +4321,7 @@ async fn admin_item_update(
             }
         }
         let sold_out = f.sold_out.is_some();
+        let test_pass = f.test_pass.is_some();
         db::update_item(
             &st.pool,
             f.id,
@@ -4308,6 +4332,7 @@ async fn admin_item_update(
             f.category.trim(),
             f.description.trim(),
             sold_out,
+            test_pass,
         );
         // Enkel de velden die écht veranderden in het logboek; niets gewijzigd = geen regel.
         if let Some(b) = before {
@@ -4325,6 +4350,14 @@ async fn admin_item_update(
             if b.sold_out != sold_out {
                 changes.push(
                     if sold_out { "→ out of stock" } else { "→ back in stock" }.to_string(),
+                );
+            }
+            // Wie de testerspoort op een pas aan- of uitzet, verandert wie hem kan kopen —
+            // dat hoort even goed in het logboek als een prijswijziging.
+            if b.test_pass != test_pass {
+                changes.push(
+                    if test_pass { "→ test pass (testers only)" } else { "→ gewone pas" }
+                        .to_string(),
                 );
             }
             if !changes.is_empty() {
@@ -5307,11 +5340,12 @@ mod pass_testfase {
         (db::init_pool(p.to_str().unwrap()), p)
     }
 
+    /// De **testpas**: een pas met het testers-vinkje aan.
     fn pas() -> db::Item {
         db::Item {
             id: 7,
-            name: "Hytale Day Pass".to_string(),
-            price: 500,
+            name: "Hytale Test Pass".to_string(),
+            price: 0,
             image: String::new(),
             image2: String::new(),
             color: String::new(),
@@ -5325,6 +5359,7 @@ mod pass_testfase {
             stock: -1,
             shop_weight: 10.0,
             in_rotation: false,
+            test_pass: true,
         }
     }
 
@@ -5369,7 +5404,35 @@ mod pass_testfase {
         let mut gem = pas();
         gem.category = "inventory".to_string();
         gem.duration = 0;
+        gem.test_pass = false;
         assert!(shop_slot(&gem, false, true, false, 10_000, false).contains("action=\"/buy\""));
+    }
+
+    /// De **gewone** pas (Meadowland Pass) is een ander systeem: hij staat te koop zodra
+    /// wij hem aanbieden, testtijd of niet. Enkel Out of stock / voorraad 0 sluit hem.
+    /// Dit was de bug: de poort hing aan `category == "boost"` en zette met een lege
+    /// testerslijst óók deze pas op Out of Stock.
+    #[test]
+    fn gewone_pas_trekt_zich_niets_aan_van_de_testerslijst() {
+        let mut it = pas();
+        it.name = "Meadowland Pass".to_string();
+        it.price = 500;
+        it.test_pass = false;
+
+        // Geen tester (pass_ok = false) ⇒ tóch gewoon koopbaar.
+        let s = shop_slot(&it, false, true, false, 10_000, false);
+        assert!(s.contains("action=\"/buy\""), "gewone pas hoort open te staan");
+        assert!(!s.contains("Out of Stock"));
+
+        // De enige rem die telt: Out of stock.
+        let mut dicht = it.clone();
+        dicht.sold_out = true;
+        assert!(shop_slot(&dicht, false, true, false, 10_000, false).contains("Out of Stock"));
+
+        // ... of een voorraad die op nul staat.
+        let mut leeg = it.clone();
+        leeg.stock = 0;
+        assert!(!shop_slot(&leeg, false, true, false, 10_000, false).contains("action=\"/buy\""));
     }
 
     /// Zet Faybelle de pas handmatig op Out of stock, dan geldt dat ook voor de testers:
