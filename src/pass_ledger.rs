@@ -13,27 +13,43 @@
 //! bot de toekenning uit afleidt) en toont hier enkel wat de tale-kant zegt dat er over is.
 //! Eén schrijver per teller, dus geen twee boekhoudingen die uit elkaar lopen.
 //!
-//! **Online of niet?** Dat staat niet in het bestand, maar valt eraan af te lezen: `used`
-//! loopt enkel op terwijl iemand speelt. Zien we die teller stijgen, dan is hij binnen; blijft
-//! ze staan, dan is de pas op pauze. Vandaar dat we periodiek bemonsteren in plaats van enkel
-//! bij een paginabezoek — anders zou een speler die nooit z'n inventaris opent, nooit als
-//! online gelden.
+//! **Online of niet?** Dat staat niet in `passes.json`, maar de speeltijd-teller van de
+//! tale-kant (`hytale-playtime.service`) houdt het wél bij: in `playtime.json` staat onder
+//! `open` wie er op dit moment in-game is (de Forgotten Temple meegerekend). Dát is onze bron.
+//!
+//! Tot 2026-08-14 stond hier enkel een gok: `used` loopt op terwijl iemand speelt, dus een
+//! stijgende teller = binnen. Die gok blijft staan als terugval, maar hij plakte — na het
+//! uitloggen gold je nog anderhalve minuut als online (`ONLINE_GRACE`) en bleef de klok op de
+//! site zichtbaar doortellen tot ze bij de volgende sync terugsprong. Faybelle zag dat op haar
+//! Test Pass. De echte spelerslijst kent dat probleem niet.
 //!
 //! **Faalt veilig.** Is het bestand er niet of niet leesbaar, dan geeft `lookup` niets terug
 //! en valt de site terug op de oude weergave (aftellen op `expires`). Market schrijft nooit
 //! in dit bestand.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Standaardpad op de VPS; te overschrijven met `MARKET_PASSES_JSON` (voor tests).
 const DEFAULT_PATH: &str = "/opt/hytale/passes.json";
+/// De spelerslijst van de speeltijd-teller; te overschrijven met `MARKET_PLAYTIME_JSON`.
+const DEFAULT_PLAYTIME: &str = "/opt/hytale/playtime.json";
+/// Hoe oud `playtime.json` mag zijn voor we hem niet meer vertrouwen. De teller schrijft
+/// minstens elke 30s zolang de server draait (ook met een lege server), dus 3 minuten stilte
+/// betekent dat er iets stuk is — dan liever terugvallen op de oude gok dan een spelerslijst
+/// van een uur geleden geloven.
+const PLAYTIME_STALE: Duration = Duration::from_secs(180);
 /// Hoe vaak we het bestand opnieuw inlezen. Klein bestand, maar een paginabezoek mag er
 /// nooit op wachten — dus lezen we op de achtergrond en bedienen we uit het geheugen.
 const SAMPLE_EVERY: Duration = Duration::from_secs(20);
-/// Zolang na de laatste stijging van `used` gelden we iemand nog als online. Ruim boven de
-/// bemonsteringsstap, zodat een speler niet knippert tussen online en gepauzeerd.
+/// Hoe vaak we de spelerslijst opnieuw inlezen. Vaker dan het grootboek: dit bepaalt of de
+/// klok op de site loopt of stilstaat, en het bestand is een paar honderd bytes.
+const PLAYTIME_EVERY: Duration = Duration::from_secs(5);
+/// Terugval-gok: zolang na de laatste stijging van `used` gelden we iemand nog als online.
+/// Ruim boven de bemonsteringsstap, zodat een speler niet knippert tussen online en
+/// gepauzeerd — maar dus ook ruim ná het uitloggen. Enkel in gebruik als `playtime.json`
+/// niets bruikbaars zegt.
 const ONLINE_GRACE: Duration = Duration::from_secs(90);
 
 /// Wat market van één pas moet weten om hem te tonen.
@@ -65,6 +81,11 @@ struct State {
     passes: HashMap<String, Entry>,
     /// Is het bestand ooit met succes gelezen? Zo niet, dan valt de site terug op `expires`.
     have_data: bool,
+    /// Wie er volgens `playtime.json` nu in-game is (namen in kleine letters).
+    online_now: HashSet<String>,
+    /// Wanneer we die lijst voor het laatst uit een VERS bestand haalden. `None` = geen
+    /// bruikbare spelerslijst; dan telt de oude gok (stijgende `used`).
+    online_read: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -91,15 +112,43 @@ pub fn lookup(hytale_name: &str) -> Option<Ledger> {
     if !st.have_data {
         return None;
     }
-    let e = st.passes.get(&hytale_name.to_lowercase())?;
+    let key = hytale_name.to_lowercase();
+    let e = st.passes.get(&key)?;
+    // De spelerslijst weet het zeker; de stijgende `used`-teller is enkel de terugval als die
+    // lijst er niet is. Beide potjes krijgen exact dezelfde behandeling — welk potje loopt,
+    // beslist de tale-kant, niet de vraag of je binnen bent.
+    let online = match st.online_read {
+        Some(t) if t.elapsed() < PLAYTIME_STALE => st.online_now.contains(&key),
+        _ => e.last_rise.is_some_and(|t| t.elapsed() < ONLINE_GRACE),
+    };
     Some(Ledger {
         remaining: e.remaining.max(0.0),
         test_remaining: e.test_remaining.max(0.0),
         pass_remaining: e.pass_remaining.max(0.0),
-        online: e.last_rise.is_some_and(|t| t.elapsed() < ONLINE_GRACE),
+        online,
         used: e.used,
         test: e.test,
     })
+}
+
+/// Leest de spelerslijst van de speeltijd-teller: `{"updated": …, "open": {"naam": start}}`.
+/// Een te oud bestand telt als geen lijst — dan blijft de oude gok gelden.
+fn sample_playtime(path: &str) -> Result<usize, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let updated = v.get("updated").and_then(|u| u.as_f64()).ok_or("geen updated-veld")?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs_f64();
+    if now - updated > PLAYTIME_STALE.as_secs_f64() {
+        let mut st = state().lock().map_err(|_| "state vergrendeld")?;
+        st.online_read = None;
+        return Err(format!("speeltijd-teller staat stil ({:.0}s oud)", now - updated));
+    }
+    let open = v.get("open").and_then(|o| o.as_object()).ok_or("geen open-object")?;
+    let names: HashSet<String> = open.keys().map(|k| k.to_lowercase()).collect();
+    let mut st = state().lock().map_err(|_| "state vergrendeld")?;
+    st.online_now = names;
+    st.online_read = Some(Instant::now());
+    Ok(st.online_now.len())
 }
 
 /// Lees het bestand één keer in en werk de toestand bij.
@@ -141,6 +190,8 @@ fn sample(path: &str) -> Result<usize, String> {
 /// Achtergrondtaak: houdt de gegevens vers.
 pub async fn run() {
     let path = std::env::var("MARKET_PASSES_JSON").unwrap_or_else(|_| DEFAULT_PATH.to_string());
+    let ptpath =
+        std::env::var("MARKET_PLAYTIME_JSON").unwrap_or_else(|_| DEFAULT_PLAYTIME.to_string());
     // Eén keer luid zeggen of dit werkt: zonder leesrecht is de pas-teller op de site de
     // oude wandklok, en dat wil je weten vóór iemand zich afvraagt waarom de tijd niet klopt.
     match sample(&path) {
@@ -150,10 +201,29 @@ pub async fn run() {
              op de aankoopdatum. Market heeft leesrecht op dat bestand nodig."
         ),
     }
+    match sample_playtime(&ptpath) {
+        Ok(n) => tracing::info!("Spelerslijst: {ptpath} gelezen — {n} speler(s) nu in-game"),
+        Err(e) => tracing::warn!(
+            "Spelerslijst NIET bruikbaar ({ptpath}: {e}) — de pas-klok op de site valt terug \
+             op de gok 'stijgende teller = online', en blijft na het uitloggen dus even \
+             doortellen."
+        ),
+    }
+    // De spelerslijst vaker dan het grootboek: dát is wat bepaalt of de klok op de site
+    // loopt of stilstaat, en het bestand is klein. Het grootboek zelf verandert toch maar
+    // elke 15s (het ritme van de bot).
+    let mut n: u32 = 0;
     loop {
-        tokio::time::sleep(SAMPLE_EVERY).await;
-        if let Err(e) = sample(&path) {
-            tracing::debug!("pas-grootboek lezen faalde: {e}");
+        tokio::time::sleep(PLAYTIME_EVERY).await;
+        if let Err(e) = sample_playtime(&ptpath) {
+            tracing::debug!("spelerslijst lezen faalde: {e}");
+        }
+        n += 1;
+        if n * PLAYTIME_EVERY.as_secs() as u32 >= SAMPLE_EVERY.as_secs() as u32 {
+            n = 0;
+            if let Err(e) = sample(&path) {
+                tracing::debug!("pas-grootboek lezen faalde: {e}");
+            }
         }
     }
 }
@@ -233,6 +303,34 @@ mod tests {
         sample(p.to_str().unwrap()).unwrap();
         let l = lookup("Tester").unwrap();
         assert!(l.test && l.remaining == 0.0);
+
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// De spelerslijst: wie er nu in-game is, en de leeftijdsgrens erop. Een lijst van een uur
+    /// geleden zou iedereen eeuwig online houden — dan liever terug naar de gok.
+    #[test]
+    fn leest_de_spelerslijst_en_weigert_een_oude() {
+        let p = std::env::temp_dir().join(format!("playtime-{}.json", std::process::id()));
+        let nu = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        write(&p, &format!(r#"{{"updated":{nu},"open":{{"Waldstein":{nu}}}}}"#));
+        assert_eq!(sample_playtime(p.to_str().unwrap()).unwrap(), 1);
+        {
+            let st = state().lock().unwrap();
+            assert!(st.online_now.contains("waldstein"), "naam in kleine letters opgeslagen");
+            assert!(st.online_read.is_some());
+        }
+
+        // Niemand binnen: lege lijst, maar wél een geldige lijst.
+        write(&p, &format!(r#"{{"updated":{nu},"open":{{}}}}"#));
+        assert_eq!(sample_playtime(p.to_str().unwrap()).unwrap(), 0);
+        assert!(state().lock().unwrap().online_read.is_some());
+
+        // Teller staat stil (bestand van een uur oud) → geen lijst meer, terug naar de gok.
+        let oud = nu - 3600.0;
+        write(&p, &format!(r#"{{"updated":{oud},"open":{{"Waldstein":{oud}}}}}"#));
+        assert!(sample_playtime(p.to_str().unwrap()).is_err(), "te oud = onbruikbaar");
+        assert!(state().lock().unwrap().online_read.is_none());
 
         let _ = std::fs::remove_file(p);
     }

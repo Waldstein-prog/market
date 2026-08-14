@@ -674,23 +674,24 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   width:56px;height:56px;border-radius:50%;background:rgba(14,21,16,.78);
   border:1px solid rgba(232,240,228,.22);display:flex;align-items:center;
   justify-content:center;gap:7px}}
+/* ⚠️ Zonder deze regel stond het pauzeteken ER ALTIJD (fout gemeld 2026-08-14: pauzeteken op
+   een lópende Test Pass). Het `hidden`-attribuut zet `display:none`, maar dat komt uit de
+   browser-stijl en die verliest het altijd van een stijl die hier staat — en hierboven staat
+   `display:flex`. Dus moet het verbergen hier óók staan. */
+.passpause[hidden]{{display:none}}
 .passpause i{{display:block;width:9px;height:26px;border-radius:2px;background:#e8f0e4}}
-/* Testpas: hetzelfde logo, maar met een T op dezelfde donkere schijf. De T is uit twee
-   balkjes opgebouwd — exact hetzelfde materiaal als het pauzeteken, zodat de twee knoppen
-   als één familie lezen. */
-.passT{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
-  width:56px;height:56px;border-radius:50%;background:rgba(14,21,16,.78);
-  border:1px solid rgba(232,240,228,.22);display:flex;align-items:center;
-  justify-content:center}}
-.passT b{{position:relative;display:block;width:30px;height:9px;border-radius:2px;
-  background:#e8f0e4}}
-.passT b::after{{content:"";position:absolute;left:50%;top:9px;transform:translateX(-50%);
-  width:9px;height:22px;border-radius:2px;background:#e8f0e4}}
+/* De naam bóven het icoontje (user-wens Faybelle 2026-08-14). Vervangt het oude T-schijfje
+   op de testpas: de twee passen dragen hetzelfde logo, dus enkel het kopje zegt welke het is.
+   Vaste kolombreedte + `min-height` voor twee regels, zodat de twee logo's op dezelfde
+   hoogte blijven staan ook als één naam afbreekt. */
+.passname{{display:flex;align-items:flex-end;justify-content:center;
+  width:100%;min-height:2.4em;margin:0 auto .45rem;text-align:center;
+  color:#cfe0c8;font:700 .95rem/1.2 system-ui,sans-serif;letter-spacing:.02em}}
 /* De twee passen naast elkaar: testtijd links (die loopt eerst), gewone pas rechts. */
 .passrow{{display:flex;justify-content:center;align-items:flex-start;gap:1.6rem;
   flex-wrap:wrap}}
 .passrow .passbtn{{margin-top:0}}
-.passcol{{margin:1.4rem 0 0}}
+.passcol{{margin:1.4rem 0 0;width:125px}}
 /* De afteller onder het logo. Tabular-nums zodat de cijfers niet zitten te wiebelen. */
 .passtime{{display:block;text-align:center;margin:.55rem auto 0;
   color:#e8f0e4;font:800 1.35rem/1.2 system-ui,sans-serif;
@@ -955,6 +956,10 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   .lb .amt{{min-width:4.2rem}}
   .lb li{{padding:.5rem .15rem;gap:.45rem}}
   .passbtn{{width:108px}}
+  /* Kolom mee versmallen met het logo, anders duwen de naamkopjes de twee passen
+     op een smal scherm uit elkaar (of onder elkaar). */
+  .passcol{{width:108px}}
+  .passname{{font-size:.85rem}}
   .passtime{{font-size:1.6rem}}
   /* Een <input> heeft een intrinsieke minimumbreedte (~20 tekens); zonder `min-width:0`
      weigert hij te krimpen en duwt hij de rij (input + Rename + Delete) buiten beeld. */
@@ -1322,8 +1327,9 @@ fn inventory_home(
             ""
         };
         format!(
-            "<div class=\"passcol\"><div class=\"passbtn\">\
-               <img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">{pause_mark}</div>{below}</div>"
+            "<div class=\"passcol\"><span class=\"passname\">Meadowland Pass</span>\
+             <div class=\"passbtn\">\
+               <img src=\"/img/hytalepass.png\" alt=\"Meadowland Pass\">{pause_mark}</div>{below}</div>"
         )
     };
 
@@ -1337,9 +1343,11 @@ fn inventory_home(
         }
     };
 
-    // De twee klokken van de tale-kant: testtijd links (met een T op het logo), gewone pas
-    // rechts. Testtijd loopt eerst; zolang die loopt staat de pas-klok stil met het
-    // pauzeteken erop — net als in-game en in het panel.
+    // De twee klokken van de tale-kant: testtijd links, gewone pas rechts. Beide dragen
+    // hetzelfde logo, dus de naam staat erbóven — het oude T-schijfje op de testpas las
+    // slecht (user-wens Faybelle 2026-08-14). Testtijd loopt eerst; zolang die loopt staat
+    // de pas-klok stil met het pauzeteken erop — net als in-game en in het panel. Sta je
+    // niet op de server, dan staan ze allebei stil en dragen ze allebei het pauzeteken.
     //
     // ⚠️ De klok wordt NIET één keer getekend en dan blindelings verder geteld: dat deed de
     // vorige versie, en dan bleef de tijd in de browser doorlopen nadat je uitgelogd was.
@@ -1349,6 +1357,7 @@ fn inventory_home(
     let ticker = "<script>(function(){\
       var row=document.querySelector('[data-passrow]');if(!row)return;\
       var tcol=row.querySelector('[data-testcol]'),pmark=row.querySelector('[data-pausemark]');\
+      var tmark=row.querySelector('[data-testpausemark]');\
       var tc=row.querySelector('[data-clock=test]'),pc=row.querySelector('[data-clock=pass]');\
       var st={online:row.dataset.online==='1',test:+row.dataset.test,pass:+row.dataset.pass};\
       function fmt(s){s=Math.max(0,Math.floor(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;\
@@ -1357,6 +1366,7 @@ fn inventory_home(
         if(tcol)tcol.hidden=!heeftTest;\
         if(tc)tc.textContent=fmt(st.test);\
         if(pc)pc.textContent=fmt(st.pass);\
+        if(tmark)tmark.hidden=st.online;\
         if(pmark)pmark.hidden=st.online&&!heeftTest;}\
       function tik(){if(st.online){if(st.test>0.5){st.test=Math.max(0,st.test-1);}\
         else{st.pass=Math.max(0,st.pass-1);}}draw();}\
@@ -1371,12 +1381,16 @@ fn inventory_home(
         format!(
             "<div class=\"passrow\" data-passrow data-online=\"{online}\" \
                  data-test=\"{test}\" data-pass=\"{pas}\">\
-               <div class=\"passcol\" data-testcol{verborgen}><div class=\"passbtn\">\
+               <div class=\"passcol\" data-testcol{verborgen}>\
+                 <span class=\"passname\">Test Pass</span>\
+                 <div class=\"passbtn\">\
                  <img src=\"/img/hytalepass.png\" alt=\"Test Pass\">\
-                 <span class=\"passT\" aria-label=\"test time\"><b></b></span></div>\
+                 <span class=\"passpause\" aria-label=\"paused\" data-testpausemark{testpauze}>\
+                   <i></i><i></i></span></div>\
                  <span class=\"passtime\" data-clock=\"test\">{testtijd}</span></div>\
-               <div class=\"passcol\"><div class=\"passbtn\">\
-                 <img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">\
+               <div class=\"passcol\"><span class=\"passname\">Meadowland Pass</span>\
+                 <div class=\"passbtn\">\
+                 <img src=\"/img/hytalepass.png\" alt=\"Meadowland Pass\">\
                  <span class=\"passpause\" aria-label=\"paused\" data-pausemark{pauze}>\
                    <i></i><i></i></span></div>\
                  <span class=\"passtime\" data-clock=\"pass\">{pastijd}</span></div>\
@@ -1389,6 +1403,9 @@ fn inventory_home(
             // Het pauzeteken staat er zodra de pas-klok stilstaat: offline, óf omdat de
             // testtijd voorgaat. Het script houdt dit daarna zelf bij.
             pauze = if pas_loopt { " hidden" } else { "" },
+            // De testklok loopt zodra je op de server staat (ze gaat vóór de pas), dus daar
+            // is offline de enige reden om stil te staan.
+            testpauze = if l.online { " hidden" } else { "" },
         )
     };
     let pass_row = match db::get_whitelist_linked(pool, uid, now_secs()) {

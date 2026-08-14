@@ -1,5 +1,33 @@
 # Handover — Meadow Market (2026-08-14)
 
+## ✅ 2026-08-14 (nacht, met Faybelle) — namen boven de pas-icoontjes + de klok stopt echt
+
+**LIVE** (deploy 20:49, site 200, geen warnings). In-game/op de site bevestigd: *"werkt prima"*.
+
+### De twee pas-icoontjes dragen nu hun naam
+
+De **T** op het testpas-logo las slecht. In de plaats staat de naam **bóven** het icoontje:
+*Test Pass* links, *Meadowland Pass* rechts; de tijd blijft eronder. `.passname` heeft een vaste
+kolombreedte (125 px, 108 px op gsm) en `min-height: 2.4em` zodat beide logo's op dezelfde hoogte
+blijven als één naam afbreekt. Het `.passT`-schijfje is weg.
+
+### Twee fouten die daarbij bovenkwamen
+
+1. **Het pauzeteken stond er áltijd.** Het werd verborgen met het `hidden`-attribuut, maar dat zet
+   `display:none` vanuit de *browser*-stijl en die verliest het van elke regel hier — en `.passpause`
+   zet `display:flex`. Fix: `.passpause[hidden]{display:none}` expliciet. Gold ook voor de Meadowland
+   Pass, maar viel daar niet op omdat die klok meestal terecht stilstaat.
+   ⚠️ Zelfde valkuil bij elk element dat we met `hidden` verbergen én een eigen `display` heeft.
+2. **De klok telde door na uitloggen.** `pass_ledger` leidde "speelt nu" af uit een stijgende
+   `used`-teller met 90 s speling (`ONLINE_GRACE`). Nu leest hij de échte spelerslijst uit
+   **`playtime.json` → `open`** (`sample_playtime`, elke 5 s; `PLAYTIME_STALE` = 3 min, daarna terug
+   naar de oude gok). Enkel lezen — market schrijft nog steeds in geen enkel tale-bestand.
+   Aan tale-kant is `playtime.py` daarvoor op 10 s gezet én schrijft hij meteen bij join/leave.
+
+Waarom het op de Meadowland Pass nooit opviel: die toont uren en minuten (`3h 45m`), dus een
+naijling van een halve minuut is onzichtbaar. De Test Pass telt in minuten en seconden.
+
+
 > ⚠️ **Deels achterhaald, diezelfde dag nog.** Om 14:20 heeft de **tale-sessie** de
 > `TODO-testtimer` afgewerkt in commit `0851e4c` (*"testtijd als eigen potje, met een tweede
 > klok en één testpas per persoon"*), en die raakt óók market:
