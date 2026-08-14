@@ -2908,6 +2908,29 @@ pub fn grant_day_whitelist(pool: &DbPool, uid: &str, hytale_name: &str, add_secs
     new_exp
 }
 
+/// Heeft een **ander** account deze Hytale-naam al vastgezet — als vastgelegde naam of via
+/// een pas? Gebruikt als rem op de laatste terugval van de speeltijd-weergave: een
+/// Discord-naam die toevallig gelijkloopt met een Hytale-naam mag nooit de tijd van iemand
+/// anders tonen. Hoofdletter-ongevoelig, want beide kanten sleutelen op kleine letters.
+pub fn hytale_name_claimed_by_other(pool: &DbPool, hytale_name: &str, uid: &str) -> bool {
+    let n = hytale_name.trim().to_lowercase();
+    if n.is_empty() {
+        return false;
+    }
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT 1 FROM coins WHERE lower(hytale_name) = ?1 AND user_id <> ?2
+         UNION ALL
+         SELECT 1 FROM hytale_whitelist WHERE lower(hytale_name) = ?1 AND user_id <> ?2
+         LIMIT 1",
+        params![n, uid],
+        |_| Ok(()),
+    )
+    .optional()
+    .unwrap_or(None)
+    .is_some()
+}
+
 /// Ken een permanente whitelist toe (permanente pas).
 pub fn grant_perma_whitelist(pool: &DbPool, uid: &str, hytale_name: &str) {
     let conn = pool.get().expect("db");
@@ -4302,6 +4325,26 @@ mod pass_link_test {
         let p = std::env::temp_dir().join(format!("market-pl-{}-{tag}.db", std::process::id()));
         let _ = std::fs::remove_file(&p);
         (init_pool(p.to_str().unwrap()), p)
+    }
+
+    /// De rem op de laatste terugval van de speeltijd-weergave: een naam die een ánder
+    /// account al opeist (vastgezet of via een pas) is niet van jou.
+    #[test]
+    fn een_naam_van_een_ander_account_is_bezet() {
+        let (pool, path) = fresh("claimed");
+        set_hytale_name(&pool, "u1", "Waldstein", "Waldstein");
+
+        assert!(hytale_name_claimed_by_other(&pool, "waldstein", "u2"), "hoofdletters doen niet mee");
+        assert!(!hytale_name_claimed_by_other(&pool, "Waldstein", "u1"), "van jezelf = niet bezet");
+        assert!(!hytale_name_claimed_by_other(&pool, "Faybelle", "u2"), "niemand claimt die");
+        assert!(!hytale_name_claimed_by_other(&pool, "  ", "u2"), "lege naam claimt niets");
+
+        // Ook een pas-rij (zonder vastgezette naam in `coins`) legt beslag op de naam.
+        grant_day_whitelist(&pool, "twitch:9", "Sigilien", 3600.0, 1000.0);
+        assert!(hytale_name_claimed_by_other(&pool, "sigilien", "u2"));
+        assert!(!hytale_name_claimed_by_other(&pool, "sigilien", "twitch:9"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     /// Een Twitch-pas hoort bij een Discord-lid zodra dat lid zijn Twitch in Discord

@@ -1237,6 +1237,39 @@ fn booster_slot(it: &db::Item, owned: bool) -> String {
 }
 
 /// Inventory-home met sub-tabs Coins / Gems / Boosts.
+/// Onder welke Hytale-naam zoeken we de **speeltijd** van dit lid op?
+///
+/// 1. De naam die hij vastzette (`coins.hytale_name`) — de gewone weg.
+/// 2. Anders die van zijn pas: een Twitch-redeem landt op `twitch:<id>`, en zo'n rij hangt
+///    aan een naam, niet aan een Discord-lid.
+/// 3. Anders zijn **Discord-naam**, maar enkel als de server iemand met precies die naam
+///    kent én geen ander account die naam al opeist. Zonder die derde stap ziet wie nooit
+///    een pas kocht — admins, of wie gratis toegang heeft — nooit zijn speeltijd staan; dat
+///    was precies het gat waardoor Faybelle's uren ontbraken (14/08).
+///
+/// Dit **toont** enkel. Het zet geen naam vast, whitelistet niets en geeft geen tijd. Een
+/// Discord-naam is wél zelf te kiezen, vandaar de rem in stap 3: is de naam al van een ander
+/// account (vastgezet of via een pas), dan valt de terugval weg en blijft de regel leeg.
+fn playtime_name_for(pool: &DbPool, uid: &str, discord_name: &str) -> String {
+    let pinned = db::get_hytale_name(pool, uid);
+    if !pinned.is_empty() {
+        return pinned;
+    }
+    if let Some(p) = db::get_whitelist_linked(pool, uid, now_secs()) {
+        if !p.hytale_name.is_empty() {
+            return p.hytale_name;
+        }
+    }
+    let guess = discord_name.trim();
+    if !guess.is_empty()
+        && crate::playtime::lookup(guess).is_some()
+        && !db::hytale_name_claimed_by_other(pool, guess, uid)
+    {
+        return guess.to_string();
+    }
+    String::new()
+}
+
 fn inventory_home(
     pool: &db::DbPool,
     uid: &str,
@@ -1351,12 +1384,7 @@ fn inventory_home(
     // pas-verbruik. Zoeken gebeurt op de Hytale-naam die dit lid vastzette; is die er niet,
     // dan die van zijn pas. Geen naam of nog nooit gespeeld ⇒ geen regel.
     let playtime_row = {
-        let hname = db::get_hytale_name(pool, uid);
-        let hname = if hname.is_empty() {
-            db::get_whitelist_linked(pool, uid, now_secs()).map(|p| p.hytale_name).unwrap_or_default()
-        } else {
-            hname
-        };
+        let hname = playtime_name_for(pool, uid, name);
         match crate::playtime::lookup(&hname) {
             Some(s) if s >= 60.0 => format!(
                 "<div class=\"statrow\"><span class=\"k\">Time spent in Meadowland</span>\
@@ -2023,7 +2051,45 @@ fn lb_list(rows: &[(String, String, i64)], me: &str) -> String {
     format!("<ol class=\"lb\">{items}</ol>")
 }
 
-/// Leaderboard met tabs All-time (ooit verdiend) en Now (huidig saldo).
+/// De ranglijst van de speeltijd: wie bracht het meeste tijd op Meadowland door?
+///
+/// Andere bron dan de coin-lijsten hiernaast: dit komt van de tale-kant (`playtime.json`)
+/// en gaat over **Hytale-namen**, niet over Discord-leden. Wie nu binnen is krijgt een
+/// bolletje; de eigen rij is gemarkeerd zodra de Hytale-naam van de kijker overeenkomt.
+fn lb_time_list(my_hytale_name: &str) -> String {
+    let rows = crate::playtime::all();
+    if rows.is_empty() {
+        // Geen gegevens ≠ niemand speelde: liever dat zeggen dan een lege ranglijst tonen.
+        return "<p class=\"muted\">No playtime data yet.</p>".to_string();
+    }
+    let me_lc = my_hytale_name.trim().to_lowercase();
+    let items: String = rows
+        .iter()
+        .take(50)
+        .enumerate()
+        .map(|(i, (shown, key, secs, online))| {
+            let rk = match i {
+                0 => "👑".to_string(),
+                1 => "🥈".to_string(),
+                2 => "🥉".to_string(),
+                n => format!("{}", n + 1),
+            };
+            let me_cls = if !me_lc.is_empty() && *key == me_lc { " class=\"me\"" } else { "" };
+            let dot = if *online { " 🟢" } else { "" };
+            format!(
+                "<li{me_cls}><span class=\"rk\">{rk}</span>\
+                 <span class=\"nm\">{name}{dot}</span>\
+                 <span class=\"amt\">⏱ {time}</span></li>",
+                name = esc(shown),
+                time = crate::playtime::human(*secs),
+            )
+        })
+        .collect();
+    format!("<ol class=\"lb\">{items}</ol>")
+}
+
+/// Leaderboard met tabs All-time (ooit verdiend), This week, Now (huidig saldo) en
+/// Playtime (tijd in het spel, van de tale-kant).
 async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let Some((me, name)) = require_flowerborn(&st, &headers).await else {
         return Redirect::to("/").into_response();
@@ -2032,16 +2098,20 @@ async fn leaderboard_page(State(st): State<AppState>, headers: HeaderMap) -> Res
     let now_list = lb_list(&db::leaderboard_now(&st.pool, 50), &me);
     let week_since = db::last_saturday_1500_brussels(now_secs());
     let week_list = lb_list(&db::leaderboard_week(&st.pool, week_since, 50), &me);
+    // Eigen rij markeren: dezelfde naamketen als de speeltijd in de inventaris.
+    let time_list = lb_time_list(&playtime_name_for(&st.pool, &me, &name));
 
     let body = format!(
         "<h1>🏆 Leaderboard</h1>\
          <div class=\"subtabs\">\
            <button class=\"subtab on\" data-t=\"alltime\">All-time</button>\
            <button class=\"subtab\" data-t=\"week\">This week</button>\
-           <button class=\"subtab\" data-t=\"now\">Now</button></div>\
+           <button class=\"subtab\" data-t=\"now\">Now</button>\
+           <button class=\"subtab\" data-t=\"time\">Playtime</button></div>\
          <div class=\"panel on\" id=\"p-alltime\">{all_list}</div>\
          <div class=\"panel\" id=\"p-week\">{week_list}</div>\
          <div class=\"panel\" id=\"p-now\">{now_list}</div>\
+         <div class=\"panel\" id=\"p-time\">{time_list}</div>\
          <script>(function(){{var ts=document.querySelectorAll('.subtab');\
            ts.forEach(function(b){{b.addEventListener('click',function(){{\
              ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\

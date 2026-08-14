@@ -51,6 +51,29 @@ die als enige nog een echte vermelding had. **Enkel in dit kanaal**: de publieke
 #coins, de chest-winnaar en de level-up-ping houden hun `<@id>` — daar is de ping de
 bedoeling. (`MEADOWMARKET_LOG_CHANNEL_ID` staat op 0 = uit, maar volgt dezelfde vorm.)
 
+### 4. Leaderboard → tab **Playtime**, en Faybelle's uren die ontbraken
+
+**Nieuwe tab** naast All-time / This week / Now: de ranglijst van de **in-game tijden**,
+uit `playtime.json` (`playtime::all()`). Andere bron dan de coin-lijsten ernaast: die gaat
+over Hytale-namen, niet over Discord-leden — dus wie enkel op de server komt staat er ook
+op. 🟢 = nu binnen; de eigen rij is gemarkeerd. Geen gegevens ⇒ dat staat er, i.p.v. een
+lege lijst die "niemand speelde" suggereert.
+
+**De ontbrekende regel bij Faybelle** (`Time spent in Meadowland` in haar inventaris):
+market zocht haar speeltijd op via `coins.hytale_name`, en anders via de naam van haar pas.
+Ze heeft **geen van beide** — ze kocht nooit een pas (admin, gratis toegang), dus haar
+`hytale_name` is leeg en er is geen `hytale_whitelist`-rij. Nagekeken op een kopie van de
+prod-DB: `FayBelle | (leeg) | twitch_id 934674170`. Geen naam ⇒ geen opzoeking ⇒ geen regel.
+Dat gold voor **iedereen zonder pas**, niet enkel voor haar.
+
+Nieuw: `playtime_name_for(pool, uid, discord_naam)` — één keten voor de inventaris én de
+nieuwe tab: vastgezette naam → naam van de pas → **de Discord-naam**, maar enkel als de
+server iemand met precies die naam kent én **geen ander account** die naam al opeist
+(`db::hytale_name_claimed_by_other`, kijkt in `coins` én `hytale_whitelist`).
+Een Discord-naam is zelf te kiezen, vandaar die rem; en deze tak **toont** enkel — ze zet
+geen naam vast, whitelistet niets en geeft geen tijd. Wie zijn naam wél wil vastleggen, doet
+dat via een aankoop, de Twitch-koppeling of Manage → Accounts.
+
 ### 📌 Eindstand van de sessie — open punten voor de volgende
 
 **Waar het staat.** Gedeployd 10:46, gecommit `9851468`, subtree `market-gh` → `92c717f`.
@@ -70,11 +93,17 @@ werkboom is schoon op wat buiten `market/` valt.
 2. **De bevestigingszin na een aankoop** (`Whitelisted as X — N of access left.`) rekent
    nog met wandkloktijd i.p.v. speeltijd. De echte stand staat in `passes.json`, maar die
    is pas ~15 s na de aankoop bijgewerkt. Tekstkeuze is aan Jo.
-3. **Geparkeerde vraag van Jo (14/08): moeten testpas-aankopen in Discord gemeld worden?**
-   Een gewone pas-aankoop gaat nu via `announce_purchase` naar #coins. Een testpas is
-   gratis en enkel voor genodigden — of dat daar hoort, is niet beslist. Niets aan
-   gewijzigd tot Jo kiest.
-4. **De tale-bot schrijft nog altijd geen `"kind"`** in `passes.json` (wijziging van 11/08
+3. **Beslist (14/08): testpas-aankopen wórden in Discord gemeld** — `announce_purchase`
+   blijft dus ongemoeid, ook voor een gratis testpas. Geen actie meer.
+4. **De testtimer zelf ligt bij tale** — zie `tale/TODO-testtimer.md` (in deze sessie
+   geschreven, niet gecommit): tweede timer met voorrang, `Test`-kolom in het panel, en de
+   speeltijd herberekenen vanaf **wo 12/08 00:00 Brussel** (`1786485600`). Faybelle doet dat
+   daar. ⚠️ Belangrijkste valstrik die erin staat: de bestaande twee-potjes-code van 11/08
+   zomaar deployen is **fout** — ze beslist "testtijd?" op `settings.pass_allowlist_on`, en
+   die instelling bestaat sinds 13/08 niet meer (default = aan ⇒ *alle* tijd zou testtijd
+   worden). Het moet per aankoop: `items.test_pass` van het gekochte item, langs dezelfde
+   weg als `pass_duration_of`.
+5. **De tale-bot schrijft nog altijd geen `"kind"`** in `passes.json` (wijziging van 11/08
    nooit gedeployed). Market heeft dat niet meer nodig — het nieuwe slot werkt zonder — maar
    zolang dat zo is, is er aan tale-kant **geen apart testpotje**: testtijd en gewone tijd
    zitten in één klok. Wie beide heeft, brandt dus gewone tijd op tijdens een test.
