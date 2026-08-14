@@ -316,6 +316,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/api/status", get(api_status))
         .route("/api/toggle", post(api_toggle))
         .route("/api/balance", get(api_balance))
+        .route("/api/passtime", get(api_passtime))
         .route("/healthz", get(|| async { "ok" }))
         // Dienst-tot-dienst, niet voor browsers: Caddy blokkeert /internal/* van buitenaf.
         .route("/internal/pass/revoke", post(internal_revoke_pass))
@@ -1325,25 +1326,8 @@ fn inventory_home(
                <img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">{pause_mark}</div>{below}</div>"
         )
     };
-    // Hetzelfde logo met een T erop: de TESTtijd. Staat links van de gewone pas, want die
-    // loopt eerst leeg. Verschijnt enkel als er testtijd is (Faybelle 2026-08-14) — anders
-    // zou er een tweede knop op 0m staan.
-    let test_btn = |below: String| {
-        format!(
-            "<div class=\"passcol\"><div class=\"passbtn\">\
-               <img src=\"/img/hytalepass.png\" alt=\"Test Pass\">\
-               <span class=\"passT\" aria-label=\"test time\"><b></b></span></div>{below}</div>"
-        )
-    };
 
-    // Countdown-script: telt af naar `data-passexp`. Enkel zinvol terwijl de klok loopt.
-    let ticker = "<script>(function(){document.querySelectorAll('[data-passexp]').forEach(function(e){\
-           var exp=+e.dataset.passexp;function t(){var s=Math.max(0,exp-Date.now()/1000);\
-           var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
-           e.textContent=s>0?(h>0?h+'h '+m+'m':m+'m '+sec+'s'):'expired';\
-           e.classList.toggle('out',s<=0);\
-           if(s>0)setTimeout(t,1000);}t();});})();</script>";
-    // Vaste weergave van een stilstaande teller (zelfde vorm als het script hierboven).
+    // Vaste weergave van een stilstaande teller.
     let still = |secs: f64| {
         let s = secs.max(0.0) as i64;
         if s >= 3600 {
@@ -1352,33 +1336,59 @@ fn inventory_home(
             format!("{}m {}s", s / 60, s % 60)
         }
     };
-    // De resterende SPEELTIJD zoals de tale-kant hem kent. Speelt hij nu, dan loopt de
-    // teller; staat hij niet op de server, dan staat de tijd stil en zegt het pauzeteken dat.
+
+    // De twee klokken van de tale-kant: testtijd links (met een T op het logo), gewone pas
+    // rechts. Testtijd loopt eerst; zolang die loopt staat de pas-klok stil met het
+    // pauzeteken erop — net als in-game en in het panel.
+    //
+    // ⚠️ De klok wordt NIET één keer getekend en dan blindelings verder geteld: dat deed de
+    // vorige versie, en dan bleef de tijd in de browser doorlopen nadat je uitgelogd was.
+    // Het script hieronder vraagt de echte stand elke 10 s opnieuw op (`/api/passtime`) en
+    // telt daartussen enkel af als je écht online bent. Alles hier is weergave: er wordt
+    // geen tegoed geschreven, dus niemand kan er tijd door verliezen.
+    let ticker = "<script>(function(){\
+      var row=document.querySelector('[data-passrow]');if(!row)return;\
+      var tcol=row.querySelector('[data-testcol]'),pmark=row.querySelector('[data-pausemark]');\
+      var tc=row.querySelector('[data-clock=test]'),pc=row.querySelector('[data-clock=pass]');\
+      var st={online:row.dataset.online==='1',test:+row.dataset.test,pass:+row.dataset.pass};\
+      function fmt(s){s=Math.max(0,Math.floor(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;\
+        return h>0?(h+'h '+m+'m'):(m+'m '+x+'s');}\
+      function draw(){var heeftTest=st.test>0.5;\
+        if(tcol)tcol.hidden=!heeftTest;\
+        if(tc)tc.textContent=fmt(st.test);\
+        if(pc)pc.textContent=fmt(st.pass);\
+        if(pmark)pmark.hidden=st.online&&!heeftTest;}\
+      function tik(){if(st.online){if(st.test>0.5){st.test=Math.max(0,st.test-1);}\
+        else{st.pass=Math.max(0,st.pass-1);}}draw();}\
+      function sync(){fetch('/api/passtime',{credentials:'same-origin'})\
+        .then(function(r){return r.json();}).then(function(d){if(!d||!d.ok)return;\
+          st.online=!!d.online;st.test=+d.test;st.pass=+d.pass;draw();}).catch(function(){});}\
+      draw();setInterval(tik,1000);setInterval(sync,10000);})();</script>";
+
     let from_ledger = |l: crate::pass_ledger::Ledger| {
-        // TESTTIJD EERST — precies zoals in-game: zolang daar iets op staat, telt die klok
-        // af en staat de pas-klok stil (met pauzeteken). Beide getallen komen rechtstreeks
-        // van de tale-kant; hier wordt niets bijgehouden, gewijzigd of teruggezet, dus deze
-        // weergave kan niemand tijd kosten.
-        let test_loopt = l.online && l.test_remaining > 0.0;
         let pas_loopt = l.online && l.test_remaining <= 0.0;
-        let klok = |secs: f64, loopt: bool| {
-            if loopt {
-                format!(
-                    "<span class=\"passtime\" data-passexp=\"{}\">…</span>",
-                    now_secs() + secs
-                )
-            } else {
-                format!("<span class=\"passtime\">{}</span>", still(secs))
-            }
-        };
-        let links = if l.test_remaining > 0.0 {
-            test_btn(klok(l.test_remaining, test_loopt))
-        } else {
-            String::new()
-        };
+        let verborgen = if l.test_remaining > 0.0 { "" } else { " hidden" };
         format!(
-            "<div class=\"passrow\">{links}{}</div>{ticker}",
-            pass_btn(!pas_loopt, klok(l.pass_remaining, pas_loopt))
+            "<div class=\"passrow\" data-passrow data-online=\"{online}\" \
+                 data-test=\"{test}\" data-pass=\"{pas}\">\
+               <div class=\"passcol\" data-testcol{verborgen}><div class=\"passbtn\">\
+                 <img src=\"/img/hytalepass.png\" alt=\"Test Pass\">\
+                 <span class=\"passT\" aria-label=\"test time\"><b></b></span></div>\
+                 <span class=\"passtime\" data-clock=\"test\">{testtijd}</span></div>\
+               <div class=\"passcol\"><div class=\"passbtn\">\
+                 <img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">\
+                 <span class=\"passpause\" aria-label=\"paused\" data-pausemark{pauze}>\
+                   <i></i><i></i></span></div>\
+                 <span class=\"passtime\" data-clock=\"pass\">{pastijd}</span></div>\
+             </div>{ticker}",
+            online = if l.online { "1" } else { "0" },
+            test = l.test_remaining as i64,
+            pas = l.pass_remaining as i64,
+            testtijd = still(l.test_remaining),
+            pastijd = still(l.pass_remaining),
+            // Het pauzeteken staat er zodra de pas-klok stilstaat: offline, óf omdat de
+            // testtijd voorgaat. Het script houdt dit daarna zelf bij.
+            pauze = if pas_loopt { " hidden" } else { "" },
         )
     };
     let pass_row = match db::get_whitelist_linked(pool, uid, now_secs()) {
@@ -1389,13 +1399,16 @@ fn inventory_home(
         }
         // Geen gegevens van de tale-kant (bestand onleesbaar, of die naam staat er niet in):
         // val terug op de oude weergave i.p.v. een verzonnen tijd te tonen.
+        // Zonder gegevens van de tale-kant weten we niet of hij nu speelt, dus tonen we een
+        // stilstaande tijd mét pauzeteken i.p.v. een klok die zomaar doorloopt. Beter een
+        // paar seconden te oud dan een teller die tijd wegtelt die niemand verbruikt.
         Some(p) => match p.expires {
-            Some(exp) => format!(
-                "{}{ticker}",
-                pass_btn(
-                    false,
-                    format!("<span class=\"passtime\" data-passexp=\"{exp}\">…</span>")
-                )
+            Some(exp) => pass_btn(
+                true,
+                format!(
+                    "<span class=\"passtime\">{}</span>",
+                    still((exp - now_secs()).max(0.0))
+                ),
             ),
             None => String::new(),
         },
@@ -2495,6 +2508,40 @@ async fn api_status(
 
 /// Lichte balans-polling voor de live-refresh op de site. Enkel een sessie nodig
 /// (géén Discord-rolcheck per poll — dat zou elke 5s een API-call zijn).
+/// De twee pas-klokken van dit lid, zoals de tale-kant ze nu kent.
+///
+/// **Waarom dit bestaat.** De inventaris tekende de klok één keer bij het laden en telde
+/// daarna in de browser verder. Logde je uit, dan bleef die pagina gewoon doortellen terwijl
+/// je tegoed in werkelijkheid stilstond (het panel deed het wél juist, want dat vraagt het
+/// telkens opnieuw). Nu haalt de pagina elke paar seconden de echte stand op.
+///
+/// Enkel lezen: dit raakt geen enkel tegoed aan.
+async fn api_passtime(State(st): State<AppState>, headers: HeaderMap) -> JsonResp {
+    let Some((uid, _name)) = session_user(&st, &headers) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false})));
+    };
+    // Dezelfde naam-keuze als de inventaris zelf: de pas-rij van dit account, en anders de
+    // vastgelegde Hytale-naam (Twitch-redeem zonder koppeling, of een verlopen aankooprij).
+    let hname = match db::get_whitelist_linked(&st.pool, &uid, now_secs()) {
+        Some(p) if !p.is_permanent() => p.hytale_name,
+        Some(_) => String::new(), // permanent: geen klok te tonen
+        None => db::get_hytale_name(&st.pool, &uid),
+    };
+    match crate::pass_ledger::lookup(&hname) {
+        Some(l) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "online": l.online,
+                "test": l.test_remaining,
+                "pass": l.pass_remaining,
+            })),
+        ),
+        // Geen gegevens van de tale-kant: niets zeggen, dan laat de pagina staan wat er staat.
+        None => (StatusCode::OK, Json(json!({"ok": false}))),
+    }
+}
+
 async fn api_balance(State(st): State<AppState>, headers: HeaderMap) -> JsonResp {
     let Some((uid, _name)) = session_user(&st, &headers) else {
         return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false})));
