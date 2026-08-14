@@ -1359,7 +1359,7 @@ fn inventory_home(
         };
         match crate::playtime::lookup(&hname) {
             Some(s) if s >= 60.0 => format!(
-                "<div class=\"statrow\"><span class=\"k\">Hytale gametime</span>\
+                "<div class=\"statrow\"><span class=\"k\">Time spent in Meadowland</span>\
                    <span><b>{}</b></span></div>",
                 crate::playtime::human(s)
             ),

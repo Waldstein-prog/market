@@ -7,7 +7,7 @@
 Test Pass-werk van 13/08 mee (hieronder), dat tot nu op groen licht wachtte.
 
 ### 1. Label op de Coins-tab
-`Time on Meadowland` → **`Hytale gametime`** (keuze van Jo).
+`Time on Meadowland` → **`Time spent in Meadowland`** (keuze van Jo).
 
 ### 2. Het koopslot deed niets — en waarom
 `may_buy_test_pass` weigerde een tweede testpas via `test_pass_running`, en dat leest
@@ -50,7 +50,7 @@ Alles wat vóór deze sessie ongecommit rondslingerde (`playtime.rs`, `main.rs`,
 werkboom is schoon op wat buiten `market/` valt.
 
 **Afgesloten deze sessie** (waren open punten):
-- Het label heet nu `Hytale gametime` — Jo's keuze, dus geen open tekstbeslissing meer.
+- Het label heet nu `Time spent in Meadowland` — Jo's keuze, dus geen open tekstbeslissing meer.
 - De **vier Twitch-redeems** van de bug van 04/08 zijn terugbetaald (Jo, 14/08).
 - De **vijf coin-kanalen** die de bot niet ziet: Jo laat dat zo — geen actie meer.
 
