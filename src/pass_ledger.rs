@@ -42,6 +42,9 @@ pub struct Ledger {
     pub remaining: f64,
     /// Speelt hij nu? (afgeleid uit een stijgende `used`-teller)
     pub online: bool,
+    /// Hoeveel speeltijd er in totaal al van zijn passen af is. Enkel stijgend, en enkel
+    /// terwijl hij in-game is — daarmee valt te zien of een gekochte pas al opgebrand is.
+    pub used: f64,
     /// Is dit **testtijd**? Tijdens de testfase houdt de tale-kant een apart tegoed bij
     /// (`"kind": "test"`), en staat het gewone tegoed stil. Market gebruikt dit om een
     /// tweede testpas te weigeren zolang de eerste nog loopt. Ontbreekt het veld (oudere
@@ -83,6 +86,7 @@ pub fn lookup(hytale_name: &str) -> Option<Ledger> {
     Some(Ledger {
         remaining: e.remaining.max(0.0),
         online: e.last_rise.is_some_and(|t| t.elapsed() < ONLINE_GRACE),
+        used: e.used,
         test: e.test,
     })
 }

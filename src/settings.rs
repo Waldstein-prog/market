@@ -55,9 +55,9 @@ pub const COINS: &str = "Coins per bericht";
 pub const DAILY: &str = "Daily-beloning";
 pub const CHEST: &str = "Treasure chest";
 pub const TWITCH: &str = "Twitch-redeem → Hytale-pas";
-pub const PASSES: &str = "Hytale-passen — testfase";
-// (Er was ook een groep "Shop"; die staat leeg sinds de shoprotatie per item geregeld
-// wordt in Manage → Shop i.p.v. met een instelling hier.)
+// (Er waren ook groepen "Shop" en "Hytale-passen — testfase"; die staan leeg sinds de
+// shoprotatie én de testerslijst per item geregeld worden in Manage → Shop i.p.v. met
+// een instelling hier.)
 
 /// Elke instelbare parameter, in weergavevolgorde. De defaults zijn de waarden
 /// die vóór deze refactor als `const` in `bot.rs` stonden — een lege DB gedraagt
@@ -300,26 +300,9 @@ pub const SPECS: &[Spec] = &[
         max: 0.0,
         help: "Privébericht na een geslaagde permanente redeem. Gebruik {naam}. Leeg = geen bericht.",
     },
-    // --- Passen: testfase --------------------------------------------------------
-    // De lijst zelf is een tabel (`pass_allow`) met een eigen blok onderaan de
-    // Settings-pagina; hier staat enkel de schakelaar die bepaalt of ze geldt.
-    // Zonder die schakelaar zou een lege lijst even goed "iedereen" als "niemand"
-    // kunnen betekenen — en dat is precies het soort stilte waar een dichte shop
-    // in verstopt raakt.
-    Spec {
-        key: "pass_allowlist_on",
-        label: "Enkel testers mogen passen kopen",
-        group: PASSES,
-        kind: Kind::Bool,
-        default: 1.0,
-        text_default: "",
-        min: 0.0,
-        max: 1.0,
-        help: "Aan = enkel de leden op de testerslijst hieronder kunnen een Hytale-pas kopen; \
-               al de rest ziet de pas permanent op Out of Stock. Een lege lijst betekent dus \
-               dat niemand er een kan kopen. Uit = de pas staat gewoon voor iedereen te koop. \
-               Geldt niet voor Twitch-redeems: die geven hun pas los van deze lijst.",
-    },
+    // NB: de testerslijst stond hier vroeger als schakelaar (`pass_allowlist_on`) met een
+    // eigen tabelblok onderaan deze pagina. Ze hangt sinds 2026-08-13 aan het ítem zelf
+    // (Manage → Shop, het vakje "Naam" op de Test Pass) — één lijst op één plaats.
 ];
 
 pub fn spec(key: &str) -> Option<&'static Spec> {

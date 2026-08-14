@@ -1,4 +1,167 @@
-# Handover — Meadow Market (2026-08-12)
+# Handover — Meadow Market (2026-08-14)
+
+## ⏭️ Sessie (2026-08-14) — een tweede testpas pas als de vorige opgespeeld is
+
+**Alles LIVE** (deploy 10:46, site 200, geen warnings). Backup vóór de migratie:
+`/opt/market/coins.db.bak-20260814-itemallow`. In deze deploy ging ook het volledige
+Test Pass-werk van 13/08 mee (hieronder), dat tot nu op groen licht wachtte.
+
+### 1. Label op de Coins-tab
+`Time on Meadowland` → **`Hytale gametime`** (keuze van Jo).
+
+### 2. Het koopslot deed niets — en waarom
+`may_buy_test_pass` weigerde een tweede testpas via `test_pass_running`, en dat leest
+`"kind":"test"` uit `passes.json`. **Op prod staat dat veld er niet in** (nagekeken 14/08:
+8 passen, geen enkele met `kind`) — de tale-bot-wijziging van 11/08 is nooit gedeployed.
+Het slot was dus stilzwijgend inert.
+
+**Nieuw, en volledig aan market-kant** (geen tweede schrijver, alleen lezen):
+- Tabel **`test_pass_hold`** — één rij per lid: bij de aankoop van een testpas noteert
+  market het **ijkpunt**: de stand van zijn speeltijd-teller (`used` uit `passes.json`)
+  plus de duur van die pas. Een nieuwe aankoop vervangt de rij (de vorige is dan per
+  definitie op).
+- `test_pass_burning()` blokkeert zolang die teller minder dan `duration` gestegen is.
+  Dus **opgespeelde tijd**, geen wandkloktijd: 15 min pas = 15 min in-game.
+- **Nee bij twijfel**, zoals de rest van deze laag: geen aankoop gekend, grootboek
+  onleesbaar, of een teller die **lager** staat dan bij de aankoop (boekhouding aan de
+  overkant heropgestart ⇒ ijkpunt waardeloos) ⇒ geen slot.
+- **Eerste pas van een nieuwe tester:** zijn naam staat nog niet in `passes.json` (die
+  komt er pas ~15 s later bij), dus is het startpunt 0 — klopt, hij heeft nog niets
+  afgespeeld. Zonder dit zou net de eerste testpas ongeremd te stapelen zijn.
+- Het oude `kind`-slot blijft ernaast staan: gaat de tale-bot ooit live, dan sluiten
+  allebei. Op de kaart blijft het bestaande 🔒 — geen nieuwe speler-zichtbare tekst.
+- De rekensom zit apart in `still_burning(used_now, used_at_buy, duration)` zodat ze te
+  testen valt zonder het procesbrede grootboek (dat is gedeelde toestand tussen tests).
+
+**Verificatie:** 75 tests groen (nieuw: de rekensom in alle vier de standen + de twee
+twijfelgevallen, en het ijkpunt dat een herstart overleeft omdat het in de DB staat).
+Na de deploy op een kopie van de prod-DB: `pass_allow` weg, `item_allow` bestaat (leeg),
+`test_pass_hold` aangemaakt, item 22 staat op prijs 0 / voorraad ∞ / niet uitverkocht.
+
+> ⚠️ **`item_allow` is leeg op prod** — de oude testerslijst stond al leeg. Zolang
+> Faybelle geen namen op de Test Pass zet (Manage → Shop, het vakje "Naam" op de kaart),
+> kan **niemand** hem kopen en ziet iedereen het 🔒. Dat is de bedoelde startstand.
+
+## ⏭️ Sessie (2026-08-13) — Test Pass: namenlijst per item, gratis, tijd i.p.v. prijs
+
+**Vraag van Faybelle** (verbatim kern): de Test Pass krijgt een vakje "Naam" met een
+dropdown van iedereen die in market gekend is **en een Hytale-naam heeft**; toegevoegde
+namen krijgen een ✕; enkel die namen kunnen de pas kopen; Out of stock / ∞ / daily
+rotation weg van dat item ("clutter op een item dat die dingen niet gebruikt"); wie niet
+op de lijst staat ziet op de Buy-plek enkel een klein 🔒; prijs weg (Test Passes zijn
+gratis) en op de prijsplek de tijd in formaat `00H 10M`.
+
+**Status: gebouwd + tests groen, NIET gedeployed** (wacht op groen licht van Jo).
+
+### Wat er veranderde
+
+* **De testerslijst hangt nu aan het item, niet aan de server.** Nieuwe tabel `item_allow
+  (item_id, user_id, username, added)`. De oude server-brede `pass_allow` **én** de
+  schakelaar `pass_allowlist_on` (Settings-tab) zijn weg: bij de eerste start verhuizen de
+  bestaande namen naar elke testpas, daarna `DROP TABLE pass_allow` + de settings-rij
+  gewist (`db.rs`, migratieblok bij de `test_pass`-kolom; test
+  `oude_testerslijst_verhuist_naar_de_testpas`). Geen tweede lijst die stil blijft staan.
+* **Vaste vorm van een testpas, ook in de DB.** Elke start: `UPDATE items SET price = 0,
+  stock = -1, sold_out = 0, in_rotation = 0 WHERE test_pass = 1`. Nodig omdat item 22 op
+  prod nog op **Out of stock** stond — dat vinkje bestaat niet meer op zijn kaart, dus zou
+  het hem dicht houden zonder zichtbare reden. `admin_item_update` dwingt hetzelfde af bij
+  het aanzetten van het vinkje.
+* **Beheerkaart** (`admin_item`, nu met `&DbPool`): op een testpas vallen prijsveld, Out
+  of stock, het voorraadvak (incl. ∞) en het dagrotatie-vak weg; in de plaats komt het
+  namenvak — lijst met per rij `Discord-naam · Hytale-naam · ✕`, plus een keuzelijst die
+  enkel leden **met** een Hytale-naam toont en enkel wie er nog niet op staat. Toevoegen /
+  verwijderen gaat meteen (eigen formuliertjes, niet via Save):
+  `POST /admin/item/allow/add` en `/allow/remove`, beide gelogd onder de bestaande
+  logsoort `pass_allow` (🎟 testers) zodat de oude logregels blijven kloppen.
+* **Shop** (`shop_slot`): een testpas toont op de prijsplek `pass_time_label(duration)` →
+  `00H 10M`, nooit een muntbedrag; geen voorraadregel; en wie niet op de lijst staat krijgt
+  `<div class="lockslot">🔒</div>` op de koopplek i.p.v. de Out-of-Stock-knop — de pas is
+  niet uitverkocht, hij is niet voor hem. De gewone Meadowland Pass blijft ongemoeid
+  (prijs, voorraad, sold_out).
+* **Server-kant** (`buy`): `may_buy_pass(uid)` → `may_buy_test_pass(uid, item_id)`, dus de
+  lijst van dát item. De "geen tweede testpas zolang er nog testtijd loopt"-regel
+  (`test_pass_running` via `passes.json`) is bewust behouden; die staat dan ook als 🔒.
+
+### Wat dit betekent voor prod bij de volgende deploy
+Eén keer opstarten volstaat: de namen die nu op de testerslijst staan komen automatisch op
+de Test Pass te staan, item 22 gaat van Out of stock → gewoon zichtbaar met 🔒 voor wie er
+niet op staat. Er is **niets** handmatig te zetten.
+
+---
+
+
+## ⏭️ Sessie (2026-08-12b) — pas-teller zonder koppeling, speeltijd op de site, panel-fix
+
+Drie dingen, alle drie **LIVE op prod**. Twee ervan raken de **tale-kant** — dat mocht deze
+keer expliciet (Jo vroeg het), maar het blijft het uitzonderingsgeval.
+
+### 1. Inventory valt terug op de Hytale-naam als de koppeling ontbreekt
+
+**Vraag van Jo.** Ziet een kijker die via Twitch een pas redeemde zijn resterende tijd op de
+site? **Antwoord:** enkel als hij zijn Twitch-account in Discord gekoppeld heeft. Een
+redeem landt op `user_id = twitch:<id>`; de brug naar het Discord-lid is `coins.twitch_id`,
+gevuld bij de login uit zijn **geverifieerde Discord-connecties** (`web.rs:2155-2169`). Geen
+connectie ⇒ `get_whitelist_linked` vindt niets ⇒ geen teller.
+
+**Wat er nu bij is** (`web.rs`, `pass_row`): vindt hij geen pas-rij, dan zoekt hij de
+**geregistreerde Hytale-naam** van het lid op in `passes.json` en toont de teller alsnog.
+Dat dekt twee gaten: (a) Twitch-pas zonder koppeling, (b) de gekochte pas is als
+**aankoop**-regel verlopen terwijl er via Twitch nog speeltijd bijkwam — de tale-klok loopt
+dan door, de rij niet.
+
+⚠️ Ik heb Jo eerst gewezen op het risico van naam-matching (zelf-verklaarde identiteit →
+andermans tijd zien, en `set_hytale_name` legt namen vast = pas-doorgeef-route). Hij koos
+er bewust voor. **Wat het veilig houdt:** de naam is niet vrij in te tikken — ze ligt vast
+bij de eerste aankoop of via de Twitch-koppeling, en deze tak **toont enkel**, ze zet niets
+vast en whitelist niets. Dat moet zo blijven.
+
+Nog steeds ongedekt: wie **enkel** een Twitch-pas heeft en nooit iets in market deed — daar
+kent market geen naam van. Enige nette weg daarvoor is Twitch-login op de site (niet gebouwd).
+
+### 2. Speeltijd per speler op de site (nieuw, tale + market)
+
+**Vraag van Jo.** Totale speeltijd op de server tonen onder *Coins earned all-time*, en:
+is de historiek nog terug te vinden? **Ja** — de journal gaat terug tot de allereerste start
+(3 juli).
+
+- **`pass-usage.json` is hier NIET de bron.** De PassTimer-mod telt enkel voor wie een
+  *tijdelijke pas* heeft (`granted != null`, zie `handlePlayer`): admins en perma-spelers
+  staan er op nul, en tijd zonder pas telt niet mee. Dat is pas-verbruik, geen speeltijd.
+- **Nieuw: `tale/playtime/playtime.py` + `hytale-playtime.service`** — leest de journal van
+  `hytale-server` (`Universe|P Adding/Removing player`, `left with reason`, `Disconnecting`,
+  plus de systemd-stop) en schrijft `/opt/hytale/playtime.json`. `--rebuild` rekent de hele
+  journal opnieuw door; zonder vlag telt hij live verder vanaf `until`.
+  **Raakt de gameserver niet aan** — geen restart nodig, ook niet om hem te herstarten.
+- **IJking (het bewijs dat de reconstructie klopt):** over de periode waarin de mod meetelt,
+  komt hij voor wie altijd mét pas speelde op de seconde uit — Sigilien 13412 vs 13413,
+  TechHeadFred 7680 vs 7680, Waldstein 20362 vs 20375 (0,06%). Waar het verschilt, telde de
+  mod niet mee (tijd zonder pas) — precies wat we hier wél willen.
+- **Vorm van het bestand:** `seconds` = afgesloten sessies, `open` = wie nu binnen is met
+  zijn starttijd. Bewust gescheiden: de lezer telt `now - start` erbij, dus de lopende
+  sessie tikt live door en er wordt nooit dubbel geboekt. De open sessies staan óók in het
+  bestand, zodat een herstart van de tracker niemand zijn lopende tijd kost.
+- **Market:** nieuwe module `src/playtime.rs` (zelfde vorm als `pass_ledger`: leest elke 20s,
+  faalt veilig, schrijft nooit) + een regel in de Coins-tab onder de all-time-regel.
+  Zoekt op `coins.hytale_name`, anders de naam van de pas. Verschijnt niet bij <1 minuut.
+
+**Stand bij het schrijven:** Faybelle 79h38, Waldstein 48h28, EasyComes 19h50, TechHeadFred
+9h59, Heiji_Cat 8h01, Zemerion 5h23, Sigilien 3h44, GhostToSpace 2h07.
+
+### 3. Panel zette één speler ten onrechte op offline
+
+`panel.py` vergeleek de naam uit `names.json` **exact** met wat `/who` teruggeeft.
+`names.json` had `easycomes`, de server zegt `EasyComes` → altijd offline, terwijl de rest
+wél matchte (die staan er mét hoofdletters in). Nu vergelijkt hij op kleine letters, ook in
+`online_unlisted`. Panel herstart; de 5 spelers die op dat moment in-game waren, werden
+correct herkend.
+
+### Openstaand
+
+- **Label** `Time on Meadowland` heb ik zelf moeten kiezen — Jo beslist over publieke tekst,
+  dus dit ligt bij hem ter bevestiging.
+- **Nog niet gecommit**: `src/playtime.rs`, `src/main.rs`, `src/web.rs` (market) en
+  `panel/panel.py` + `playtime/` (tale). Alles staat wél gedeployd. Denk aan
+  `git subtree push` per project.
 
 ## ⏭️ Sessie (2026-08-12) — het spook-schap "Hytale Access", en de shop-kop
 

@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod discord_rest;
 mod pass_ledger;
+mod playtime;
 mod settings;
 mod twitch;
 mod web;
@@ -43,6 +44,11 @@ async fn main() {
     // dezelfde tijd toont als het spel.
     tokio::spawn(async move {
         pass_ledger::run().await;
+    });
+
+    // Totale speeltijd per speler (playtime.json) — dezelfde afspraak: tale telt, wij tonen.
+    tokio::spawn(async move {
+        playtime::run().await;
     });
 
     // Web-only modus (lokaal testen): sla de bot-gateway over zodat een tweede

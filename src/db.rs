@@ -200,18 +200,31 @@ pub fn init_pool(path: &str) -> DbPool {
             ts      REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_level_gifts_uid ON level_gifts(uid, claimed);
-        -- Testfase-toegangslijst voor de Hytale-passen: wie hier NIET op staat, ziet de
-        -- pas permanent op Out of Stock en kan er ook geen kopen. Beheerd in Manage →
-        -- ⚙ Settings. Een aparte tabel en geen instelling, want het is een lijst — net
-        -- zoals coin_weights en chest_tiers. De schakelaar die bepaalt of de lijst
-        -- überhaupt geldt is wél een instelling (`pass_allowlist_on`): zonder die
-        -- schakelaar zou 'lege lijst' evengoed 'iedereen' als 'niemand' kunnen betekenen.
+        -- Namenlijst PER ITEM: enkel de leden die hier voor dat item op staan kunnen het
+        -- kopen. Gebruikt door de Test Pass (het vakje 'Naam' op de item-kaart in Manage →
+        -- Shop). Geen schakelaar: de lijst ís de regel, dus een testpas zonder rijen kan
+        -- door niemand gekocht worden — de rest ziet op de koopplek een 🔒.
         -- `username` is enkel de naam zoals ze bij het toevoegen bekend was (weergave);
-        -- de uid is de sleutel.
-        CREATE TABLE IF NOT EXISTS pass_allow (
-            user_id  TEXT PRIMARY KEY,
+        -- (item_id, user_id) is de sleutel.
+        CREATE TABLE IF NOT EXISTS item_allow (
+            item_id  INTEGER NOT NULL,
+            user_id  TEXT NOT NULL,
             username TEXT NOT NULL DEFAULT '',
-            added    REAL NOT NULL DEFAULT 0
+            added    REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (item_id, user_id)
+        );
+        -- Eén rij per lid: de testpas die hij als laatste kocht en nog moet opbranden.
+        -- `used_at` is de stand van de speeltijd-teller (`used` uit passes.json) op het
+        -- moment van de aankoop; pas als die met `duration` seconden gestegen is, is de
+        -- pas uitgewerkt en mag er een volgende gekocht worden. Bewust op speeltijd en
+        -- niet op wandkloktijd: een pas loopt enkel leeg terwijl je in-game bent.
+        CREATE TABLE IF NOT EXISTS test_pass_hold (
+            user_id  TEXT PRIMARY KEY,
+            item_id  INTEGER NOT NULL,
+            name_lc  TEXT NOT NULL,
+            used_at  REAL NOT NULL,
+            duration INTEGER NOT NULL,
+            bought   REAL NOT NULL
         );",
     )
     .expect("kan tabel niet aanmaken");
@@ -307,8 +320,8 @@ pub fn init_pool(path: &str) -> DbPool {
         // daar bij 12 gems + 4 slots vlak bij uit, zodat er bij de overgang niets verspringt.
         conn.execute("UPDATE items SET shop_weight = 2.0 WHERE category = 'booster'", []).ok();
     }
-    // Testpas: een pas die enkel voor goedgekeurde testers is (de testerslijst in
-    // Manage → ⚙ Settings). Dit is een eigenschap van het ítem, niet van de categorie:
+    // Testpas: een pas die enkel voor genodigden is (de namenlijst op zijn eigen kaart
+    // in Manage → Shop). Dit is een eigenschap van het ítem, niet van de categorie:
     // de gewone Meadowland Pass staat gewoon te koop en heeft aan `sold_out`/`stock`
     // genoeg als rem — vóór deze kolom hing de testerspoort aan `category = 'boost'`,
     // waardoor een lege testerslijst óók de gewone pas op Out of Stock zette.
@@ -320,6 +333,43 @@ pub fn init_pool(path: &str) -> DbPool {
         // Alleen hier, één keer; daarna beslist het vinkje in Manage → Shop.
         conn.execute("UPDATE items SET test_pass = 1 WHERE category = 'boost' AND price = 0", [])
             .ok();
+    }
+    // De vaste vorm van een testpas: gratis, onbeperkt, niet in de dagtrekking en nooit
+    // "uitverkocht". Die vier vakjes staan niet meer op zijn beheerkaart, dus mag er ook
+    // geen oude waarde uit een vorige opzet stil blijven hangen — de testpas op prod stond
+    // bijvoorbeeld nog op Out of stock, en dat zou hem dicht houden zonder dat er op zijn
+    // kaart nog iets te zien is dat dat verklaart. Eén UPDATE bij elke start: zo kan de DB
+    // niets zeggen wat de kaart niet toont.
+    conn.execute(
+        "UPDATE items SET price = 0, stock = -1, sold_out = 0, in_rotation = 0
+           WHERE test_pass = 1",
+        [],
+    )
+    .ok();
+    // Migratie (2026-08-13): de testerslijst was server-breed (`pass_allow`) met een
+    // schakelaar (`pass_allowlist_on`) die bepaalde of ze gold. Ze hangt nu aan het ítem
+    // zelf — de Test Pass heeft zijn eigen namenlijst op zijn kaart. De bestaande namen
+    // verhuizen naar elke testpas, daarna gaan tabel én schakelaar weg: één lijst op één
+    // plaats, geen tweede systeem dat stil naast het nieuwe blijft staan.
+    let oude_lijst = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pass_allow'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .unwrap_or(None)
+        .is_some();
+    if oude_lijst {
+        conn.execute(
+            "INSERT OR IGNORE INTO item_allow (item_id, user_id, username, added)
+               SELECT i.id, a.user_id, a.username, a.added
+                 FROM items i, pass_allow a WHERE i.test_pass = 1",
+            [],
+        )
+        .ok();
+        conn.execute("DROP TABLE pass_allow", []).ok();
+        conn.execute("DELETE FROM settings WHERE key = 'pass_allowlist_on'", []).ok();
     }
     // Voorloper van `stock` (2026-07-15, één sessie geleefd): een vinkje dat na élke
     // aankoop Out of stock aanzette. Vervangen door een echte teller — die toont de speler
@@ -670,79 +720,131 @@ pub fn boost_items(pool: &DbPool) -> Vec<Item> {
     ids.iter().filter_map(|id| get_item(pool, *id)).collect()
 }
 
-// --- testfase-toegangslijst voor de passen --------------------------------
+// --- namenlijst per item (de Test Pass) -----------------------------------
 //
-// Tijdens de testfase van de Hytale-server mag niet iedereen een pas kopen. Wie op
-// deze lijst staat wel, de rest ziet de pas op Out of Stock. De lijst geldt enkel
-// zolang de schakelaar `pass_allowlist_on` aanstaat — zie `settings.rs`.
+// Eén item kan een eigen namenlijst hebben: staat er iemand op, dan kunnen enkel die
+// leden het kopen. Vandaag gebruikt de Test Pass dit; de gewone Meadowland Pass heeft
+// geen lijst en staat dus voor iedereen te koop. De lijst zelf is de regel — er is geen
+// aparte schakelaar die haar aan of uit zet.
 
-/// De leden op de testfase-lijst, alfabetisch op naam (NOCASE). De naam komt bij
-/// voorkeur uit `coins` (die volgt hernoemingen op Discord); wat bij het toevoegen
-/// bewaard werd, is de terugval voor een uid die niet (meer) in `coins` staat.
-pub fn pass_allow_list(pool: &DbPool) -> Vec<(String, String)> {
+/// De leden op de lijst van één item: (uid, Discord-naam, Hytale-naam), alfabetisch op
+/// Discord-naam (NOCASE). De naam komt bij voorkeur uit `coins` (die volgt hernoemingen
+/// op Discord); wat bij het toevoegen bewaard werd, is de terugval voor een uid die niet
+/// (meer) in `coins` staat.
+pub fn item_allow_list(pool: &DbPool, item_id: i64) -> Vec<(String, String, String)> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT a.user_id, COALESCE(NULLIF(c.username, ''), NULLIF(a.username, ''), a.user_id)
-               FROM pass_allow a LEFT JOIN coins c ON c.user_id = a.user_id
+            "SELECT a.user_id,
+                    COALESCE(NULLIF(c.username, ''), NULLIF(a.username, ''), a.user_id),
+                    COALESCE(c.hytale_name, '')
+               FROM item_allow a LEFT JOIN coins c ON c.user_id = a.user_id
+              WHERE a.item_id = ?1
               ORDER BY 2 COLLATE NOCASE",
         )
-        .expect("prepare pass_allow_list");
-    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .expect("query pass_allow_list")
-        .filter_map(Result::ok)
-        .collect()
+        .expect("prepare item_allow_list");
+    stmt.query_map(params![item_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    })
+    .expect("query item_allow_list")
+    .filter_map(Result::ok)
+    .collect()
 }
 
-/// Zet één lid op de lijst. `false` = niets gedaan (lege uid, of stond er al op) —
-/// de GUI toont dan geen "toegevoegd"-melding die niet klopt.
-pub fn pass_allow_add(pool: &DbPool, uid: &str, username: &str, ts: f64) -> bool {
+/// Zet één lid op de lijst van dit item. `false` = niets gedaan (lege uid, of stond er
+/// al op) — de GUI toont dan geen "toegevoegd"-melding die niet klopt.
+pub fn item_allow_add(pool: &DbPool, item_id: i64, uid: &str, username: &str, ts: f64) -> bool {
     let uid = uid.trim();
     if uid.is_empty() {
         return false;
     }
     let conn = pool.get().expect("db");
     conn.execute(
-        "INSERT OR IGNORE INTO pass_allow (user_id, username, added) VALUES (?1, ?2, ?3)",
-        params![uid, username.trim(), ts],
+        "INSERT OR IGNORE INTO item_allow (item_id, user_id, username, added)
+           VALUES (?1, ?2, ?3, ?4)",
+        params![item_id, uid, username.trim(), ts],
     )
     .map(|n| n > 0)
     .unwrap_or(false)
 }
 
-/// Haal één lid van de lijst. `false` = stond er niet op.
-pub fn pass_allow_remove(pool: &DbPool, uid: &str) -> bool {
+/// Haal één lid van de lijst van dit item. `false` = stond er niet op.
+pub fn item_allow_remove(pool: &DbPool, item_id: i64, uid: &str) -> bool {
     let conn = pool.get().expect("db");
-    conn.execute("DELETE FROM pass_allow WHERE user_id = ?1", params![uid.trim()])
-        .map(|n| n > 0)
-        .unwrap_or(false)
+    conn.execute(
+        "DELETE FROM item_allow WHERE item_id = ?1 AND user_id = ?2",
+        params![item_id, uid.trim()],
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
 }
 
-/// Staat dit lid op de testfase-lijst? Zegt **niets** over of de lijst geldt — dat
-/// beslist de schakelaar, en die leest de aanroeper (web.rs) erbij.
-pub fn pass_allow_has(pool: &DbPool, uid: &str) -> bool {
+/// Staat dit lid op de lijst van dit item?
+pub fn item_allow_has(pool: &DbPool, item_id: i64, uid: &str) -> bool {
     let conn = pool.get().expect("db");
-    conn.query_row("SELECT 1 FROM pass_allow WHERE user_id = ?1", params![uid.trim()], |_| Ok(()))
-        .optional()
-        .unwrap_or(None)
-        .is_some()
+    conn.query_row(
+        "SELECT 1 FROM item_allow WHERE item_id = ?1 AND user_id = ?2",
+        params![item_id, uid.trim()],
+        |_| Ok(()),
+    )
+    .optional()
+    .unwrap_or(None)
+    .is_some()
 }
 
-/// Alle gekende leden (uid, naam) uit `coins`, alfabetisch — de keuzelijst waaruit een
-/// admin iemand op de testfase-lijst zet. Uit `coins` en niet uit `inventory`, want ook
-/// wie nog nooit iets kocht moet als tester te kiezen zijn.
-pub fn all_member_names(pool: &DbPool) -> Vec<(String, String)> {
+/// Noteer welke testpas dit lid net kocht, met de stand van zijn speeltijd-teller erbij.
+/// Eén rij per lid: een nieuwe aankoop vervangt de vorige (die is dan per definitie
+/// opgebrand, anders had hij niet kunnen kopen).
+pub fn test_pass_hold_set(
+    pool: &DbPool,
+    uid: &str,
+    item_id: i64,
+    hytale_name: &str,
+    used_at: f64,
+    duration: i64,
+    ts: f64,
+) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO test_pass_hold (user_id, item_id, name_lc, used_at, duration, bought)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(user_id) DO UPDATE SET
+              item_id = ?2, name_lc = ?3, used_at = ?4, duration = ?5, bought = ?6",
+        params![uid.trim(), item_id, hytale_name.trim().to_lowercase(), used_at, duration, ts],
+    )
+    .ok();
+}
+
+/// De testpas die dit lid nog moet opbranden: (Hytale-naam in kleine letters, stand van
+/// de speeltijd-teller bij de aankoop, duur in seconden). None = hij kocht er nog nooit een.
+pub fn test_pass_hold_get(pool: &DbPool, uid: &str) -> Option<(String, f64, i64)> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT name_lc, used_at, duration FROM test_pass_hold WHERE user_id = ?1",
+        params![uid.trim()],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)?)),
+    )
+    .optional()
+    .unwrap_or(None)
+}
+
+/// De keuzelijst voor zo'n namenlijst: elk gekend lid **met een Hytale-naam**, als
+/// (uid, Discord-naam, Hytale-naam), alfabetisch. Zonder Hytale-naam valt er niets te
+/// whitelisten, dus zo iemand hoort niet in de keuzelijst van een pas te staan.
+pub fn members_with_hytale_name(pool: &DbPool) -> Vec<(String, String, String)> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT user_id, COALESCE(NULLIF(username, ''), user_id) FROM coins
-              ORDER BY 2 COLLATE NOCASE",
+            "SELECT user_id, COALESCE(NULLIF(username, ''), user_id), hytale_name FROM coins
+              WHERE hytale_name <> '' ORDER BY 2 COLLATE NOCASE",
         )
-        .expect("prepare all_member_names");
-    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .expect("query all_member_names")
-        .filter_map(Result::ok)
-        .collect()
+        .expect("prepare members_with_hytale_name");
+    stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    })
+    .expect("query members_with_hytale_name")
+    .filter_map(Result::ok)
+    .collect()
 }
 
 /// Seed de gem-catalogus één keer (idempotent): 3 primary, 5 secondary, 5 prism.
@@ -1845,9 +1947,9 @@ pub struct Item {
     /// Doet dit item mee in de dagrotatie? Los van het gewicht, zodat uitzetten het
     /// ingestelde gewicht niet wist. De passen staan hier standaard op `false`.
     pub in_rotation: bool,
-    /// Testpas: enkel te koop voor wie op de testerslijst staat (Manage → ⚙ Settings,
-    /// zolang `pass_allowlist_on` aanstaat). Staat volledig los van de gewone pas, die
-    /// enkel door `sold_out`/`stock` gestuurd wordt.
+    /// Testpas: gratis, geen voorraad, geen dagrotatie — en enkel te koop voor de namen
+    /// op de lijst van dít item (`item_allow`, het vakje "Naam" in Manage → Shop). Staat
+    /// volledig los van de gewone pas, die enkel door `sold_out`/`stock` gestuurd wordt.
     pub test_pass: bool,
 }
 
@@ -2174,6 +2276,9 @@ pub fn delete_item(pool: &DbPool, id: i64) {
     let conn = pool.get().expect("db");
     conn.execute("DELETE FROM items WHERE id = ?1", params![id])
         .expect("del item");
+    // Namenlijst mee opruimen: id's worden hergebruikt, en een achtergebleven lijst zou
+    // stil aan een volgend item blijven plakken.
+    conn.execute("DELETE FROM item_allow WHERE item_id = ?1", params![id]).ok();
 }
 
 // --- kopen & ontgrendelen -----------------------------------------------
@@ -4387,9 +4492,9 @@ mod pass_link_test {
     }
 }
 
-/// De testfase-lijst: wie mag er een Hytale-pas kopen.
+/// De namenlijst per item: wie mag de Test Pass kopen.
 #[cfg(test)]
-mod pass_allow_test {
+mod item_allow_test {
     use super::*;
 
     fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
@@ -4405,43 +4510,114 @@ mod pass_allow_test {
         set_hytale_name(&pool, "u1", "Waldstein", "Waldstein");
         set_hytale_name(&pool, "u2", "FayBelle", "FayBelle");
 
-        assert!(!pass_allow_has(&pool, "u1"), "lege lijst = niemand erop");
-        assert!(pass_allow_add(&pool, "u1", "Waldstein", 100.0));
-        assert!(pass_allow_has(&pool, "u1"));
-        assert!(!pass_allow_has(&pool, "u2"), "de rest staat er niet op");
+        assert!(!item_allow_has(&pool, 7, "u1"), "lege lijst = niemand erop");
+        assert!(item_allow_add(&pool, 7, "u1", "Waldstein", 100.0));
+        assert!(item_allow_has(&pool, 7, "u1"));
+        assert!(!item_allow_has(&pool, 7, "u2"), "de rest staat er niet op");
+
+        // De lijst hangt aan het item: hetzelfde lid, een ander item = een andere vraag.
+        assert!(!item_allow_has(&pool, 8, "u1"), "lijst van item 7 geldt niet voor item 8");
 
         // Twee keer dezelfde persoon is géén tweede rij — en zegt dat ook.
-        assert!(!pass_allow_add(&pool, "u1", "Waldstein", 200.0), "dubbel = niets gedaan");
-        assert_eq!(pass_allow_list(&pool).len(), 1);
+        assert!(!item_allow_add(&pool, 7, "u1", "Waldstein", 200.0), "dubbel = niets gedaan");
+        assert_eq!(item_allow_list(&pool, 7).len(), 1);
 
         // Een lege uid is nooit een lid (een niet-ingevulde keuzelijst mag geen spookrij zetten).
-        assert!(!pass_allow_add(&pool, "  ", "", 100.0));
-        assert_eq!(pass_allow_list(&pool).len(), 1);
+        assert!(!item_allow_add(&pool, 7, "  ", "", 100.0));
+        assert_eq!(item_allow_list(&pool, 7).len(), 1);
 
-        assert!(pass_allow_remove(&pool, "u1"));
-        assert!(!pass_allow_has(&pool, "u1"));
-        assert!(!pass_allow_remove(&pool, "u1"), "twee keer verwijderen = niets meer te doen");
+        assert!(item_allow_remove(&pool, 7, "u1"));
+        assert!(!item_allow_has(&pool, 7, "u1"));
+        assert!(!item_allow_remove(&pool, 7, "u1"), "twee keer verwijderen = niets meer te doen");
 
         let _ = std::fs::remove_file(path);
     }
 
     /// De weergegeven naam volgt `coins` (hernoemen op Discord), met de bewaarde naam
     /// als terugval voor een uid die daar niet (meer) in staat. Sortering op naam.
+    /// De keuzelijst toont enkel leden mét een Hytale-naam.
     #[test]
     fn naam_volgt_coins_en_valt_anders_terug() {
         let (pool, path) = fresh("naam");
-        set_hytale_name(&pool, "u1", "Zoe", "Zoe");
-        pass_allow_add(&pool, "u1", "OudeNaam", 100.0);
-        pass_allow_add(&pool, "u9", "Alleen hier gekend", 100.0);
+        set_hytale_name(&pool, "u1", "Zoe", "ZoeInGame");
+        set_hytale_name(&pool, "u2", "Naamloos", "");
+        item_allow_add(&pool, 7, "u1", "OudeNaam", 100.0);
+        item_allow_add(&pool, 7, "u9", "Alleen hier gekend", 100.0);
 
-        let l = pass_allow_list(&pool);
+        let l = item_allow_list(&pool, 7);
         assert_eq!(l.len(), 2);
-        assert_eq!(l[0], ("u9".to_string(), "Alleen hier gekend".to_string()), "alfabetisch eerst");
+        assert_eq!(l[0].1, "Alleen hier gekend", "alfabetisch eerst");
         assert_eq!(l[1].1, "Zoe", "coins wint van de naam die bij het toevoegen bewaard werd");
+        assert_eq!(l[1].2, "ZoeInGame", "de Hytale-naam komt erbij");
 
-        // De keuzelijst put uit coins — ook wie nog nooit iets kocht moet te kiezen zijn.
-        let leden = all_member_names(&pool);
-        assert_eq!(leden, vec![("u1".to_string(), "Zoe".to_string())]);
+        // Zonder Hytale-naam valt er niets te whitelisten ⇒ niet te kiezen.
+        let leden = members_with_hytale_name(&pool);
+        assert_eq!(
+            leden,
+            vec![("u1".to_string(), "Zoe".to_string(), "ZoeInGame".to_string())]
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// De verhuis van de oude server-brede testerslijst (`pass_allow`) naar de lijst per
+    /// item: de namen komen op elke testpas terecht, en de oude tabel verdwijnt zodat er
+    /// geen tweede lijst blijft staan die niemand meer leest.
+    #[test]
+    fn oude_testerslijst_verhuist_naar_de_testpas() {
+        let (pool, path) = fresh("migratie");
+        let id = add_item(&pool, "shelf", None);
+        {
+            let conn = pool.get().unwrap();
+            // Bewust met de oude rommel erin: uitverkocht, een prijs, en in de rotatie.
+            conn.execute(
+                "UPDATE items SET test_pass = 1, sold_out = 1, price = 500, stock = 0,
+                   in_rotation = 1 WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE pass_allow (user_id TEXT PRIMARY KEY, username TEXT NOT NULL
+                   DEFAULT '', added REAL NOT NULL DEFAULT 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pass_allow (user_id, username, added) VALUES ('u1', 'Tester', 5.0)",
+                [],
+            )
+            .unwrap();
+        }
+        // Tweede opstart = de migratie draait.
+        let pool2 = init_pool(path.to_str().unwrap());
+        assert!(item_allow_has(&pool2, id, "u1"), "de tester staat nu op de testpas");
+        let it = get_item(&pool2, id).unwrap();
+        assert_eq!((it.price, it.stock, it.sold_out, it.in_rotation), (0, -1, false, false),
+            "gratis, onbeperkt, niet uitverkocht en niet in de dagtrekking");
+        let weg: bool = pool2
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pass_allow'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none();
+        assert!(weg, "de oude tabel is opgeruimd");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Een item wissen neemt zijn namenlijst mee: id's worden hergebruikt.
+    #[test]
+    fn item_wissen_neemt_de_lijst_mee() {
+        let (pool, path) = fresh("del");
+        let id = add_item(&pool, "shelf", None);
+        item_allow_add(&pool, id, "u1", "Waldstein", 100.0);
+        delete_item(&pool, id);
+        assert!(item_allow_list(&pool, id).is_empty());
 
         let _ = std::fs::remove_file(path);
     }

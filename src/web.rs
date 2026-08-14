@@ -268,6 +268,8 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/delete", post(admin_item_delete))
         .route("/admin/item/stock", post(admin_item_stock))
         .route("/admin/item/rotation", post(admin_item_rotation))
+        .route("/admin/item/allow/add", post(admin_item_allow_add))
+        .route("/admin/item/allow/remove", post(admin_item_allow_remove))
         .route("/admin/accounts", get(admin_accounts))
         .route("/admin/accounts/name", post(admin_account_name))
         .route("/admin/absent", get(admin_absent))
@@ -293,8 +295,6 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/settings/save", post(admin_settings_save))
         .route("/admin/settings/weight/set", post(admin_settings_weight_set))
         .route("/admin/settings/weight/delete", post(admin_settings_weight_delete))
-        .route("/admin/settings/pass/add", post(admin_settings_pass_add))
-        .route("/admin/settings/pass/remove", post(admin_settings_pass_remove))
         .route("/admin/settings/tier/add", post(admin_settings_tier_add))
         .route("/admin/settings/tier/update", post(admin_settings_tier_update))
         .route("/admin/settings/tier/delete", post(admin_settings_tier_delete))
@@ -580,6 +580,12 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 /* Prijs + Buy (+ Hytale-naamveld) als groep onderaan de kaart: alle Buy-knoppen lijnen
    uit, ongeacht hoeveel tekst/omschrijving er boven staat. */
 .slot .price{{font-weight:700;color:{MEADOW};font-size:.95rem;margin-top:auto}}
+/* Testpas: op de prijsplek staat de speeltijd (00H 10M) — geen munt, geen bedrag. */
+.slot .price.time{{color:#cfe0c8;font-variant-numeric:tabular-nums;letter-spacing:.04em}}
+/* Testpas waar je niet voor uitgenodigd bent: enkel een klein slotje op de koopplek.
+   Even hoog als een Buy-knop, zodat de kaarten in een rij gelijk blijven. */
+.slot .lockslot{{width:100%;padding:.45rem;border-radius:9px;background:#141d14;
+  border:1px dashed #2c3d2a;color:#6f8268;font-size:.9rem;line-height:1.2;text-align:center}}
 .slot .buy{{width:100%;padding:.45rem;border:0;border-radius:9px;
   background:#2c3d2a;color:#6f8268;font-weight:600;font-size:.9rem;
   cursor:not-allowed}}
@@ -773,6 +779,21 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   background:{MEADOW};max-width:100%}}
 .aitem .rotbox .hint{{font-size:.68rem}}
 .rot-info{{margin:0 0 1rem;font-size:.78rem;color:#9db095;max-width:70ch;line-height:1.5}}
+/* Namenlijst op de kaart van een testpas: wie hem mag kopen. Zelfde opzet als het
+   voorraadvak (eigen formuliertjes), met per naam de Hytale-naam erachter en een ✕. */
+.aitem .allowbox{{border-top:1px solid #2c3d2a;padding-top:.45rem;margin:.1rem 0 0;
+  display:flex;flex-direction:column;gap:.3rem}}
+.aitem .allowbox .lbl{{font-size:.72rem;color:#9db095;text-align:left}}
+.aitem .allowbox select{{flex:1;min-width:0;background:#0e1510;border:1px solid #2c3d2a;
+  color:#e8f0e4;border-radius:8px;padding:.25rem .35rem;font:inherit;font-size:.75rem}}
+.allowlist{{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.2rem}}
+.allowlist li{{display:flex;align-items:center;gap:.35rem;font-size:.74rem;color:#e8f0e4;
+  background:#0e1510;border:1px solid #2c3d2a;border-radius:8px;padding:.2rem .35rem}}
+.allowlist li.muted{{color:#9db095;background:none;border:1px dashed #2c3d2a}}
+.allowlist .nm{{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.allowlist .hn{{color:#9db095;font-size:.68rem;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}}
+.allowlist .iform{{margin:0 0 0 auto}}
 .soldout{{color:#c0562f}}
 /* Out-of-stock-vinkje op de item-kaart: op één regel, klikbaar label. */
 .aitem .chk{{display:flex;align-items:center;gap:.4rem;font-size:.74rem;color:#cfe0c8;
@@ -1270,27 +1291,29 @@ fn inventory_home(
             format!("{}m {}s", s / 60, s % 60)
         }
     };
+    // De resterende SPEELTIJD zoals de tale-kant hem kent. Speelt hij nu, dan loopt de
+    // teller; staat hij niet op de server, dan staat de tijd stil en zegt het pauzeteken dat.
+    let from_ledger = |l: crate::pass_ledger::Ledger| {
+        if l.online {
+            format!(
+                "{}{ticker}",
+                pass_btn(
+                    false,
+                    format!(
+                        "<span class=\"passtime\" data-passexp=\"{}\">…</span>",
+                        now_secs() + l.remaining
+                    )
+                )
+            )
+        } else {
+            pass_btn(true, format!("<span class=\"passtime\">{}</span>", still(l.remaining)))
+        }
+    };
     let pass_row = match db::get_whitelist_linked(pool, uid, now_secs()) {
         // Permanente pas: niets af te tellen → geen knop.
         Some(p) if p.is_permanent() => String::new(),
-        // De resterende SPEELTIJD komt van de tale-kant. Speelt hij nu, dan loopt de teller;
-        // staat hij niet op de server, dan staat de tijd stil en zegt het pauzeteken dat.
         Some(p) if crate::pass_ledger::lookup(&p.hytale_name).is_some() => {
-            let l = crate::pass_ledger::lookup(&p.hytale_name).expect("net nog gezien");
-            if l.online {
-                format!(
-                    "{}{ticker}",
-                    pass_btn(
-                        false,
-                        format!(
-                            "<span class=\"passtime\" data-passexp=\"{}\">…</span>",
-                            now_secs() + l.remaining
-                        )
-                    )
-                )
-            } else {
-                pass_btn(true, format!("<span class=\"passtime\">{}</span>", still(l.remaining)))
-            }
+            from_ledger(crate::pass_ledger::lookup(&p.hytale_name).expect("net nog gezien"))
         }
         // Geen gegevens van de tale-kant (bestand onleesbaar, of die naam staat er niet in):
         // val terug op de oude weergave i.p.v. een verzonnen tijd te tonen.
@@ -1304,7 +1327,44 @@ fn inventory_home(
             ),
             None => String::new(),
         },
-        None => String::new(),
+        // Geen pas-rij op dit account — val terug op de **Hytale-naam** die dit lid al
+        // heeft vastgezet. Twee gevallen waarin dat het enige spoor is:
+        //   • een Twitch-redeem landde op `twitch:<id>` en het lid heeft zijn Twitch niet
+        //     in Discord gekoppeld, dus de rij hangt aan niemand die we herkennen;
+        //   • zijn gekochte pas is als **aankoop**-regel verlopen terwijl er via Twitch nog
+        //     speeltijd bijkwam — de tale-klok loopt dan door, de rij niet.
+        // De tale-kant telt per naam, dus die teller is hoe dan ook de zijne. Dit toont
+        // enkel; het zet niets vast en whitelist niets. En de naam is niet vrij te kiezen:
+        // ze ligt vast bij de eerste aankoop of via de Twitch-koppeling (`set_hytale_name`),
+        // dus dit opent geen weg om andermans tijd op te vragen.
+        None => {
+            let hname = db::get_hytale_name(pool, uid);
+            match crate::pass_ledger::lookup(&hname) {
+                // 0 over = niets te tonen; anders zou een leeg tegoed als pas ogen.
+                Some(l) if l.remaining > 0.0 => from_ledger(l),
+                _ => String::new(),
+            }
+        }
+    };
+    // Speeltijd op de server, onder de all-time-regel. Komt van de tale-kant (playtime.json)
+    // en telt ALLE tijd in het spel — ook tijd zonder pas, dus niet te verwarren met het
+    // pas-verbruik. Zoeken gebeurt op de Hytale-naam die dit lid vastzette; is die er niet,
+    // dan die van zijn pas. Geen naam of nog nooit gespeeld ⇒ geen regel.
+    let playtime_row = {
+        let hname = db::get_hytale_name(pool, uid);
+        let hname = if hname.is_empty() {
+            db::get_whitelist_linked(pool, uid, now_secs()).map(|p| p.hytale_name).unwrap_or_default()
+        } else {
+            hname
+        };
+        match crate::playtime::lookup(&hname) {
+            Some(s) if s >= 60.0 => format!(
+                "<div class=\"statrow\"><span class=\"k\">Hytale gametime</span>\
+                   <span><b>{}</b></span></div>",
+                crate::playtime::human(s)
+            ),
+            _ => String::new(),
+        }
     };
     // Chest-teller onder de all-time-regel: hoeveel chests dit lid meeopende en won.
     let (opened, won) = db::chest_counts(pool, uid);
@@ -1315,7 +1375,7 @@ fn inventory_home(
            <div class=\"bar\"><div class=\"fill\" data-fill style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\" data-lvlnm>{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Coins earned all-time</span>\
-           <span>{MC} <b data-earned>{total_earned}</b></span></div>\
+           <span>{MC} <b data-earned>{total_earned}</b></span></div>{playtime_row}\
          <div class=\"statrow\"><span class=\"k\">Chests opened</span>\
            <span><b>{opened}</b></span></div>\
          <div class=\"statrow\"><span class=\"k\">Chests won</span>\
@@ -1476,10 +1536,12 @@ async fn market(
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
 
-    // Testfase: enkel de leden op de testerslijst zien de pas als koopbaar.
-    let pass_ok = may_buy_pass(&st.pool, &uid);
-    let slot =
-        |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins, pass_ok);
+    // Testpas: enkel de namen op de lijst van dát item zien hem als koopbaar; de lijst
+    // hangt per item, dus de vraag wordt per kaartje gesteld.
+    let slot = |it: &db::Item| {
+        let test_ok = it.test_pass && may_buy_test_pass(&st.pool, &uid, it.id);
+        shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins, test_ok)
+    };
 
     // Volledig shop-ontwerp (zoals de Admin shop preview): dagrotatie + Hytale-passen.
     // Twee onderdelen zijn nog niet vrijgegeven en staan grijs (zie de flags bovenaan).
@@ -1575,10 +1637,11 @@ async fn admin_shop_preview(
         db::owned_item_ids(&st.pool, &uid).into_iter().collect();
     let has_name = !db::get_hytale_name(&st.pool, &uid).is_empty();
     let has_perma = db::has_perma_access(&st.pool, &uid);
-    // Testfase: enkel de leden op de testerslijst zien de pas als koopbaar.
-    let pass_ok = may_buy_pass(&st.pool, &uid);
-    let slot =
-        |it: &db::Item| shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins, pass_ok);
+    // Testpas: enkel de namen op de lijst van dát item zien hem als koopbaar.
+    let slot = |it: &db::Item| {
+        let test_ok = it.test_pass && may_buy_test_pass(&st.pool, &uid, it.id);
+        shop_slot(it, owned.contains(&it.id), has_name, has_perma, coins, test_ok)
+    };
 
     let offers: String =
         db::shop_offers(&st.pool, shop_day(), SHOP_DAILY_N).iter().map(slot).collect();
@@ -1731,21 +1794,47 @@ fn item_thumb(it: &db::Item) -> String {
     thumb_html(&it.image, &it.color)
 }
 
-/// Mag dit lid een Hytale-pas kopen? Staat de testfase-schakelaar aan, dan enkel de
-/// leden op de testerslijst (Manage → ⚙ Settings). **Admins zijn niet uitgezonderd**:
+/// Mag dit lid déze testpas kopen? Enkel de namen op de lijst van het item zelf
+/// (Manage → Shop, het vakje "Naam" op de kaart). **Admins zijn niet uitgezonderd**:
 /// zo ziet Faybelle op de shop letterlijk wat een gewoon lid ziet, en zet ze zichzelf
-/// gewoon op de lijst om te testen.
-fn may_buy_pass(pool: &DbPool, uid: &str) -> bool {
-    if !settings::bool_of(pool, "pass_allowlist_on") {
-        return true; // geen testfase: de pas staat gewoon te koop
-    }
-    if !db::pass_allow_has(pool, uid) {
+/// gewoon op de lijst om te testen. Geen lijst = niemand, en dat is de bedoeling:
+/// een testpas is per definitie voor genodigden.
+fn may_buy_test_pass(pool: &DbPool, uid: &str, item_id: i64) -> bool {
+    if !db::item_allow_has(pool, item_id, uid) {
         return false;
     }
     // Tester, maar zijn vorige testpas loopt nog: geen tweede erbovenop. Anders zou hij
     // tijd stapelen die hij tijdens de test nooit opmaakt, en is "15 minuten testen" geen
     // 15 minuten meer. Zodra de tijd op is (of hij van de lijst gaat) komt de knop terug.
-    !test_pass_running(&db::get_hytale_name(pool, uid))
+    !test_pass_running(&db::get_hytale_name(pool, uid)) && !test_pass_burning(pool, uid)
+}
+
+/// Moet de testpas die dit lid als laatste kocht nog opgebrand worden?
+///
+/// Dit is de weg die **niet** van de tale-kant afhangt: bij de aankoop noteert market de
+/// stand van zijn speeltijd-teller (`used` uit `passes.json`), en pas als die met de duur
+/// van die pas gestegen is, is hij uitgewerkt. Nodig omdat `test_pass_running` het veld
+/// `"kind"` vraagt dat de bot op prod (nog) niet schrijft — zonder dit zou het koopslot
+/// daar stilzwijgend niets doen.
+///
+/// **Nee bij twijfel**, net als hiernaast: geen aankoop gekend, of geen gegevens van de
+/// tale-kant (bestand onleesbaar, naam nog niet gekend) ⇒ geen slot. Ook een teller die
+/// lager staat dan bij de aankoop telt als "geen slot": dan is de boekhouding aan de
+/// overkant heropgestart en zegt ons ijkpunt niets meer.
+fn test_pass_burning(pool: &DbPool, uid: &str) -> bool {
+    let Some((name_lc, used_at_buy, duration)) = db::test_pass_hold_get(pool, uid) else {
+        return false;
+    };
+    let used_now = crate::pass_ledger::lookup(&name_lc).map(|l| l.used);
+    still_burning(used_now, used_at_buy, duration)
+}
+
+/// De rekensom van hierboven, los van bestand en DB zodat ze te testen valt.
+/// `used_now` = None ⇒ geen gegevens van de tale-kant ⇒ geen slot.
+fn still_burning(used_now: Option<f64>, used_at_buy: f64, duration: i64) -> bool {
+    let Some(used_now) = used_now else { return false };
+    let burned = used_now - used_at_buy;
+    burned >= 0.0 && burned < duration as f64
 }
 
 /// Loopt er nu testtijd op deze Hytale-naam? Antwoord komt van de tale-kant
@@ -1770,7 +1859,9 @@ fn shop_slot(
     has_name: bool,
     has_perma: bool,
     coins: i64,
-    pass_ok: bool,
+    // Enkel van tel op een testpas: staat dit lid op de namenlijst van dít item (en
+    // loopt er geen testpas van hem)? Bij een gewoon item betekenisloos.
+    test_ok: bool,
 ) -> String {
     // NB (2026-08-04): een pas met looptijd toonde hier "Bought" zolang je er een had
     // lopen — één tegelijk. Dat is geschrapt (user-wens): een pas is nu een tegoed aan
@@ -1780,28 +1871,33 @@ fn shop_slot(
     // verzamel-items en voor de permanente pas (bij permanente toegang).
     let bought = (owned && (it.category == "inventory" || it.category == "booster"))
         || (it.category == "boost" && it.duration == 0 && has_perma);
-    // Een tèstpas (vinkje in Manage → Shop) is enkel voor de leden op de testerslijst
-    // (Manage → ⚙ Settings). Voor de rest staat ze permanent dicht — vandaar dat dit
-    // langs dezelfde weg loopt als "uitverkocht" en niet als een aparte knop: de shop
-    // hoort er hetzelfde uit te zien, wat de reden ook is.
+    // Een tèstpas (vinkje in Manage → Shop) is enkel voor de namen op de lijst van dat
+    // item. Wie er niet op staat ziet géén "Out of Stock" maar enkel een klein 🔒 op de
+    // koopplek: de pas is niet uitverkocht, hij is niet voor hem — en dat is een ander
+    // verhaal dan een lege voorraad (user-wens Faybelle 2026-08-13).
     //
     // NB: dit hing vroeger aan `category == "boost"`, dus aan élke pas. Gevolg: een lege
     // testerslijst zette óók de gewone Meadowland Pass op Out of Stock, terwijl die
     // niets met het testerssysteem te maken heeft — die staat gewoon te koop tot een
     // admin hem op Out of stock zet. Twee aparte systemen, twee aparte remmen.
-    let testfase_dicht = it.test_pass && !pass_ok;
-    // Dicht voor iedereen, om drie redenen:
+    let op_slot = it.test_pass && !test_ok;
+    // Dicht voor iedereen, om twee redenen:
     //  * handmatig op Out of stock gezet (sold_out);
-    //  * voorraad op 0 → dicht tot een admin aanvult;
-    //  * testpas, en dit lid staat niet op de testerslijst.
+    //  * voorraad op 0 → dicht tot een admin aanvult.
+    // Een testpas kent die twee niet (voorraad/uitverkocht staan niet op zijn kaart), die
+    // heeft zijn eigen slot hierboven.
     // Item blijft wél staan: je ziet wát er te koop is. De échte rem zit in buy()/purchase() —
     // een grijze knop houdt niemand tegen die zelf een POST stuurt.
-    let dicht = it.sold_out || testfase_dicht || it.stock == 0;
+    let dicht = !it.test_pass && (it.sold_out || it.stock == 0);
     // Te weinig coins → Buy-knop grijs/uitgeschakeld (dan hoeft de "not enough coins"-banner
     // niet meer te verschijnen in de normale flow). buy()/purchase() blijft server-side de
-    // rem als vangnet (race of handmatige POST).
+    // rem als vangnet (race of handmatige POST). Een testpas is gratis, dus daar speelt dit niet.
     let cant_afford = coins < it.price;
-    let action = if dicht && !bought {
+    let action = if op_slot && !bought {
+        // Enkel het slotje, géén tekst of tooltip: elke zin die een speler leest is een
+        // beslissing van de user, en hier vroeg ze uitdrukkelijk om alleen het icoontje.
+        "<div class=\"lockslot\">🔒</div>".to_string()
+    } else if dicht && !bought {
         "<button class=\"buy\" type=\"button\" disabled>Out of Stock</button>".to_string()
     } else if bought {
         String::new()
@@ -1853,21 +1949,37 @@ fn shop_slot(
     // admin het item handmatig op "Out of stock" (`sold_out`), dan verbergen we het
     // resterende aantal — de knop zegt dan al Out of Stock en "1 left" ernaast zou
     // tegenstrijdig zijn.
-    let stock = if it.sold_out || testfase_dicht || it.stock < 0 {
+    // Een testpas telt geen voorraad (die vakjes staan niet op zijn beheerkaart), dus
+    // hier valt er ook niets over te zeggen.
+    let stock = if it.test_pass || it.sold_out || it.stock < 0 {
         String::new()
     } else if it.stock == 0 {
         "<div class=\"stock none\">out of stock</div>".to_string()
     } else {
         format!("<div class=\"stock\">{} left</div>", it.stock)
     };
+    // Op de prijsplek: bij een testpas de speeltijd die hij geeft (hij is gratis, dus een
+    // prijs van 0 zeggen we niet — de tijd is wat je krijgt), bij de rest de prijs.
+    let price_line = if it.test_pass {
+        format!("<div class=\"price time\">{}</div>", pass_time_label(it.duration))
+    } else {
+        format!("<div class=\"price\">{MC} {}</div>", dots(it.price))
+    };
     format!(
         "<div class=\"slot{slotcls}\">{mark}<div class=\"thumb\">{thumb}</div>\
          <div class=\"name\">{name}</div>{img2}{desc}\
-         <div class=\"price\">{MC} {price}</div>{stock}{action}</div>",
+         {price_line}{stock}{action}</div>",
         thumb = item_thumb(it),
         name = esc(&it.name),
-        price = dots(it.price),
     )
+}
+
+/// Speeltijd van een pas in het formaat dat Faybelle vroeg: `00H 10M`. Beide velden
+/// altijd twee cijfers, ook boven de 24 uur (dan gewoon meer uren, geen dagen).
+fn pass_time_label(secs: i64) -> String {
+    let m = (secs.max(0) / 60) % 60;
+    let h = secs.max(0) / 3600;
+    format!("{h:02}H {m:02}M")
 }
 
 /// Grijs, textloos 🔒-placeholder-vakje als teaser voor iets dat nog niet vrijgegeven is:
@@ -2429,20 +2541,17 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
         ))
         .into_response();
     }
-    // Testpas: enkel voor de leden op de testerslijst. Dezelfde weigering en exact
-    // dezelfde zin als "uitverkocht" — voor wie er niet op staat ís de pas dicht, en
-    // een aparte tekst zou enkel verklappen dat er een lijst bestaat. De knop staat al grijs;
-    // dit is de rem voor een zelfgemaakte POST. Een gewone pas komt hier niet langs.
-    if item.test_pass && !may_buy_pass(&st.pool, &uid) {
+    // Testpas: enkel de namen op de lijst van dít item. Op de kaart staat voor de rest een
+    // 🔒 en verder niets; dit is de rem voor een zelfgemaakte POST. Bewust **zonder**
+    // foutmelding terug naar de shop: het slotje zegt al alles wat de speler te zien
+    // krijgt, en een zin erbij zou een tekst zijn die de user nooit gekozen heeft.
+    // Een gewone pas komt hier niet langs.
+    if item.test_pass && !may_buy_test_pass(&st.pool, &uid, item.id) {
         tracing::info!(
-            "{name} probeerde '{}' te kopen maar staat niet op de testerslijst",
+            "{name} probeerde '{}' te kopen maar staat niet op de namenlijst van dat item",
             item.name
         );
-        return Redirect::to(&format!(
-            "/market?err={}",
-            pct(&format!("{} is out of stock.", item.name))
-        ))
-        .into_response();
+        return Redirect::to("/market").into_response();
     }
 
     // --- Passen: koop = direct whitelisten -------------------------------
@@ -2512,6 +2621,22 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                 format!("You already have permanent access ({hname}).")
             }
         };
+        // Testpas: leg het ijkpunt vast waarmee we straks zien of hij opgebrand is —
+        // de stand van zijn speeltijd-teller nú. Kent de tale-kant zijn naam nog niet
+        // (eerste pas: het bestand krijgt hem pas na ~15 s), dan is er nog niets van
+        // afgespeeld en is 0 het juiste startpunt.
+        if item.test_pass {
+            let used_now = crate::pass_ledger::lookup(&hname).map(|l| l.used).unwrap_or(0.0);
+            db::test_pass_hold_set(
+                &st.pool,
+                &uid,
+                item.id,
+                &hname,
+                used_now,
+                item.duration,
+                now_secs(),
+            );
+        }
         // Logboek: pas gekocht + wie er onder welke Hytale-naam gewhitelist is.
         db::log_event(
             &st.pool,
@@ -2744,7 +2869,12 @@ fn rotation_ui(it: &db::Item, odds: Option<f64>) -> String {
 }
 
 /// Eén item-editor op de beheerpagina: thumb, naam, prijs, upload, verwijder.
+///
+/// Een **testpas** krijgt een andere kaart: prijs, Out of stock, voorraad en dagrotatie
+/// vallen weg (die gebruikt hij geen van alle) en in de plaats komt zijn namenlijst.
+/// Zo staat er op die kaart enkel wat er voor dít item toe doet.
 fn admin_item(
+    pool: &DbPool,
     it: &db::Item,
     shelves: &[(i64, String)],
     saved: Option<i64>,
@@ -2755,7 +2885,9 @@ fn admin_item(
     let so = if it.sold_out { " checked" } else { "" };
     // Voorraad: eigen formuliertje (los van Save), want "Add stock" telt óp bij wat er al
     // ligt i.p.v. een waarde te zetten — dat is hoe een admin erover denkt: "er komen er 3 bij".
-    let stock_ui = {
+    let stock_ui = if it.test_pass {
+        String::new()
+    } else {
         let nu = if it.stock < 0 {
             "<b>unlimited</b>".to_string()
         } else if it.stock == 0 {
@@ -2808,14 +2940,99 @@ fn admin_item(
     };
 
     // Testpas-vinkje: enkel zinvol op een pas, dus enkel daar getoond. Een pas zonder dit
-    // vinkje (de gewone Meadowland Pass) staat gewoon te koop; de testerslijst raakt hem
-    // niet. Staat het vinkje aan, dan is de pas enkel voor de leden op de testerslijst
-    // (Manage → ⚙ Settings, zolang die schakelaar aanstaat).
+    // vinkje (de gewone Meadowland Pass) staat gewoon te koop; de namenlijst raakt hem
+    // niet. Staat het vinkje aan, dan is de pas gratis, zonder voorraad, en enkel voor de
+    // namen op de lijst onderaan deze kaart.
     let tp_field = if it.category == "boost" {
         let tp = if it.test_pass { " checked" } else { "" };
         format!(
             "<label class=\"chk\"><input type=\"checkbox\" name=\"test_pass\" value=\"1\"{tp}>\
-               Test pass <span class=\"hint\">(enkel voor de testerslijst)</span></label>"
+               Test pass <span class=\"hint\">(gratis, enkel voor de namen hieronder)</span></label>"
+        )
+    } else {
+        String::new()
+    };
+
+    // Prijs: een testpas is gratis (user-wens Faybelle 2026-08-13) — geen veld, en de
+    // hidden 0 houdt hem daar ook als iemand de kaart bewaart. Op de shop staat op die
+    // plaats de speeltijd.
+    let price_field = if it.test_pass {
+        "<div class=\"fld\">Price<div class=\"rdonly\">free</div></div>\
+         <input type=\"hidden\" name=\"price\" value=\"0\">"
+            .to_string()
+    } else {
+        format!(
+            "<label class=\"fld\">Price <span class=\"hint\">(coins)</span>\
+               <input name=\"price\" type=\"number\" min=\"0\" value=\"{}\"></label>",
+            it.price,
+        )
+    };
+
+    // Out of stock: een testpas heeft geen voorraad om op te raken; de namenlijst is zijn
+    // enige rem. Vinkje weg i.p.v. een knop die niets doet.
+    let so_field = if it.test_pass {
+        String::new()
+    } else {
+        format!(
+            "<label class=\"chk\"><input type=\"checkbox\" name=\"sold_out\" value=\"1\"{so}>\
+               Out of stock <span class=\"hint\">(zichtbaar, maar niet koopbaar)</span></label>"
+        )
+    };
+
+    // De namenlijst van een testpas: wie hierop staat kan hem kopen, de rest ziet op de
+    // shop een 🔒. De keuzelijst toont enkel leden mét een Hytale-naam — zonder die naam
+    // valt er niets te whitelisten. Toevoegen/verwijderen gaat meteen (niet pas bij Save),
+    // net als de voorraad-knoppen: het is een lijst, geen veld.
+    let allow_ui = if it.test_pass {
+        let lijst = db::item_allow_list(pool, it.id);
+        let erop: std::collections::HashSet<&str> =
+            lijst.iter().map(|(uid, _, _)| uid.as_str()).collect();
+        let rijen: String = lijst
+            .iter()
+            .map(|(uid, uname, hname)| {
+                format!(
+                    "<li><span class=\"nm\">{n}</span><span class=\"hn\">{h}</span>\
+                       <form method=\"post\" action=\"/admin/item/allow/remove\" class=\"iform\">\
+                         <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                         <input type=\"hidden\" name=\"uid\" value=\"{u}\">\
+                         <button class=\"chrm\" type=\"submit\" title=\"Van de lijst halen\">✕</button>\
+                       </form></li>",
+                    n = esc(uname),
+                    h = esc(hname),
+                    u = esc(uid),
+                    id = it.id,
+                )
+            })
+            .collect();
+        // Wie er al op staat, staat niet meer in de keuzelijst: twee keer dezelfde persoon
+        // toevoegen doet niets, en dat hoort de lijst dan ook niet voor te stellen.
+        let opties: String = db::members_with_hytale_name(pool)
+            .iter()
+            .filter(|(uid, _, _)| !erop.contains(uid.as_str()))
+            .map(|(uid, uname, hname)| {
+                format!(
+                    "<option value=\"{u}\">{n} ({h})</option>",
+                    u = esc(uid),
+                    n = esc(uname),
+                    h = esc(hname),
+                )
+            })
+            .collect();
+        let body = if lijst.is_empty() {
+            "<li class=\"muted\">Nog niemand — deze pas is voor niemand koopbaar.</li>"
+                .to_string()
+        } else {
+            rijen
+        };
+        format!(
+            "<div class=\"allowbox\"><div class=\"lbl\">Naam \
+               <span class=\"hint\">(enkel deze namen kunnen deze pas kopen)</span></div>\
+             <ul class=\"allowlist\">{body}</ul>\
+             <form method=\"post\" action=\"/admin/item/allow/add\" class=\"arow\">\
+               <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+               <select name=\"uid\" required><option value=\"\">— kies een naam —</option>{opties}</select>\
+               <button class=\"btn small\" type=\"submit\">＋</button></form></div>",
+            id = it.id,
         )
     } else {
         String::new()
@@ -2904,8 +3121,7 @@ fn admin_item(
          <form method=\"post\" action=\"/admin/item/update\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <label class=\"fld\">Name<input name=\"name\" value=\"{name}\" placeholder=\"e.g. Amber\"></label>\
-           <label class=\"fld\">Price <span class=\"hint\">(coins)</span>\
-             <input name=\"price\" type=\"number\" min=\"0\" value=\"{price}\"></label>\
+           {price_field}\
            <label class=\"fld\">Description <span class=\"hint\">(shown in italic in the shop)</span>\
              <input name=\"description\" value=\"{desc}\" placeholder=\"e.g. Gives the Amber role\"></label>\
            <label class=\"fld\">Type<select name=\"category\">\
@@ -2913,11 +3129,9 @@ fn admin_item(
              <option value=\"noninv\"{cn}>Non-inventory item</option>\
              <option value=\"booster\"{cboo}>Booster (lucky item)</option>\
              <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
-           {dur_field}\
-           <label class=\"chk\"><input type=\"checkbox\" name=\"sold_out\" value=\"1\"{so}>\
-             Out of stock <span class=\"hint\">(zichtbaar, maar niet koopbaar)</span></label>\
-           {tp_field}\
-           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>{rot_ui}{stock_ui}{img2_ui}\
+           {dur_field}{so_field}{tp_field}\
+           <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>\
+         {allow_ui}{rot_ui}{stock_ui}{img2_ui}\
          <div class=\"arow\">\
            <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
              <input type=\"hidden\" name=\"id\" value=\"{id}\">\
@@ -2933,14 +3147,15 @@ fn admin_item(
         thumb = item_thumb(it),
         id = it.id,
         name = esc(&it.name),
-        price = it.price,
         desc = esc(&it.description),
         ci = sel("inventory"),
         cn = sel("noninv"),
         cboo = sel("booster"),
         cb = sel("boost"),
         img2_ui = img2_ui,
-        rot_ui = rotation_ui(it, odds),
+        // Dagrotatie: een testpas staat op zijn vaste plek in de shop en doet niet mee
+        // aan de dagtrekking — dat blok hoort dus niet op zijn kaart.
+        rot_ui = if it.test_pass { String::new() } else { rotation_ui(it, odds) },
     )
 }
 
@@ -2969,7 +3184,7 @@ async fn admin_market(
         .map(|(sid, title)| {
             let items: String = db::shelf_items(&st.pool, *sid)
                 .iter()
-                .map(|it| admin_item(it, &all_shelves, saved, odds_of(it)))
+                .map(|it| admin_item(&st.pool, it, &all_shelves, saved, odds_of(it)))
                 .collect();
             format!(
                 "<section class=\"ashelf\"><div class=\"ashelf-head\">\
@@ -2992,7 +3207,7 @@ async fn admin_market(
 
     let lucky_items: String = db::lucky_items(&st.pool)
         .iter()
-        .map(|it| admin_item(it, &all_shelves, saved, odds_of(it)))
+        .map(|it| admin_item(&st.pool, it, &all_shelves, saved, odds_of(it)))
         .collect();
     let lucky = format!(
         "<section class=\"ashelf\"><div class=\"ashelf-head\"><b>🍀 Lucky items</b></div>\
@@ -3825,67 +4040,9 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
         groups.push_str("</div>");
     }
 
-    // Testfase-lijst: wie mag er een Hytale-pas kopen. Hoort visueel bij de schakelaar
-    // `pass_allowlist_on` hierboven, maar is een lijst en dus een eigen blok — zoals de
-    // twee weegsystemen. Elke rij heeft zijn eigen formuliertje (toevoegen/verwijderen
-    // gaat meteen, niet pas bij "Opslaan").
-    let pa_on = settings::bool_of(&st.pool, "pass_allowlist_on");
-    let allow = db::pass_allow_list(&st.pool);
-    let on_list: std::collections::HashSet<&str> =
-        allow.iter().map(|(uid, _)| uid.as_str()).collect();
-    let pa_rows: String = allow
-        .iter()
-        .map(|(uid, uname)| {
-            format!(
-                "<tr><td>{n}</td><td class=\"muted\">{u}</td>\
-                 <td><form method=\"post\" action=\"/admin/settings/pass/remove\" class=\"iform\">\
-                   <input type=\"hidden\" name=\"uid\" value=\"{u}\">\
-                   <button class=\"chrm\" type=\"submit\" title=\"Van de lijst halen\">✕</button>\
-                 </form></td></tr>",
-                n = esc(uname),
-                u = esc(uid),
-            )
-        })
-        .collect();
-    // Enkel leden die er nog niet op staan aanbieden: twee keer dezelfde persoon
-    // toevoegen doet niets, en dat hoort de lijst dan ook niet voor te stellen.
-    let pa_options: String = db::all_member_names(&st.pool)
-        .iter()
-        .filter(|(uid, _)| !on_list.contains(uid.as_str()))
-        .map(|(uid, uname)| {
-            format!("<option value=\"{u}\">{n}</option>", u = esc(uid), n = esc(uname))
-        })
-        .collect();
-    let pa_body = if allow.is_empty() {
-        "<tr><td colspan=\"3\" class=\"muted\">Nog niemand op de lijst.</td></tr>".to_string()
-    } else {
-        pa_rows
-    };
-    // De enige stille faalmodus van dit hele blok: schakelaar aan + lege lijst = de pas is
-    // voor iedereen dicht. Dat mag je niet moeten afleiden uit een lege tabel.
-    let pa_warn = if pa_on && allow.is_empty() {
-        "<div class=\"notice err\">⚠️ De testfase staat aan en de lijst is leeg: op dit \
-         moment kan <b>niemand</b> een Hytale-pas kopen.</div>"
-            .to_string()
-    } else if !pa_on {
-        "<div class=\"notice ok\">De testfase staat uit — de pas is gewoon voor iedereen \
-         te koop en deze lijst doet even niets.</div>"
-            .to_string()
-    } else {
-        String::new()
-    };
-    let pa_block = format!(
-        "<div class=\"sgroup\"><h2>Hytale-passen — wie mag er kopen</h2>\
-         <p class=\"shelp\" style=\"margin:0 0 .6rem\">Zolang de testfase aanstaat (schakelaar \
-          hierboven) kunnen enkel deze leden een pas kopen. Voor al de rest staat de pas \
-          permanent op <b>Out of Stock</b>. Twitch-redeems staan hier los van.</p>\
-         {pa_warn}\
-         <table class=\"wtable\"><thead><tr><th>Lid</th><th>Discord-id</th><th></th></tr></thead>\
-         <tbody>{pa_body}</tbody></table>\
-         <form method=\"post\" action=\"/admin/settings/pass/add\" class=\"addbar\">\
-           <select name=\"uid\" required><option value=\"\">— kies een lid —</option>{pa_options}</select>\
-           <button class=\"btn\" type=\"submit\">＋ Tester</button></form></div>"
-    );
+    // NB: hier stond het testfase-blok (wie mag een Hytale-pas kopen). Die lijst hangt
+    // sinds 2026-08-13 aan het item zelf — Manage → Shop, het vakje "Naam" op de Test
+    // Pass — samen met de schakelaar die erbij hoorde.
 
     // Weegsysteem 1 — coins per bericht.
     let cw = db::coin_weights_all(&st.pool);
@@ -3940,7 +4097,6 @@ async fn admin_settings(State(st): State<AppState>, headers: HeaderMap) -> Respo
          <form method=\"post\" action=\"/admin/settings/save\">{groups}\
            <div class=\"ctoolbar\" style=\"margin-top:1.2rem\">\
              <button class=\"btn\" type=\"submit\">Opslaan</button></div></form>\
-         {pa_block}\
          <div class=\"sgroup\"><h2>Coins per bericht — verdeling</h2>\
           <p class=\"shelp\" style=\"margin:0 0 .6rem\">Gewichten zijn <b>relatief</b>: de som mag alles \
            zijn. Een gewicht van 0,5 naast een 1 betekent gewoon 'half zoveel kans'. Het percentage \
@@ -4013,62 +4169,68 @@ async fn admin_settings_save(
 }
 
 #[derive(Deserialize)]
-struct PassAllowForm {
+struct ItemAllowForm {
+    /// Het item waarvan de namenlijst bewerkt wordt (de testpas).
+    id: i64,
     uid: String,
 }
 
-/// Zet één lid op de testfase-lijst voor de passen (Manage → ⚙ Settings).
+/// Zet één naam op de lijst van dit item (Manage → Shop, het vakje "Naam" op de kaart).
 /// De naam wordt erbij bewaard voor de weergave; de uid is wat telt.
-async fn admin_settings_pass_add(
+async fn admin_item_allow_add(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Form(f): Form<PassAllowForm>,
+    Form(f): Form<ItemAllowForm>,
 ) -> Response {
     if let Some((admin_uid, admin_name)) = require_admin(&st, &headers) {
         let uid = f.uid.trim().to_string();
-        let uname = db::all_member_names(&st.pool)
-            .into_iter()
-            .find(|(u, _)| *u == uid)
-            .map(|(_, n)| n)
-            .unwrap_or_else(|| uid.clone());
-        if db::pass_allow_add(&st.pool, &uid, &uname, now_secs()) {
-            db::log_event(
-                &st.pool,
-                now_secs(),
-                &db::LogEntry::new("admin", "pass_allow")
-                    .actor(&admin_uid, &admin_name)
-                    .detail(format!("＋ {uname} ({uid}) mag passen kopen")),
-            );
+        // Enkel iemand mét een Hytale-naam: dat is exact de keuzelijst die de kaart toont,
+        // en zonder die naam valt er niets te whitelisten.
+        let lid = db::members_with_hytale_name(&st.pool).into_iter().find(|(u, _, _)| *u == uid);
+        if let Some((_, uname, hname)) = lid {
+            if db::item_allow_add(&st.pool, f.id, &uid, &uname, now_secs()) {
+                let item = db::get_item(&st.pool, f.id).map(|i| i.name).unwrap_or_default();
+                db::log_event(
+                    &st.pool,
+                    now_secs(),
+                    &db::LogEntry::new("admin", "pass_allow")
+                        .actor(&admin_uid, &admin_name)
+                        .reference(f.id as u64)
+                        .detail(format!("＋ {uname} ({hname}) mag '{item}' kopen · by {admin_name}")),
+                );
+            }
         }
     }
-    Redirect::to("/admin/settings?saved=1").into_response()
+    Redirect::to(&format!("/admin/market?saved={}#item-{}", f.id, f.id)).into_response()
 }
 
-/// Haal één lid van de testfase-lijst. Vanaf dat moment ziet hij de pas op Out of Stock.
-async fn admin_settings_pass_remove(
+/// Haal één naam van de lijst van dit item. Vanaf dat moment ziet dat lid enkel nog het 🔒.
+async fn admin_item_allow_remove(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Form(f): Form<PassAllowForm>,
+    Form(f): Form<ItemAllowForm>,
 ) -> Response {
     if let Some((admin_uid, admin_name)) = require_admin(&st, &headers) {
         let uid = f.uid.trim().to_string();
         // Naam vóór het verwijderen ophalen — daarna staat ze niet meer in de lijst.
-        let uname = db::pass_allow_list(&st.pool)
+        let uname = db::item_allow_list(&st.pool, f.id)
             .into_iter()
-            .find(|(u, _)| *u == uid)
-            .map(|(_, n)| n)
+            .find(|(u, _, _)| *u == uid)
+            .map(|(_, n, _)| n)
             .unwrap_or_else(|| uid.clone());
-        if db::pass_allow_remove(&st.pool, &uid) {
+        if db::item_allow_remove(&st.pool, f.id, &uid) {
+            let item = db::get_item(&st.pool, f.id).map(|i| i.name).unwrap_or_default();
             db::log_event(
                 &st.pool,
                 now_secs(),
                 &db::LogEntry::new("admin", "pass_allow")
                     .actor(&admin_uid, &admin_name)
-                    .detail(format!("✕ {uname} ({uid}) mag geen passen meer kopen")),
+                    .reference(f.id as u64)
+                    .detail(format!("✕ {uname} mag '{item}' niet meer kopen · by {admin_name}")),
             );
         }
     }
-    Redirect::to("/admin/settings?saved=1").into_response()
+    Redirect::to(&format!("/admin/market?saved={}#item-{}", f.id, f.id)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -4309,7 +4471,11 @@ async fn admin_item_update(
         // spoor is achteraf niet meer te achterhalen wat een item ooit kostte, en dus ook
         // niet waarom een oude aankoop/refund een bepaald bedrag had.
         let before = db::get_item(&st.pool, f.id);
-        let price = f.price.max(0);
+        let test_pass = f.test_pass.is_some();
+        // Een testpas is gratis: het prijsveld staat niet op zijn kaart, en wie het vinkje
+        // net aanzet gaat van "kost 500" naar "kost niets" zonder daar nog iets voor te
+        // moeten doen. Eén regel i.p.v. een prijsveld dat op nul moet blijven staan.
+        let price = if test_pass { 0 } else { f.price.max(0) };
         let name = f.name.trim();
         // `duration == 0` betekent "permanente pas". Een dagpas op 0 minuten zetten zou
         // hem dus stil in een permanente pas veranderen — nooit de bedoeling van dat
@@ -4320,8 +4486,16 @@ async fn admin_item_update(
                 duration = duration.max(60);
             }
         }
-        let sold_out = f.sold_out.is_some();
-        let test_pass = f.test_pass.is_some();
+        // Idem voor voorraad en dagrotatie: die vakjes staan niet op de kaart van een
+        // testpas, dus zorgen we dat ze ook niet stil in de weg kunnen staan — anders
+        // blijft een pas die ooit op "Out of stock" stond onzichtbaar dicht zonder dat er
+        // op zijn kaart nog iets te zien is dat dat verklaart.
+        let sold_out = !test_pass && f.sold_out.is_some();
+        if test_pass {
+            db::set_stock_unlimited(&st.pool, f.id);
+            let w = before.as_ref().map(|b| b.shop_weight).unwrap_or(0.0);
+            db::set_item_rotation(&st.pool, f.id, w, false);
+        }
         db::update_item(
             &st.pool,
             f.id,
@@ -4352,11 +4526,11 @@ async fn admin_item_update(
                     if sold_out { "→ out of stock" } else { "→ back in stock" }.to_string(),
                 );
             }
-            // Wie de testerspoort op een pas aan- of uitzet, verandert wie hem kan kopen —
+            // Wie de testpas-vlag op een pas aan- of uitzet, verandert wie hem kan kopen —
             // dat hoort even goed in het logboek als een prijswijziging.
             if b.test_pass != test_pass {
                 changes.push(
-                    if test_pass { "→ test pass (testers only)" } else { "→ gewone pas" }
+                    if test_pass { "→ test pass (enkel de namenlijst)" } else { "→ gewone pas" }
                         .to_string(),
                 );
             }
@@ -5328,11 +5502,11 @@ mod auto_refresh_script {
     }
 }
 
-/// De testfase-poort op de passen: wie mag er kopen, en wat ziet de rest?
+/// De namenlijst op een testpas: wie mag er kopen, en wat ziet de rest?
 #[cfg(test)]
-mod pass_testfase {
-    use super::{may_buy_pass, shop_slot};
-    use crate::{db, settings};
+mod testpas_namenlijst {
+    use super::{may_buy_test_pass, pass_time_label, shop_slot, still_burning};
+    use crate::db;
 
     fn pool(tag: &str) -> (db::DbPool, std::path::PathBuf) {
         let p = std::env::temp_dir().join(format!("market-pt-{}-{tag}.db", std::process::id()));
@@ -5340,7 +5514,7 @@ mod pass_testfase {
         (db::init_pool(p.to_str().unwrap()), p)
     }
 
-    /// De **testpas**: een pas met het testers-vinkje aan.
+    /// De **testpas**: een pas met het testpas-vinkje aan.
     fn pas() -> db::Item {
         db::Item {
             id: 7,
@@ -5350,7 +5524,7 @@ mod pass_testfase {
             image2: String::new(),
             color: String::new(),
             role_id: String::new(),
-            duration: 6 * 3600,
+            duration: 10 * 60,
             category: "boost".to_string(),
             description: String::new(),
             zone: "shelf".to_string(),
@@ -5363,44 +5537,78 @@ mod pass_testfase {
         }
     }
 
-    /// Schakelaar aan: enkel wie op de lijst staat mag kopen. Uit: iedereen.
-    /// Admins krijgen bewust géén uitzondering — die zetten zichzelf op de lijst.
+    /// De lijst van het ítem beslist — en enkel die van dát item. Admins krijgen bewust
+    /// géén uitzondering: die zetten zichzelf op de lijst.
     #[test]
-    fn de_lijst_beslist_zolang_de_schakelaar_aanstaat() {
+    fn de_lijst_van_het_item_beslist() {
         let (pool, path) = pool("gate");
 
-        // Default: de testfase staat aan. Lege lijst ⇒ niemand.
-        assert!(settings::bool_of(&pool, "pass_allowlist_on"), "staat standaard aan");
-        assert!(!may_buy_pass(&pool, "u1"));
+        // Lege lijst ⇒ niemand.
+        assert!(!may_buy_test_pass(&pool, "u1", 7));
 
-        db::pass_allow_add(&pool, "u1", "Tester", 100.0);
-        assert!(may_buy_pass(&pool, "u1"));
-        assert!(!may_buy_pass(&pool, "u2"), "de rest niet");
-
-        // Schakelaar uit ⇒ de lijst doet niets meer, de pas staat voor iedereen te koop.
-        settings::set(&pool, "pass_allowlist_on", "0");
-        assert!(may_buy_pass(&pool, "u2"));
+        db::item_allow_add(&pool, 7, "u1", "Tester", 100.0);
+        assert!(may_buy_test_pass(&pool, "u1", 7));
+        assert!(!may_buy_test_pass(&pool, "u2", 7), "de rest niet");
+        assert!(!may_buy_test_pass(&pool, "u1", 8), "en enkel voor dit item");
 
         let _ = std::fs::remove_file(path);
     }
 
-    /// Wie niet op de lijst staat ziet Out of Stock — en geen voorraadgetal ernaast,
-    /// want "3 left" naast een dichte knop is tegenstrijdig.
+    /// Een tweede testpas kan pas als de vorige **opgespeeld** is. Gemeten in speeltijd
+    /// (de teller van de tale-kant), niet in wandkloktijd: een pas loopt enkel leeg
+    /// terwijl je in-game bent.
     #[test]
-    fn zonder_pas_recht_toont_de_kaart_out_of_stock() {
-        let mut it = pas();
-        it.stock = 3;
+    fn de_vorige_testpas_moet_eerst_op() {
+        // Gekocht bij teller 1000, pas van 900 s.
+        assert!(still_burning(Some(1000.0), 1000.0, 900), "net gekocht, nog niets gespeeld");
+        assert!(still_burning(Some(1400.0), 1000.0, 900), "halfweg = nog altijd dicht");
+        assert!(!still_burning(Some(1900.0), 1000.0, 900), "precies op ⇒ weer koopbaar");
+        assert!(!still_burning(Some(5000.0), 1000.0, 900), "ruim voorbij ⇒ koopbaar");
+
+        // Nee bij twijfel: geen gegevens van de tale-kant, of een teller die lager staat
+        // dan bij de aankoop (boekhouding aan de overkant heropgestart) ⇒ geen slot.
+        assert!(!still_burning(None, 1000.0, 900), "geen grootboek ⇒ geen slot");
+        assert!(!still_burning(Some(10.0), 1000.0, 900), "teller herbegonnen ⇒ ijkpunt weg");
+    }
+
+    /// Het ijkpunt overleeft een herstart: het staat in de DB, niet in het geheugen.
+    /// Een nieuwe aankoop vervangt de vorige rij (die is dan per definitie opgebrand).
+    #[test]
+    fn het_ijkpunt_staat_in_de_db() {
+        let (pool, path) = pool("hold");
+
+        assert!(db::test_pass_hold_get(&pool, "u1").is_none(), "nog nooit een testpas gekocht");
+
+        db::test_pass_hold_set(&pool, "u1", 7, "Tester", 1000.0, 900, 100.0);
+        assert_eq!(db::test_pass_hold_get(&pool, "u1"), Some(("tester".into(), 1000.0, 900)));
+        assert!(db::test_pass_hold_get(&pool, "u2").is_none(), "en enkel voor hem");
+
+        db::test_pass_hold_set(&pool, "u1", 8, "Tester", 2500.0, 600, 200.0);
+        assert_eq!(
+            db::test_pass_hold_get(&pool, "u1"),
+            Some(("tester".into(), 2500.0, 600)),
+            "één rij per lid: de nieuwe aankoop is het ijkpunt"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Wie niet op de lijst staat ziet enkel een 🔒 op de koopplek — geen "Out of Stock"
+    /// (de pas is niet uitverkocht, hij is niet voor hem) en geen voorraadgetal.
+    #[test]
+    fn zonder_uitnodiging_toont_de_kaart_een_slotje() {
+        let it = pas();
 
         let dicht = shop_slot(&it, false, true, false, 10_000, false);
-        assert!(dicht.contains("Out of Stock"), "geen tester ⇒ dicht");
+        assert!(dicht.contains("lockslot"), "niet op de lijst ⇒ slotje");
+        assert!(!dicht.contains("Out of Stock"), "geen uitverkocht-tekst");
         assert!(!dicht.contains("action=\"/buy\""), "en geen koopformulier");
-        assert!(!dicht.contains("3 left"), "voorraad verzwijgen naast een dichte knop");
 
         let open = shop_slot(&it, false, true, false, 10_000, true);
-        assert!(open.contains("action=\"/buy\""), "tester ⇒ gewoon koopbaar");
-        assert!(open.contains("3 left"));
+        assert!(open.contains("action=\"/buy\""), "op de lijst ⇒ gewoon koopbaar");
+        assert!(!open.contains("lockslot"));
 
-        // Een gewoon shopitem staat volledig los van de pas-poort.
+        // Een gewoon shopitem staat volledig los van de namenlijst.
         let mut gem = pas();
         gem.category = "inventory".to_string();
         gem.duration = 0;
@@ -5408,23 +5616,72 @@ mod pass_testfase {
         assert!(shop_slot(&gem, false, true, false, 10_000, false).contains("action=\"/buy\""));
     }
 
-    /// De **gewone** pas (Meadowland Pass) is een ander systeem: hij staat te koop zodra
-    /// wij hem aanbieden, testtijd of niet. Enkel Out of stock / voorraad 0 sluit hem.
-    /// Dit was de bug: de poort hing aan `category == "boost"` en zette met een lege
-    /// testerslijst óók deze pas op Out of Stock.
+    /// Op de prijsplek van een testpas staat zijn speeltijd, niet zijn (nul-)prijs.
     #[test]
-    fn gewone_pas_trekt_zich_niets_aan_van_de_testerslijst() {
+    fn de_kaart_toont_de_tijd_in_plaats_van_de_prijs() {
+        let mut it = pas();
+        it.duration = 10 * 60;
+        let s = shop_slot(&it, false, true, false, 10_000, true);
+        assert!(s.contains("00H 10M"), "tien minuten ⇒ 00H 10M");
+        assert!(!s.contains("price\">🌼"), "geen muntje/prijs op een gratis pas");
+
+        // Voorraad hoort niet op een testpas thuis, ook niet als er ooit een getal in stond.
+        it.stock = 3;
+        assert!(!shop_slot(&it, false, true, false, 10_000, true).contains("3 left"));
+
+        assert_eq!(pass_time_label(0), "00H 00M");
+        assert_eq!(pass_time_label(90 * 60), "01H 30M");
+        assert_eq!(pass_time_label(26 * 3600), "26H 00M", "boven de dag gewoon meer uren");
+    }
+
+    /// De beheerkaart van een testpas toont enkel wat hem aangaat: een namenlijst met
+    /// keuzelijst, en géén prijs/voorraad/uitverkocht/dagrotatie — die vakjes waren
+    /// clutter op een item dat ze geen van alle gebruikt (user-wens Faybelle 2026-08-13).
+    #[test]
+    fn de_beheerkaart_toont_enkel_wat_de_testpas_aangaat() {
+        let (pool, path) = pool("kaart");
+        db::set_hytale_name(&pool, "u1", "Waldstein", "Waldstein");
+        db::set_hytale_name(&pool, "u2", "FayBelle", "FayBelle");
+        db::item_allow_add(&pool, 7, "u1", "Waldstein", 100.0);
+
+        let kaart = super::admin_item(&pool, &pas(), &[], None, Some(0.5));
+        assert!(kaart.contains("/admin/item/allow/add"), "keuzelijst om een naam toe te voegen");
+        assert!(kaart.contains("/admin/item/allow/remove"), "✕ om er een af te halen");
+        assert!(kaart.contains("Waldstein"), "wie erop staat, staat op de kaart");
+        assert!(kaart.contains("FayBelle"), "wie er niet op staat, is te kiezen");
+        assert!(!kaart.contains("name=\"price\" type="), "geen prijsveld: gratis");
+        assert!(!kaart.contains("name=\"sold_out\""), "geen Out of stock-vinkje");
+        assert!(!kaart.contains("/admin/item/stock"), "geen voorraadvak (ook geen ∞)");
+        assert!(!kaart.contains("/admin/item/rotation"), "geen dagrotatie");
+        // De gewone pas houdt al die vakjes wél.
+        let mut gewoon = pas();
+        gewoon.test_pass = false;
+        let kaart2 = super::admin_item(&pool, &gewoon, &[], None, Some(0.5));
+        assert!(kaart2.contains("name=\"price\" type="));
+        assert!(kaart2.contains("name=\"sold_out\""));
+        assert!(kaart2.contains("/admin/item/stock"));
+        assert!(kaart2.contains("/admin/item/rotation"));
+        assert!(!kaart2.contains("/admin/item/allow/add"), "geen namenlijst op een gewone pas");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// De **gewone** pas (Meadowland Pass) is een ander systeem: hij staat te koop zodra
+    /// wij hem aanbieden, namenlijst of niet. Enkel Out of stock / voorraad 0 sluit hem.
+    #[test]
+    fn gewone_pas_trekt_zich_niets_aan_van_de_namenlijst() {
         let mut it = pas();
         it.name = "Meadowland Pass".to_string();
         it.price = 500;
         it.test_pass = false;
 
-        // Geen tester (pass_ok = false) ⇒ tóch gewoon koopbaar.
+        // Niet op enige lijst (test_ok = false) ⇒ tóch gewoon koopbaar.
         let s = shop_slot(&it, false, true, false, 10_000, false);
         assert!(s.contains("action=\"/buy\""), "gewone pas hoort open te staan");
         assert!(!s.contains("Out of Stock"));
+        assert!(!s.contains("lockslot"));
 
-        // De enige rem die telt: Out of stock.
+        // De enige remmen die tellen: Out of stock ...
         let mut dicht = it.clone();
         dicht.sold_out = true;
         assert!(shop_slot(&dicht, false, true, false, 10_000, false).contains("Out of Stock"));
@@ -5433,22 +5690,5 @@ mod pass_testfase {
         let mut leeg = it.clone();
         leeg.stock = 0;
         assert!(!shop_slot(&leeg, false, true, false, 10_000, false).contains("action=\"/buy\""));
-    }
-
-    /// Zet Faybelle de pas handmatig op Out of stock, dan geldt dat ook voor de testers:
-    /// de testerslijst opent enkel wat verder open staat, ze forceert niets.
-    #[test]
-    fn out_of_stock_wint_van_de_testerslijst() {
-        let mut it = pas();
-        it.sold_out = true;
-        let s = shop_slot(&it, false, true, false, 10_000, true);
-        assert!(s.contains("Out of Stock"), "tester ziet 'm ook dicht");
-        assert!(!s.contains("action=\"/buy\""));
-
-        // Idem voor een voorraad die op nul staat.
-        let mut op = pas();
-        op.sold_out = false;
-        op.stock = 0;
-        assert!(!shop_slot(&op, false, true, false, 10_000, true).contains("action=\"/buy\""));
     }
 }
