@@ -42,6 +42,15 @@ Na de deploy op een kopie van de prod-DB: `pass_allow` weg, `item_allow` bestaat
 > Faybelle geen namen op de Test Pass zet (Manage → Shop, het vakje "Naam" op de kaart),
 > kan **niemand** hem kopen en ziet iedereen het 🔒. Dat is de bedoelde startstand.
 
+### 3. #fortuna-log pingt niemand meer
+
+Elke regel in **#fortuna-log** droeg een `<@id>`-vermelding, dus elk lid werd getagd bij
+elke coin die het verdiende. Het is een meelees-kanaal, geen aanspreekkanaal. Nu staat de
+**naam in het vet** — zowel in `log_earn` (bericht/daily/chest) als in de daily-debugregel,
+die als enige nog een echte vermelding had. **Enkel in dit kanaal**: de publieke regel in
+#coins, de chest-winnaar en de level-up-ping houden hun `<@id>` — daar is de ping de
+bedoeling. (`MEADOWMARKET_LOG_CHANNEL_ID` staat op 0 = uit, maar volgt dezelfde vorm.)
+
 ### 📌 Eindstand van de sessie — open punten voor de volgende
 
 **Waar het staat.** Gedeployd 10:46, gecommit `9851468`, subtree `market-gh` → `92c717f`.
@@ -61,7 +70,11 @@ werkboom is schoon op wat buiten `market/` valt.
 2. **De bevestigingszin na een aankoop** (`Whitelisted as X — N of access left.`) rekent
    nog met wandkloktijd i.p.v. speeltijd. De echte stand staat in `passes.json`, maar die
    is pas ~15 s na de aankoop bijgewerkt. Tekstkeuze is aan Jo.
-3. **De tale-bot schrijft nog altijd geen `"kind"`** in `passes.json` (wijziging van 11/08
+3. **Geparkeerde vraag van Jo (14/08): moeten testpas-aankopen in Discord gemeld worden?**
+   Een gewone pas-aankoop gaat nu via `announce_purchase` naar #coins. Een testpas is
+   gratis en enkel voor genodigden — of dat daar hoort, is niet beslist. Niets aan
+   gewijzigd tot Jo kiest.
+4. **De tale-bot schrijft nog altijd geen `"kind"`** in `passes.json` (wijziging van 11/08
    nooit gedeployed). Market heeft dat niet meer nodig — het nieuwe slot werkt zonder — maar
    zolang dat zo is, is er aan tale-kant **geen apart testpotje**: testtijd en gewone tijd
    zitten in één klok. Wie beide heeft, brandt dus gewone tijd op tijdens een test.

@@ -152,16 +152,21 @@ fn coin_amount(pool: &DbPool) -> i64 {
 }
 
 /// Log een coin-verdienste: `got N coins` → #fortuna-log, `balance: X` →
-/// #meadowmarket-log (getallen in vet). Gebruikt voor berichten, daily én chest.
+/// #meadowmarket-log (namen en getallen in vet). Gebruikt voor berichten, daily én chest.
+///
+/// **Geen `<@id>`-vermeldingen in de logkanalen** (user-wens 2026-08-14): dat zijn
+/// meelees-kanalen, en elke regel pingde het lid in kwestie. De naam staat er dus in het
+/// vet. Elders (bv. de publieke regel in #coins of een chest-winnaar) blijft de
+/// vermelding wél staan — daar is de ping net de bedoeling.
 async fn log_earn(http: &serenity::Http, name: &str, amount: i64, total: i64) {
     if FORTUNA_LOG_CHANNEL_ID != 0 {
         let _ = serenity::ChannelId::new(FORTUNA_LOG_CHANNEL_ID)
-            .say(http, format!("{name} + **{amount}** {COIN_EMOJI}"))
+            .say(http, format!("**{name}** + **{amount}** {COIN_EMOJI}"))
             .await;
     }
     if MEADOWMARKET_LOG_CHANNEL_ID != 0 {
         let _ = serenity::ChannelId::new(MEADOWMARKET_LOG_CHANNEL_ID)
-            .say(http, format!("{name} balance: **{total}** {COIN_EMOJI}"))
+            .say(http, format!("**{name}** balance: **{total}** {COIN_EMOJI}"))
             .await;
     }
 }
@@ -536,7 +541,7 @@ async fn handle_daily(
             .say(
                 &ctx.http,
                 format!(
-                    "🔧 daily — <@{uid}> got **{amount}** {COIN_EMOJI} · streak **{streak}** · rolled in [**{lo}**–**{hi}**] · balance **{total}**"
+                    "🔧 daily — **{name}** got **{amount}** {COIN_EMOJI} · streak **{streak}** · rolled in [**{lo}**–**{hi}**] · balance **{total}**"
                 ),
             )
             .await;
