@@ -42,6 +42,31 @@ Na de deploy op een kopie van de prod-DB: `pass_allow` weg, `item_allow` bestaat
 > Faybelle geen namen op de Test Pass zet (Manage → Shop, het vakje "Naam" op de kaart),
 > kan **niemand** hem kopen en ziet iedereen het 🔒. Dat is de bedoelde startstand.
 
+### 📌 Eindstand van de sessie — open punten voor de volgende
+
+**Waar het staat.** Gedeployd 10:46, gecommit `9851468`, subtree `market-gh` → `92c717f`.
+Alles wat vóór deze sessie ongecommit rondslingerde (`playtime.rs`, `main.rs`, `web.rs`,
+`db.rs`, `settings.rs` + het Test Pass-werk van 13/08) zit nu mee in die commit — de
+werkboom is schoon op wat buiten `market/` valt.
+
+**Afgesloten deze sessie** (waren open punten):
+- Het label heet nu `Hytale gametime` — Jo's keuze, dus geen open tekstbeslissing meer.
+- De **vier Twitch-redeems** van de bug van 04/08 zijn terugbetaald (Jo, 14/08).
+- De **vijf coin-kanalen** die de bot niet ziet: Jo laat dat zo — geen actie meer.
+
+**Nog open:**
+1. **Faybelle moet testers op de Test Pass zetten**, anders staat hij voor iedereen dicht.
+   Manage → Shop → kaart van de Test Pass → vakje "Naam". Prijs (0) en duur (15 min) staan
+   nu wel juist; duur wijzigen kan ze zelf op diezelfde kaart.
+2. **De bevestigingszin na een aankoop** (`Whitelisted as X — N of access left.`) rekent
+   nog met wandkloktijd i.p.v. speeltijd. De echte stand staat in `passes.json`, maar die
+   is pas ~15 s na de aankoop bijgewerkt. Tekstkeuze is aan Jo.
+3. **De tale-bot schrijft nog altijd geen `"kind"`** in `passes.json` (wijziging van 11/08
+   nooit gedeployed). Market heeft dat niet meer nodig — het nieuwe slot werkt zonder — maar
+   zolang dat zo is, is er aan tale-kant **geen apart testpotje**: testtijd en gewone tijd
+   zitten in één klok. Wie beide heeft, brandt dus gewone tijd op tijdens een test.
+   Beslissing daarover ligt aan tale-kant, niet hier.
+
 ## ⏭️ Sessie (2026-08-13) — Test Pass: namenlijst per item, gratis, tijd i.p.v. prijs
 
 **Vraag van Faybelle** (verbatim kern): de Test Pass krijgt een vakje "Naam" met een
