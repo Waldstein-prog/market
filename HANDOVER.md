@@ -12,6 +12,16 @@
 > * Het **panel heeft zijn `Test`-kolom**, in-game staat er een lichtblauwe testklok, en de
 >   speeltijd telt vanaf de go-live (12/08).
 >
+> * **Later die dag, ook vanuit de tale-sessie** (`636c5e7`, `d74e64a`): in de **inventaris**
+>   staat links van het pas-icoon nu hetzelfde logo met een **T** erop (zelfde donkere schijf en
+>   balkjes als het pauzeteken) met de resterende **testtijd** eronder; enkel zichtbaar als er
+>   testtijd is. Daarbij kwam een oude fout boven: die klok telde in de browser door nadat de
+>   speler uitlogde (gold al even lang voor de pas-klok). De pagina haalt de stand nu elke 10 s
+>   op via het nieuwe **`/api/passtime`** (enkel lezen, sessie-gebonden) en telt daartussen enkel
+>   af als de speler écht online is — testtijd eerst, pauzeteken op de klok die stilstaat.
+>   In-game nog te bevestigen. `pass_ledger::Ledger` heeft daarvoor `test_remaining` en
+>   `pass_remaining` naast `remaining` (= de som) gekregen.
+>
 > Wat hieronder staat, blijft correct als **verslag van hoe het die ochtend gebouwd is** —
 > lees het niet als de huidige stand van het koopslot. De rest van de sessie (label,
 > #fortuna-log, Playtime-tab, speeltijd zonder pas) is niet geraakt.
