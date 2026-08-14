@@ -5,7 +5,8 @@
 //! klok bijgehouden. De tale-bot schrijft het resultaat weg in `passes.json`:
 //!
 //! ```json
-//! {"version": 2, "passes": {"Waldstein": {"granted": 3638.0, "used": 0.0, "remaining": 3638.0}}}
+//! {"version": 3, "passes": {"Waldstein": {"test_remaining": 0.0, "pass_remaining": 3638.0,
+//!                                          "kind": "normal", "used": 0.0}}}
 //! ```
 //!
 //! Market is de winkel, niet de klok. Het verkoopt tijd (en stapelt die op `expires`, waar de
@@ -46,7 +47,9 @@ pub struct Ledger {
     /// terwijl hij in-game is — daarmee valt te zien of een gekochte pas al opgebrand is.
     pub used: f64,
     /// Is dit **testtijd**? Tijdens de testfase houdt de tale-kant een apart tegoed bij
-    /// (`"kind": "test"`), en staat het gewone tegoed stil. Market gebruikt dit om een
+    /// (`"kind": "test"`), en staat het gewone tegoed stil. Sinds de testpas-regel van
+    /// 2026-08-14 (één per persoon tot heractivatie) beslist market daar zelf niets meer
+    /// mee; het veld blijft omdat het de stand van de tale-kant beschrijft. Was: om een
     /// tweede testpas te weigeren zolang de eerste nog loopt. Ontbreekt het veld (oudere
     /// tale-bot), dan is het `false` en verandert er hier niets.
     pub test: bool,
@@ -101,11 +104,14 @@ fn sample(path: &str) -> Result<usize, String> {
     let mut fresh: HashMap<String, Entry> = HashMap::new();
     for (name, p) in passes {
         let used = p.get("used").and_then(|u| u.as_f64()).unwrap_or(0.0);
-        let remaining = p
-            .get("remaining")
-            .and_then(|r| r.as_f64())
-            // Ouder formaat of half ingevuld: dan zelf uitrekenen.
-            .unwrap_or_else(|| p.get("granted").and_then(|g| g.as_f64()).unwrap_or(0.0) - used);
+        // Formaat v3: twee potjes apart (testtijd + pastijd). Voor ons telt vooral wat er
+        // samen nog op staat; `kind` zegt welke van de twee nu loopt.
+        let f = |k: &str| p.get(k).and_then(|x| x.as_f64());
+        let remaining = match (f("test_remaining"), f("pass_remaining")) {
+            (Some(t), Some(q)) => t + q,
+            // Ouder formaat (v2) of half ingevuld: dan zelf uitrekenen.
+            _ => f("remaining").unwrap_or_else(|| f("granted").unwrap_or(0.0) - used),
+        };
         let test = p.get("kind").and_then(|k| k.as_str()) == Some("test");
         let key = name.to_lowercase();
         let prev = st.passes.get(&key);

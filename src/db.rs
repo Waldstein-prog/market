@@ -213,11 +213,11 @@ pub fn init_pool(path: &str) -> DbPool {
             added    REAL NOT NULL DEFAULT 0,
             PRIMARY KEY (item_id, user_id)
         );
-        -- Eén rij per lid: de testpas die hij als laatste kocht en nog moet opbranden.
-        -- `used_at` is de stand van de speeltijd-teller (`used` uit passes.json) op het
-        -- moment van de aankoop; pas als die met `duration` seconden gestegen is, is de
-        -- pas uitgewerkt en mag er een volgende gekocht worden. Bewust op speeltijd en
-        -- niet op wandkloktijd: een pas loopt enkel leeg terwijl je in-game bent.
+        -- ONGEBRUIKT sinds 2026-08-14. Hield bij welke testpas een lid nog moest opbranden
+        -- (op speeltijd gemeten) vóór hij een volgende mocht kopen. Die regel is vervangen
+        -- door iets simpelers: één testpas per persoon tot een admin het item opnieuw
+        -- activeert (`items.test_reset_at`). De tabel blijft staan zodat een rollback naar
+        -- de vorige versie zijn gegevens nog vindt; er wordt niet meer in geschreven.
         CREATE TABLE IF NOT EXISTS test_pass_hold (
             user_id  TEXT PRIMARY KEY,
             item_id  INTEGER NOT NULL,
@@ -327,6 +327,11 @@ pub fn init_pool(path: &str) -> DbPool {
     // waardoor een lege testerslijst óók de gewone pas op Out of Stock zette.
     let testpas_is_new = !column_exists(&conn, "items", "test_pass");
     ensure_column(&conn, "items", "test_pass", "INTEGER NOT NULL DEFAULT 0");
+    // Eén testpas per persoon per ronde (Faybelle 2026-08-14): wie hem gekocht heeft, kan hem
+    // niet opnieuw kopen tot een admin op Activate drukt. Dit is het moment van die laatste
+    // activatie; alles wat een lid vóór dat moment kocht telt niet meer mee. 0 = nooit
+    // geactiveerd, en dan telt elke eerdere aankoop dus wél.
+    ensure_column(&conn, "items", "test_reset_at", "REAL NOT NULL DEFAULT 0");
     if testpas_is_new {
         // Eenmalige overname bij het invoeren van de kolom: de bestaande testpas was de
         // gratis pas (prijs 0) — een pas die niets kost is er nooit een om te verkopen.
@@ -792,40 +797,33 @@ pub fn item_allow_has(pool: &DbPool, item_id: i64, uid: &str) -> bool {
     .is_some()
 }
 
-/// Noteer welke testpas dit lid net kocht, met de stand van zijn speeltijd-teller erbij.
-/// Eén rij per lid: een nieuwe aankoop vervangt de vorige (die is dan per definitie
-/// opgebrand, anders had hij niet kunnen kopen).
-pub fn test_pass_hold_set(
-    pool: &DbPool,
-    uid: &str,
-    item_id: i64,
-    hytale_name: &str,
-    used_at: f64,
-    duration: i64,
-    ts: f64,
-) {
-    let conn = pool.get().expect("db");
-    conn.execute(
-        "INSERT INTO test_pass_hold (user_id, item_id, name_lc, used_at, duration, bought)
-              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(user_id) DO UPDATE SET
-              item_id = ?2, name_lc = ?3, used_at = ?4, duration = ?5, bought = ?6",
-        params![uid.trim(), item_id, hytale_name.trim().to_lowercase(), used_at, duration, ts],
-    )
-    .ok();
-}
-
-/// De testpas die dit lid nog moet opbranden: (Hytale-naam in kleine letters, stand van
-/// de speeltijd-teller bij de aankoop, duur in seconden). None = hij kocht er nog nooit een.
-pub fn test_pass_hold_get(pool: &DbPool, uid: &str) -> Option<(String, f64, i64)> {
+/// Kocht dit lid deze testpas al sinds de laatste activatie?
+///
+/// Eén testpas per persoon (Faybelle 2026-08-14): de knop verdwijnt na de aankoop en komt pas
+/// terug als een admin het item opnieuw activeert. We kijken daarvoor naar de aankoop zelf in
+/// `inventory` — dat is de plek waar elke aankoop toch al staat, dus er is geen tweede
+/// boekhouding die uit de pas kan lopen.
+pub fn test_pass_bought_since(pool: &DbPool, item_id: i64, uid: &str) -> bool {
     let conn = pool.get().expect("db");
     conn.query_row(
-        "SELECT name_lc, used_at, duration FROM test_pass_hold WHERE user_id = ?1",
-        params![uid.trim()],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)?)),
+        "SELECT 1 FROM inventory i JOIN items it ON it.id = i.item_id
+          WHERE i.item_id = ?1 AND i.user_id = ?2 AND i.acquired >= it.test_reset_at",
+        params![item_id, uid.trim()],
+        |_| Ok(()),
     )
     .optional()
     .unwrap_or(None)
+    .is_some()
+}
+
+/// Zet de testpas weer open voor iedereen: alle aankopen van vóór nu tellen niet meer mee.
+pub fn test_pass_reactivate(pool: &DbPool, item_id: i64, ts: f64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE items SET test_reset_at = ?2 WHERE id = ?1 AND test_pass = 1",
+        params![item_id, ts],
+    )
+    .ok();
 }
 
 /// De keuzelijst voor zo'n namenlijst: elk gekend lid **met een Hytale-naam**, als

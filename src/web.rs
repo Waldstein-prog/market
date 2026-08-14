@@ -269,6 +269,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/stock", post(admin_item_stock))
         .route("/admin/item/rotation", post(admin_item_rotation))
         .route("/admin/item/allow/add", post(admin_item_allow_add))
+        .route("/admin/item/testpass/activate", post(admin_item_testpass_activate))
         .route("/admin/item/allow/remove", post(admin_item_allow_remove))
         .route("/admin/accounts", get(admin_accounts))
         .route("/admin/accounts/name", post(admin_account_name))
@@ -1831,52 +1832,10 @@ fn may_buy_test_pass(pool: &DbPool, uid: &str, item_id: i64) -> bool {
     if !db::item_allow_has(pool, item_id, uid) {
         return false;
     }
-    // Tester, maar zijn vorige testpas loopt nog: geen tweede erbovenop. Anders zou hij
-    // tijd stapelen die hij tijdens de test nooit opmaakt, en is "15 minuten testen" geen
-    // 15 minuten meer. Zodra de tijd op is (of hij van de lijst gaat) komt de knop terug.
-    !test_pass_running(&db::get_hytale_name(pool, uid)) && !test_pass_burning(pool, uid)
-}
-
-/// Moet de testpas die dit lid als laatste kocht nog opgebrand worden?
-///
-/// Dit is de weg die **niet** van de tale-kant afhangt: bij de aankoop noteert market de
-/// stand van zijn speeltijd-teller (`used` uit `passes.json`), en pas als die met de duur
-/// van die pas gestegen is, is hij uitgewerkt. Nodig omdat `test_pass_running` het veld
-/// `"kind"` vraagt dat de bot op prod (nog) niet schrijft — zonder dit zou het koopslot
-/// daar stilzwijgend niets doen.
-///
-/// **Nee bij twijfel**, net als hiernaast: geen aankoop gekend, of geen gegevens van de
-/// tale-kant (bestand onleesbaar, naam nog niet gekend) ⇒ geen slot. Ook een teller die
-/// lager staat dan bij de aankoop telt als "geen slot": dan is de boekhouding aan de
-/// overkant heropgestart en zegt ons ijkpunt niets meer.
-fn test_pass_burning(pool: &DbPool, uid: &str) -> bool {
-    let Some((name_lc, used_at_buy, duration)) = db::test_pass_hold_get(pool, uid) else {
-        return false;
-    };
-    let used_now = crate::pass_ledger::lookup(&name_lc).map(|l| l.used);
-    still_burning(used_now, used_at_buy, duration)
-}
-
-/// De rekensom van hierboven, los van bestand en DB zodat ze te testen valt.
-/// `used_now` = None ⇒ geen gegevens van de tale-kant ⇒ geen slot.
-fn still_burning(used_now: Option<f64>, used_at_buy: f64, duration: i64) -> bool {
-    let Some(used_now) = used_now else { return false };
-    let burned = used_now - used_at_buy;
-    burned >= 0.0 && burned < duration as f64
-}
-
-/// Loopt er nu testtijd op deze Hytale-naam? Antwoord komt van de tale-kant
-/// (`passes.json`, `"kind": "test"`), want die houdt de klok bij.
-///
-/// **Nee bij twijfel**: geen naam, geen gegevens, of een tale-bot die het veld nog niet
-/// schrijft ⇒ geen slot. Een verkeerd "ja" zou een tester zonder tijd laten vastzitten
-/// zonder dat hij iets kan doen; een verkeerd "nee" kost hoogstens dat hij een tweede pas
-/// koopt die gewoon bij zijn testtijd komt.
-fn test_pass_running(hytale_name: &str) -> bool {
-    if hytale_name.is_empty() {
-        return false;
-    }
-    crate::pass_ledger::lookup(hytale_name).is_some_and(|l| l.test && l.remaining > 0.0)
+    // Eén per persoon (Faybelle 2026-08-14): wie hem gekocht heeft, ziet de knop niet meer
+    // tot een admin het item opnieuw activeert. Zo kan niemand tijd opstapelen door de
+    // koopknop te spammen, en beslist Faybelle zelf wanneer er een nieuwe ronde testtijd is.
+    !db::test_pass_bought_since(pool, item_id, uid)
 }
 
 /// Eén winkelvakje: thumb, naam, prijs, effect-badge en Buy (of Owned voor
@@ -2691,22 +2650,6 @@ async fn buy(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<BuyFo
                 format!("You already have permanent access ({hname}).")
             }
         };
-        // Testpas: leg het ijkpunt vast waarmee we straks zien of hij opgebrand is —
-        // de stand van zijn speeltijd-teller nú. Kent de tale-kant zijn naam nog niet
-        // (eerste pas: het bestand krijgt hem pas na ~15 s), dan is er nog niets van
-        // afgespeeld en is 0 het juiste startpunt.
-        if item.test_pass {
-            let used_now = crate::pass_ledger::lookup(&hname).map(|l| l.used).unwrap_or(0.0);
-            db::test_pass_hold_set(
-                &st.pool,
-                &uid,
-                item.id,
-                &hname,
-                used_now,
-                item.duration,
-                now_secs(),
-            );
-        }
         // Logboek: pas gekocht + wie er onder welke Hytale-naam gewhitelist is.
         db::log_event(
             &st.pool,
@@ -3101,7 +3044,13 @@ fn admin_item(
              <form method=\"post\" action=\"/admin/item/allow/add\" class=\"arow\">\
                <input type=\"hidden\" name=\"id\" value=\"{id}\">\
                <select name=\"uid\" required><option value=\"\">— kies een naam —</option>{opties}</select>\
-               <button class=\"btn small\" type=\"submit\">＋</button></form></div>",
+               <button class=\"btn small\" type=\"submit\">＋</button></form>\
+             <div class=\"lbl\">Nieuwe ronde \
+               <span class=\"hint\">(iedereen op de lijst mag daarna één keer kopen; \
+                wie al kocht krijgt de knop pas hierna terug)</span></div>\
+             <form method=\"post\" action=\"/admin/item/testpass/activate\" class=\"arow\">\
+               <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+               <button class=\"btn small\" type=\"submit\">Activate</button></form></div>",
             id = it.id,
         )
     } else {
@@ -3147,8 +3096,11 @@ fn admin_item(
         String::new()
     };
 
-    // Tweede afbeelding (klein, onder de titel in de shop) — voor elk item beschikbaar.
-    let img2_ui = {
+    // Tweede afbeelding (klein, onder de titel in de shop). Een testpas krijgt er nooit een,
+    // dus staat dat vak daar enkel in de weg (Faybelle 2026-08-14).
+    let img2_ui = if it.test_pass {
+        String::new()
+    } else {
         let thumb2 = if it.image2.is_empty() {
             "<div class=\"thumb2 empty\">— no 2nd image —</div>".to_string()
         } else {
@@ -4270,6 +4222,31 @@ async fn admin_item_allow_add(
                 );
             }
         }
+    }
+    Redirect::to(&format!("/admin/market?saved={}#item-{}", f.id, f.id)).into_response()
+}
+
+/// Zet de testpas open voor een nieuwe ronde: iedereen op de lijst mag daarna één keer kopen.
+///
+/// Eén testpas per persoon is de regel (Faybelle 2026-08-14); dit is de knop die de teller
+/// terugzet. Aankopen van vóór dit moment tellen niet meer mee — er wordt niets verwijderd,
+/// enkel het ijkmoment verzet.
+async fn admin_item_testpass_activate(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<IdForm>,
+) -> Response {
+    if let Some((admin_uid, admin_name)) = require_admin(&st, &headers) {
+        db::test_pass_reactivate(&st.pool, f.id, now_secs());
+        let item = db::get_item(&st.pool, f.id).map(|i| i.name).unwrap_or_default();
+        db::log_event(
+            &st.pool,
+            now_secs(),
+            &db::LogEntry::new("admin", "pass_activate")
+                .actor(&admin_uid, &admin_name)
+                .reference(f.id as u64)
+                .detail(format!("'{item}' opnieuw geactiveerd — iedereen op de lijst mag één keer kopen · by {admin_name}")),
+        );
     }
     Redirect::to(&format!("/admin/market?saved={}#item-{}", f.id, f.id)).into_response()
 }
@@ -5575,7 +5552,7 @@ mod auto_refresh_script {
 /// De namenlijst op een testpas: wie mag er kopen, en wat ziet de rest?
 #[cfg(test)]
 mod testpas_namenlijst {
-    use super::{may_buy_test_pass, pass_time_label, shop_slot, still_burning};
+    use super::{may_buy_test_pass, pass_time_label, shop_slot};
     use crate::db;
 
     fn pool(tag: &str) -> (db::DbPool, std::path::PathBuf) {
@@ -5627,38 +5604,41 @@ mod testpas_namenlijst {
     /// Een tweede testpas kan pas als de vorige **opgespeeld** is. Gemeten in speeltijd
     /// (de teller van de tale-kant), niet in wandkloktijd: een pas loopt enkel leeg
     /// terwijl je in-game bent.
+    /// Eén testpas per persoon, tot een admin hem opnieuw activeert.
     #[test]
-    fn de_vorige_testpas_moet_eerst_op() {
-        // Gekocht bij teller 1000, pas van 900 s.
-        assert!(still_burning(Some(1000.0), 1000.0, 900), "net gekocht, nog niets gespeeld");
-        assert!(still_burning(Some(1400.0), 1000.0, 900), "halfweg = nog altijd dicht");
-        assert!(!still_burning(Some(1900.0), 1000.0, 900), "precies op ⇒ weer koopbaar");
-        assert!(!still_burning(Some(5000.0), 1000.0, 900), "ruim voorbij ⇒ koopbaar");
+    fn een_testpas_per_persoon_tot_heractivatie() {
+        let (pool, path) = pool("testpas");
+        // Item 7 is de testpas; u1 staat op de lijst, u2 niet.
+        {
+            let c = pool.get().unwrap();
+            c.execute(
+                "INSERT INTO items (id, name, price, category, duration, test_pass, test_reset_at)
+                      VALUES (7, 'Test Pass', 0, 'boost', 900, 1, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        db::item_allow_add(&pool, 7, "u1", "Tester", 100.0);
 
-        // Nee bij twijfel: geen gegevens van de tale-kant, of een teller die lager staat
-        // dan bij de aankoop (boekhouding aan de overkant heropgestart) ⇒ geen slot.
-        assert!(!still_burning(None, 1000.0, 900), "geen grootboek ⇒ geen slot");
-        assert!(!still_burning(Some(10.0), 1000.0, 900), "teller herbegonnen ⇒ ijkpunt weg");
-    }
+        assert!(may_buy_test_pass(&pool, "u1", 7), "op de lijst en nog niets gekocht");
+        assert!(!may_buy_test_pass(&pool, "u2", 7), "niet op de lijst");
 
-    /// Het ijkpunt overleeft een herstart: het staat in de DB, niet in het geheugen.
-    /// Een nieuwe aankoop vervangt de vorige rij (die is dan per definitie opgebrand).
-    #[test]
-    fn het_ijkpunt_staat_in_de_db() {
-        let (pool, path) = pool("hold");
+        // De aankoop zelf is wat telt — die staat in inventory.
+        {
+            let c = pool.get().unwrap();
+            c.execute(
+                "INSERT INTO inventory (user_id, item_id, name, price, acquired)
+                      VALUES ('u1', 7, 'Test Pass', 0, 1000.0)",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(!may_buy_test_pass(&pool, "u1", 7), "gekocht ⇒ knop weg");
 
-        assert!(db::test_pass_hold_get(&pool, "u1").is_none(), "nog nooit een testpas gekocht");
-
-        db::test_pass_hold_set(&pool, "u1", 7, "Tester", 1000.0, 900, 100.0);
-        assert_eq!(db::test_pass_hold_get(&pool, "u1"), Some(("tester".into(), 1000.0, 900)));
-        assert!(db::test_pass_hold_get(&pool, "u2").is_none(), "en enkel voor hem");
-
-        db::test_pass_hold_set(&pool, "u1", 8, "Tester", 2500.0, 600, 200.0);
-        assert_eq!(
-            db::test_pass_hold_get(&pool, "u1"),
-            Some(("tester".into(), 2500.0, 600)),
-            "één rij per lid: de nieuwe aankoop is het ijkpunt"
-        );
+        // Admin drukt op Activate: alles van vóór dat moment telt niet meer mee.
+        db::test_pass_reactivate(&pool, 7, 2000.0);
+        assert!(may_buy_test_pass(&pool, "u1", 7), "opnieuw geactiveerd ⇒ knop terug");
+        assert!(!may_buy_test_pass(&pool, "u2", 7), "maar nog altijd enkel voor de lijst");
 
         let _ = std::fs::remove_file(path);
     }
