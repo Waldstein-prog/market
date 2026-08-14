@@ -1,5 +1,21 @@
 # Handover — Meadow Market (2026-08-14)
 
+> ⚠️ **Deels achterhaald, diezelfde dag nog.** Om 14:20 heeft de **tale-sessie** de
+> `TODO-testtimer` afgewerkt in commit `0851e4c` (*"testtijd als eigen potje, met een tweede
+> klok en één testpas per persoon"*), en die raakt óók market:
+> * De **speeltijd-hold** hieronder (`test_pass_hold`, punt 2) is **weg**. In de plaats: een
+>   testpas is nog maar **één keer per persoon** te kopen, tot een admin op **Activate**
+>   drukt in de shop-instellingen. Alles van vóór dat moment telt dan niet meer mee.
+> * `passes.json` is nu **v3**: de bot schrijft `test_remaining` en `pass_remaining` apart uit,
+>   de mod telt zelf af (**testtijd eerst**, dan pastijd) en rapporteert per potje terug.
+>   `pass_ledger.rs` leest die twee velden en toont het lopende potje.
+> * Het **panel heeft zijn `Test`-kolom**, in-game staat er een lichtblauwe testklok, en de
+>   speeltijd telt vanaf de go-live (12/08).
+>
+> Wat hieronder staat, blijft correct als **verslag van hoe het die ochtend gebouwd is** —
+> lees het niet als de huidige stand van het koopslot. De rest van de sessie (label,
+> #fortuna-log, Playtime-tab, speeltijd zonder pas) is niet geraakt.
+
 ## ⏭️ Sessie (2026-08-14) — een tweede testpas pas als de vorige opgespeeld is
 
 **Alles LIVE** (deploy 10:46, site 200, geen warnings). Backup vóór de migratie:
@@ -76,10 +92,18 @@ dat via een aankoop, de Twitch-koppeling of Manage → Accounts.
 
 ### 📌 Eindstand van de sessie — open punten voor de volgende
 
-**Waar het staat.** Gedeployd 10:46, gecommit `9851468`, subtree `market-gh` → `92c717f`.
+**Waar het staat.** Vier deploys deze dag, elk meteen gecommit + via subtree gepusht:
+
+| tijd | wat | commit |
+|---|---|---|
+| 10:46 | koopslot testpas + Test Pass-werk van 13/08 + label | `9851468` → `92c717f` |
+| 11:09 | label bijgesteld naar `Time spent in Meadowland` | `…` → `2b9f800` |
+| 11:30 | #fortuna-log zonder pings | `7afc9f3` → `7116b57` |
+| 12:00 | Playtime-tab + speeltijd zonder pas | `d7ae9f6` |
+
 Alles wat vóór deze sessie ongecommit rondslingerde (`playtime.rs`, `main.rs`, `web.rs`,
-`db.rs`, `settings.rs` + het Test Pass-werk van 13/08) zit nu mee in die commit — de
-werkboom is schoon op wat buiten `market/` valt.
+`db.rs`, `settings.rs` + het Test Pass-werk van 13/08) zit mee in de eerste commit — de
+werkboom is schoon op wat buiten `market/` valt. 76 tests groen.
 
 **Afgesloten deze sessie** (waren open punten):
 - Het label heet nu `Time spent in Meadowland` — Jo's keuze, dus geen open tekstbeslissing meer.
@@ -95,18 +119,18 @@ werkboom is schoon op wat buiten `market/` valt.
    is pas ~15 s na de aankoop bijgewerkt. Tekstkeuze is aan Jo.
 3. **Beslist (14/08): testpas-aankopen wórden in Discord gemeld** — `announce_purchase`
    blijft dus ongemoeid, ook voor een gratis testpas. Geen actie meer.
-4. **De testtimer zelf ligt bij tale** — zie `tale/TODO-testtimer.md` (in deze sessie
-   geschreven, niet gecommit): tweede timer met voorrang, `Test`-kolom in het panel, en de
-   speeltijd herberekenen vanaf **wo 12/08 00:00 Brussel** (`1786485600`). Faybelle doet dat
-   daar. ⚠️ Belangrijkste valstrik die erin staat: de bestaande twee-potjes-code van 11/08
-   zomaar deployen is **fout** — ze beslist "testtijd?" op `settings.pass_allowlist_on`, en
-   die instelling bestaat sinds 13/08 niet meer (default = aan ⇒ *alle* tijd zou testtijd
-   worden). Het moet per aankoop: `items.test_pass` van het gekochte item, langs dezelfde
-   weg als `pass_duration_of`.
-5. **De tale-bot schrijft nog altijd geen `"kind"`** in `passes.json` (wijziging van 11/08
-   nooit gedeployed). Market heeft dat niet meer nodig — het nieuwe slot werkt zonder — maar
-   zolang dat zo is, is er aan tale-kant **geen apart testpotje**: testtijd en gewone tijd
-   zitten in één klok. Wie beide heeft, brandt dus gewone tijd op tijdens een test.
+4. ~~**De testtimer ligt bij tale**~~ — **afgewerkt** door de tale-sessie op 14/08 om 14:20
+   (`0851e4c`): tweede timer met voorrang, `Test`-kolom in het panel, speeltijd vanaf de
+   go-live, en aan market-kant het koopslot vervangen door "één testpas per persoon tot een
+   admin op **Activate** drukt". `tale/TODO-testtimer.md` is daarmee afgehandeld.
+   > Ter herinnering waarom het potje daar hoort en niet hier: de klok is van de server
+   > (alleen die weet wie in-game is) en market schrijft nooit in `passes.json` — één
+   > schrijver per teller, de afspraak sinds 04/08. Market levert enkel het signaal
+   > (`items.test_pass` van het gekochte item, in de rij die de bot al leest voor de duur).
+5. **Push-topologie: pas op met `git subtree push`.** De tale-sessie committeerde in dezelfde
+   monorepo óók market-bestanden en pushte de subtree zelf. Sindsdien verschilt de lokale
+   split van wat op `market-gh/main` staat en wordt een gewone `git subtree push` geweigerd
+   (non-fast-forward). Niet forcen — dat gooit hun commit weg. Zie de eindnoot hieronder.
    Beslissing daarover ligt aan tale-kant, niet hier.
 
 ## ⏭️ Sessie (2026-08-13) — Test Pass: namenlijst per item, gratis, tijd i.p.v. prijs
