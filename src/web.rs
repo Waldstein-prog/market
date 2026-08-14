@@ -674,6 +674,22 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   border:1px solid rgba(232,240,228,.22);display:flex;align-items:center;
   justify-content:center;gap:7px}}
 .passpause i{{display:block;width:9px;height:26px;border-radius:2px;background:#e8f0e4}}
+/* Testpas: hetzelfde logo, maar met een T op dezelfde donkere schijf. De T is uit twee
+   balkjes opgebouwd — exact hetzelfde materiaal als het pauzeteken, zodat de twee knoppen
+   als één familie lezen. */
+.passT{{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:56px;height:56px;border-radius:50%;background:rgba(14,21,16,.78);
+  border:1px solid rgba(232,240,228,.22);display:flex;align-items:center;
+  justify-content:center}}
+.passT b{{position:relative;display:block;width:30px;height:9px;border-radius:2px;
+  background:#e8f0e4}}
+.passT b::after{{content:"";position:absolute;left:50%;top:9px;transform:translateX(-50%);
+  width:9px;height:22px;border-radius:2px;background:#e8f0e4}}
+/* De twee passen naast elkaar: testtijd links (die loopt eerst), gewone pas rechts. */
+.passrow{{display:flex;justify-content:center;align-items:flex-start;gap:1.6rem;
+  flex-wrap:wrap}}
+.passrow .passbtn{{margin-top:0}}
+.passcol{{margin:1.4rem 0 0}}
 /* De afteller onder het logo. Tabular-nums zodat de cijfers niet zitten te wiebelen. */
 .passtime{{display:block;text-align:center;margin:.55rem auto 0;
   color:#e8f0e4;font:800 1.35rem/1.2 system-ui,sans-serif;
@@ -1305,17 +1321,28 @@ fn inventory_home(
             ""
         };
         format!(
-            "<div class=\"passbtn\"><img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">\
-               {pause_mark}</div>{below}"
+            "<div class=\"passcol\"><div class=\"passbtn\">\
+               <img src=\"/img/hytalepass.png\" alt=\"Hytale Day Pass\">{pause_mark}</div>{below}</div>"
         )
     };
+    // Hetzelfde logo met een T erop: de TESTtijd. Staat links van de gewone pas, want die
+    // loopt eerst leeg. Verschijnt enkel als er testtijd is (Faybelle 2026-08-14) — anders
+    // zou er een tweede knop op 0m staan.
+    let test_btn = |below: String| {
+        format!(
+            "<div class=\"passcol\"><div class=\"passbtn\">\
+               <img src=\"/img/hytalepass.png\" alt=\"Test Pass\">\
+               <span class=\"passT\" aria-label=\"test time\"><b></b></span></div>{below}</div>"
+        )
+    };
+
     // Countdown-script: telt af naar `data-passexp`. Enkel zinvol terwijl de klok loopt.
-    let ticker = "<script>(function(){var e=document.querySelector('[data-passexp]');if(!e)return;\
+    let ticker = "<script>(function(){document.querySelectorAll('[data-passexp]').forEach(function(e){\
            var exp=+e.dataset.passexp;function t(){var s=Math.max(0,exp-Date.now()/1000);\
            var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);\
            e.textContent=s>0?(h>0?h+'h '+m+'m':m+'m '+sec+'s'):'expired';\
            e.classList.toggle('out',s<=0);\
-           if(s>0)setTimeout(t,1000);}t();})();</script>";
+           if(s>0)setTimeout(t,1000);}t();});})();</script>";
     // Vaste weergave van een stilstaande teller (zelfde vorm als het script hierboven).
     let still = |secs: f64| {
         let s = secs.max(0.0) as i64;
@@ -1328,20 +1355,31 @@ fn inventory_home(
     // De resterende SPEELTIJD zoals de tale-kant hem kent. Speelt hij nu, dan loopt de
     // teller; staat hij niet op de server, dan staat de tijd stil en zegt het pauzeteken dat.
     let from_ledger = |l: crate::pass_ledger::Ledger| {
-        if l.online {
-            format!(
-                "{}{ticker}",
-                pass_btn(
-                    false,
-                    format!(
-                        "<span class=\"passtime\" data-passexp=\"{}\">…</span>",
-                        now_secs() + l.remaining
-                    )
+        // TESTTIJD EERST — precies zoals in-game: zolang daar iets op staat, telt die klok
+        // af en staat de pas-klok stil (met pauzeteken). Beide getallen komen rechtstreeks
+        // van de tale-kant; hier wordt niets bijgehouden, gewijzigd of teruggezet, dus deze
+        // weergave kan niemand tijd kosten.
+        let test_loopt = l.online && l.test_remaining > 0.0;
+        let pas_loopt = l.online && l.test_remaining <= 0.0;
+        let klok = |secs: f64, loopt: bool| {
+            if loopt {
+                format!(
+                    "<span class=\"passtime\" data-passexp=\"{}\">…</span>",
+                    now_secs() + secs
                 )
-            )
+            } else {
+                format!("<span class=\"passtime\">{}</span>", still(secs))
+            }
+        };
+        let links = if l.test_remaining > 0.0 {
+            test_btn(klok(l.test_remaining, test_loopt))
         } else {
-            pass_btn(true, format!("<span class=\"passtime\">{}</span>", still(l.remaining)))
-        }
+            String::new()
+        };
+        format!(
+            "<div class=\"passrow\">{links}{}</div>{ticker}",
+            pass_btn(!pas_loopt, klok(l.pass_remaining, pas_loopt))
+        )
     };
     let pass_row = match db::get_whitelist_linked(pool, uid, now_secs()) {
         // Permanente pas: niets af te tellen → geen knop.

@@ -39,8 +39,12 @@ const ONLINE_GRACE: Duration = Duration::from_secs(90);
 /// Wat market van één pas moet weten om hem te tonen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ledger {
-    /// Resterende speeltijd in seconden.
+    /// Resterende speeltijd in seconden, beide potjes samen (test + pas).
     pub remaining: f64,
+    /// Enkel de resterende TESTtijd (uit een Test Pass). Loopt altijd eerst leeg.
+    pub test_remaining: f64,
+    /// Enkel de resterende gewone PAStijd. Staat stil zolang er testtijd is.
+    pub pass_remaining: f64,
     /// Speelt hij nu? (afgeleid uit een stijgende `used`-teller)
     pub online: bool,
     /// Hoeveel speeltijd er in totaal al van zijn passen af is. Enkel stijgend, en enkel
@@ -66,6 +70,8 @@ struct State {
 #[derive(Clone, Copy)]
 struct Entry {
     remaining: f64,
+    test_remaining: f64,
+    pass_remaining: f64,
     used: f64,
     /// `kind == "test"`: de tale-kant telt nu testtijd af (zie `Ledger::test`).
     test: bool,
@@ -88,6 +94,8 @@ pub fn lookup(hytale_name: &str) -> Option<Ledger> {
     let e = st.passes.get(&hytale_name.to_lowercase())?;
     Some(Ledger {
         remaining: e.remaining.max(0.0),
+        test_remaining: e.test_remaining.max(0.0),
+        pass_remaining: e.pass_remaining.max(0.0),
         online: e.last_rise.is_some_and(|t| t.elapsed() < ONLINE_GRACE),
         used: e.used,
         test: e.test,
@@ -107,11 +115,13 @@ fn sample(path: &str) -> Result<usize, String> {
         // Formaat v3: twee potjes apart (testtijd + pastijd). Voor ons telt vooral wat er
         // samen nog op staat; `kind` zegt welke van de twee nu loopt.
         let f = |k: &str| p.get(k).and_then(|x| x.as_f64());
-        let remaining = match (f("test_remaining"), f("pass_remaining")) {
-            (Some(t), Some(q)) => t + q,
-            // Ouder formaat (v2) of half ingevuld: dan zelf uitrekenen.
-            _ => f("remaining").unwrap_or_else(|| f("granted").unwrap_or(0.0) - used),
+        let (test_remaining, pass_remaining) = match (f("test_remaining"), f("pass_remaining")) {
+            (Some(t), Some(q)) => (t, q),
+            // Ouder formaat (v2) of half ingevuld: één klok, en die telt als pastijd — zo
+            // ziet niemand plots een testklok die er niet is, en gaat er geen tijd verloren.
+            _ => (0.0, f("remaining").unwrap_or_else(|| f("granted").unwrap_or(0.0) - used)),
         };
+        let remaining = test_remaining + pass_remaining;
         let test = p.get("kind").and_then(|k| k.as_str()) == Some("test");
         let key = name.to_lowercase();
         let prev = st.passes.get(&key);
@@ -121,7 +131,7 @@ fn sample(path: &str) -> Result<usize, String> {
             Some(old) => old.last_rise,
             None => None,
         };
-        fresh.insert(key, Entry { remaining, used, last_rise, test });
+        fresh.insert(key, Entry { remaining, test_remaining, pass_remaining, used, last_rise, test });
     }
     st.passes = fresh;
     st.have_data = true;
