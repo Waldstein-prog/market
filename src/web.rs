@@ -1333,11 +1333,14 @@ fn inventory_home(
         )
     };
 
-    // Vaste weergave van een stilstaande teller.
+    // Vaste weergave van een stilstaande teller. Seconden staan er ALTIJD bij — dit is
+    // dezelfde klok als in het panel (`fmtRem`), en die toont ze ook boven het uur. Zonder
+    // dat leek de klok in de inventaris stil te staan bij wie nog uren over had, terwijl hij
+    // in het panel gewoon per seconde terugliep (user-wens Faybelle 2026-08-15).
     let still = |secs: f64| {
         let s = secs.max(0.0) as i64;
         if s >= 3600 {
-            format!("{}h {}m", s / 3600, (s % 3600) / 60)
+            format!("{}h {}m {}s", s / 3600, (s % 3600) / 60, s % 60)
         } else {
             format!("{}m {}s", s / 60, s % 60)
         }
@@ -1361,7 +1364,7 @@ fn inventory_home(
       var tc=row.querySelector('[data-clock=test]'),pc=row.querySelector('[data-clock=pass]');\
       var st={online:row.dataset.online==='1',test:+row.dataset.test,pass:+row.dataset.pass};\
       function fmt(s){s=Math.max(0,Math.floor(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;\
-        return h>0?(h+'h '+m+'m'):(m+'m '+x+'s');}\
+        return h>0?(h+'h '+m+'m '+x+'s'):(m+'m '+x+'s');}\
       function draw(){var heeftTest=st.test>0.5;\
         if(tcol)tcol.hidden=!heeftTest;\
         if(tc)tc.textContent=fmt(st.test);\
