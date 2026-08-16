@@ -41,9 +41,11 @@ async fn main() {
 
     // Resterende speeltijd per pas komt van de tale-kant (passes.json) — die houdt de klok
     // bij, want alleen de server weet wie er online is. Wij lezen enkel mee, zodat de site
-    // dezelfde tijd toont als het spel.
+    // dezelfde tijd toont als het spel. Springt zo'n tegoed omhoog, dan is dát het bewijs
+    // dat een pas ook echt tijd opleverde: die toekenning gaat in het serverlogboek.
+    let ledger_pool = pool.clone();
     tokio::spawn(async move {
-        pass_ledger::run().await;
+        pass_ledger::run(ledger_pool).await;
     });
 
     // Totale speeltijd per speler (playtime.json) — dezelfde afspraak: tale telt, wij tonen.

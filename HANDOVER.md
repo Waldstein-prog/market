@@ -1,4 +1,62 @@
-# Handover — Meadow Market (2026-08-14)
+# Handover — Meadow Market (2026-08-16)
+
+## ✅ 2026-08-16 (nacht, met Faybelle) — de Log toont nu ook toegekende speeltijd
+
+**LIVE** (deploy 23:16, service actief, grootboek gelezen: 8 passen). In-game nog niet
+waargenomen: er was op dat moment geen aankoop om te tonen.
+
+### Waarom
+
+De Log liet zien *dát* iemand een Meadowland Pass kocht, maar niet of die aankoop ook echt
+speeltijd opleverde, en al helemaal niet hoeveel tijd hij daarna had staan. Faybelle had dus
+geen enkele manier om "ik heb betaald maar er kwam niks bij" na te kijken — en dat is een
+gratis refund voor wie het beweert.
+
+### Wat er nu gebeurt
+
+Nieuwe log-categorie **`hytale`** met een eigen filterknop **🎮 Hytale** (`LOG_GROUPS` in
+`web.rs`), twee events:
+
+* `time_added` — ⏱ gewone pastijd erbij
+* `test_added` — 🧪 testtijd erbij (eigen potje, dus eigen regel)
+
+Detail leest als `Waldstein +2h 00m pass time → 2h 30m left`; `amount` = de toegevoegde
+**minuten**. Lopen test- én pastijd naast elkaar, dan splitst de tekst het uit
+(`… left, … in total`).
+
+### De bron is passes.json, niet onze eigen aankoop
+
+Market schrijft die tijd nooit zelf: het stapelt enkel `expires`, en de tale-kant zet dat om in
+speeltijd. Het énige echte bewijs van een geslaagde toekenning is dus dat het tegoed in
+**`passes.json` omhoog springt**. `pass_ledger::sample` (die dat bestand toch al elke 20 s las)
+vergelijkt nu per speler met de vorige stand en geeft elke stijging terug als een `Grant`;
+`run()` schrijft die weg via `log_grant`. Gevolg: **elke** toekenning komt erin — gekochte pas,
+Twitch-redeem, admin-ingreep — en niet enkel wat via de winkelknop liep.
+
+* Een toekenning staat ~20-35 s na de aankoop in de Log (het bemonsteringsritme).
+* De speler staat er onder zijn **Discord**-naam (`db::member_by_hytale_name`, nieuw); is er
+  geen lid aan die in-game naam te hangen (Twitch-pas zonder koppeling), dan de in-game naam.
+* Geen refund-knop op deze regels — die blijft aan `category = "shop"` hangen. Dit is een
+  boekhoudregel, geen aankoop.
+
+### Twee dingen om te onthouden
+
+1. **De eerste lezing na een herstart logt nooit.** Zonder vorige stand zou élke lopende pas als
+   "net toegekend" lezen; `sample` ijkt dan enkel (`baseline`). Een speler die *later* nieuw in
+   het bestand opduikt, telt wél als toekenning — dat is zijn eerste pas.
+2. **Drempel `GRANT_MIN` = 5 s**, tegen afrondingsruis van de tale-kant. Ruim onder de kortste
+   testwaarde die een admin kan zetten (60 s).
+
+⚠️ De tests in `pass_ledger.rs` delen proces-brede state (één grootboek per market) en
+`cargo test` draait parallel. Elke test pakt daarom `begin()`: die neemt een sleutel én zet de
+state leeg. Zonder dat hangt "is dit de eerste lezing?" van de toevallige volgorde af. Vergeet
+`begin()` niet in een nieuwe test hier.
+
+### Los daarvan opgemerkt (niet aangeraakt)
+
+Bij de start stond `playtime.json` 5 min stil terwijl `hytale-playtime.service` én de server
+draaiden, dus viel de online-detectie even terug op de oude gok (`ONLINE_GRACE`). Bestond al
+vóór deze wijziging; Faybelle heeft het bewust laten liggen.
 
 ## ✅ 2026-08-14 (nacht, met Faybelle) — namen boven de pas-icoontjes + de klok stopt echt
 

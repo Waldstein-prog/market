@@ -27,6 +27,7 @@
 //! en valt de site terug op de oude weergave (aftellen op `expires`). Market schrijft nooit
 //! in dit bestand.
 
+use crate::db::{self, DbPool};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -51,6 +52,26 @@ const PLAYTIME_EVERY: Duration = Duration::from_secs(5);
 /// gepauzeerd — maar dus ook ruim ná het uitloggen. Enkel in gebruik als `playtime.json`
 /// niets bruikbaars zegt.
 const ONLINE_GRACE: Duration = Duration::from_secs(90);
+/// Hoeveel het tegoed minstens moet stijgen voor we het een toekenning noemen. Een tegoed
+/// zakt terwijl iemand speelt; het stijgt enkel als er tijd bij komt. De drempel vangt
+/// afrondingsruis van de tale-kant op, en ligt ruim onder de kortste testwaarde (60s).
+const GRANT_MIN: f64 = 5.0;
+
+/// Er is speeltijd bijgekomen op de klok van de tale-kant. Dít is het bewijs dat een
+/// aankoop ook echt tijd opleverde: market stapelt enkel `expires`, de server zet dat om.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grant {
+    /// De Hytale-naam zoals ze in `passes.json` staat.
+    pub name: String,
+    /// Hoeveel seconden erbij kwamen.
+    pub added: f64,
+    /// Wat er ná de toekenning op dat potje stond.
+    pub after: f64,
+    /// Wat er ná de toekenning in totaal op de klok stond (test + pas samen).
+    pub total_after: f64,
+    /// Testtijd (aparte pot) i.p.v. gewone pastijd.
+    pub test: bool,
+}
 
 /// Wat market van één pas moet weten om hem te tonen.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -151,13 +172,19 @@ fn sample_playtime(path: &str) -> Result<usize, String> {
     Ok(st.online_now.len())
 }
 
-/// Lees het bestand één keer in en werk de toestand bij.
-fn sample(path: &str) -> Result<usize, String> {
+/// Lees het bestand één keer in en werk de toestand bij. Geeft het aantal passen terug
+/// plus elke **stijging** van een tegoed sinds de vorige lezing — de toekenningen die het
+/// logboek moet vastleggen. De allereerste lezing (na een herstart van market) levert er
+/// nooit: dan is er geen vorige stand, en zou elke lopende pas als "net toegekend" lezen.
+fn sample(path: &str) -> Result<(usize, Vec<Grant>), String> {
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let passes = v.get("passes").and_then(|p| p.as_object()).ok_or("geen passes-object")?;
 
     let mut st = state().lock().map_err(|_| "state vergrendeld")?;
+    // Zonder vorige lezing is er niets om mee te vergelijken: dan enkel ijken.
+    let baseline = !st.have_data;
+    let mut grants: Vec<Grant> = Vec::new();
     let mut fresh: HashMap<String, Entry> = HashMap::new();
     for (name, p) in passes {
         let used = p.get("used").and_then(|u| u.as_f64()).unwrap_or(0.0);
@@ -180,22 +207,91 @@ fn sample(path: &str) -> Result<usize, String> {
             Some(old) => old.last_rise,
             None => None,
         };
+        // Een tegoed dat omhoog gaat, kan maar één oorzaak hebben: er is tijd bijgekocht,
+        // ingewisseld of toegekend. (Spelen laat het zakken, een refund ook.) Beide potjes
+        // apart, zodat testtijd niet als gewone pastijd in het logboek belandt.
+        if !baseline {
+            let (was_test, was_pass) = match prev {
+                Some(old) => (old.test_remaining, old.pass_remaining),
+                // Nieuw in het bestand ⇒ zijn eerste pas: alles wat erop staat is nieuw.
+                None => (0.0, 0.0),
+            };
+            for (added, after, is_test) in [
+                (pass_remaining - was_pass, pass_remaining, false),
+                (test_remaining - was_test, test_remaining, true),
+            ] {
+                if added > GRANT_MIN {
+                    grants.push(Grant {
+                        name: name.clone(),
+                        added,
+                        after,
+                        total_after: remaining,
+                        test: is_test,
+                    });
+                }
+            }
+        }
         fresh.insert(key, Entry { remaining, test_remaining, pass_remaining, used, last_rise, test });
     }
     st.passes = fresh;
     st.have_data = true;
-    Ok(st.passes.len())
+    Ok((st.passes.len(), grants))
 }
 
-/// Achtergrondtaak: houdt de gegevens vers.
-pub async fn run() {
+/// Seconden als `2h 05m` / `45m` — het logboek moet in één oogopslag leesbaar zijn.
+fn hm(secs: f64) -> String {
+    let s = secs.round().max(0.0) as i64;
+    let (h, m) = (s / 3600, (s % 3600) / 60);
+    if h > 0 {
+        format!("{h}h {m:02}m")
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Schrijf één toekenning in het serverlogboek (categorie `hytale`). De speler staat er
+/// onder zijn Discord-naam als we die kennen — anders onder zijn in-game naam, want een
+/// Twitch-pas van iemand zonder Discord-koppeling hoort evengoed in het logboek.
+fn log_grant(pool: &DbPool, g: &Grant) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+    let member = db::member_by_hytale_name(pool, &g.name);
+    let (uid, who) = match &member {
+        Some((u, n)) => (u.as_str(), n.as_str()),
+        None => ("", g.name.as_str()),
+    };
+    let pot = if g.test { "test time" } else { "pass time" };
+    // Heeft hij maar één potje lopen, dan is "op die pas" en "in totaal" hetzelfde getal —
+    // dat twee keer zetten leest als een fout. Enkel bij test + pas naast elkaar splitsen.
+    let after = if (g.total_after - g.after).abs() < 1.0 {
+        format!("{} left", hm(g.after))
+    } else {
+        format!("{} {pot} left, {} in total", hm(g.after), hm(g.total_after))
+    };
+    let detail = format!("{} +{} {pot} → {after}", g.name, hm(g.added));
+    db::log_event(
+        pool,
+        now,
+        &db::LogEntry::new("hytale", if g.test { "test_added" } else { "time_added" })
+            .actor(uid, who)
+            // Minuten, niet seconden: de bedragkolom moet leesbaar blijven.
+            .amount((g.added / 60.0).round() as i64)
+            .detail(detail),
+    );
+}
+
+/// Achtergrondtaak: houdt de gegevens vers, en legt elke toekenning van speeltijd vast
+/// in het serverlogboek (categorie `hytale`).
+pub async fn run(pool: DbPool) {
     let path = std::env::var("MARKET_PASSES_JSON").unwrap_or_else(|_| DEFAULT_PATH.to_string());
     let ptpath =
         std::env::var("MARKET_PLAYTIME_JSON").unwrap_or_else(|_| DEFAULT_PLAYTIME.to_string());
     // Eén keer luid zeggen of dit werkt: zonder leesrecht is de pas-teller op de site de
     // oude wandklok, en dat wil je weten vóór iemand zich afvraagt waarom de tijd niet klopt.
     match sample(&path) {
-        Ok(n) => tracing::info!("Pas-grootboek: {path} gelezen — {n} pas(sen) van de tale-kant"),
+        // Deze eerste lezing ijkt enkel (zie `sample`) — er staan dus nooit grants in.
+        Ok((n, _)) => tracing::info!("Pas-grootboek: {path} gelezen — {n} pas(sen) van de tale-kant"),
         Err(e) => tracing::warn!(
             "Pas-grootboek NIET leesbaar ({path}: {e}) — de site valt terug op aftellen \
              op de aankoopdatum. Market heeft leesrecht op dat bestand nodig."
@@ -221,8 +317,19 @@ pub async fn run() {
         n += 1;
         if n * PLAYTIME_EVERY.as_secs() as u32 >= SAMPLE_EVERY.as_secs() as u32 {
             n = 0;
-            if let Err(e) = sample(&path) {
-                tracing::debug!("pas-grootboek lezen faalde: {e}");
+            match sample(&path) {
+                Ok((_, grants)) => {
+                    for g in &grants {
+                        tracing::info!(
+                            "Speeltijd erbij: {} +{} (nu {} op die pas)",
+                            g.name,
+                            hm(g.added),
+                            hm(g.after)
+                        );
+                        log_grant(&pool, g);
+                    }
+                }
+                Err(e) => tracing::debug!("pas-grootboek lezen faalde: {e}"),
             }
         }
     }
@@ -236,15 +343,28 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    /// De toestand van dit bestand is proces-breed (één grootboek per market), dus twee
+    /// tests die tegelijk bemonsteren kijken naar elkaars passen. Elke test neemt daarom
+    /// deze sleutel én begint van een schone lei — anders hangt "is dit de eerste lezing?"
+    /// van de toevallige volgorde af.
+    fn begin() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
+        *st = State::default();
+        g
+    }
+
     /// Het formaat dat de tale-bot schrijft, en de afleiding van "speelt nu".
     #[test]
     fn leest_het_grootboek_en_ziet_wie_speelt() {
+        let _g = begin();
         let p = std::env::temp_dir().join(format!("passes-{}.json", std::process::id()));
         write(
             &p,
             r#"{"version":2,"passes":{"Waldstein":{"granted":7200.0,"used":0.0,"remaining":7200.0}}}"#,
         );
-        assert_eq!(sample(p.to_str().unwrap()).unwrap(), 1);
+        assert_eq!(sample(p.to_str().unwrap()).unwrap().0, 1);
 
         // Eerste meting: we weten nog niet of hij speelt — pas op pauze tot het tegendeel blijkt.
         let l = lookup("Waldstein").expect("pas gevonden");
@@ -281,6 +401,7 @@ mod tests {
     /// gewone tijd — een oudere bot schrijft het veld niet, en dan mag er niets veranderen.
     #[test]
     fn herkent_testtijd_aan_het_merkje() {
+        let _g = begin();
         let p = std::env::temp_dir().join(format!("passes-kind-{}.json", std::process::id()));
         write(
             &p,
@@ -289,7 +410,7 @@ mod tests {
                  "Gewoon":{"granted":7200.0,"used":0.0,"remaining":7200.0,"kind":"normal"},
                  "Oud":{"granted":7200.0,"used":0.0,"remaining":7200.0}}}"#,
         );
-        assert_eq!(sample(p.to_str().unwrap()).unwrap(), 3);
+        assert_eq!(sample(p.to_str().unwrap()).unwrap().0, 3);
         assert!(lookup("Tester").unwrap().test, "kind=test ⇒ testtijd");
         assert!(!lookup("Gewoon").unwrap().test);
         assert!(!lookup("Oud").unwrap().test, "veld ontbreekt ⇒ gewone tijd, geen slot");
@@ -311,6 +432,7 @@ mod tests {
     /// geleden zou iedereen eeuwig online houden — dan liever terug naar de gok.
     #[test]
     fn leest_de_spelerslijst_en_weigert_een_oude() {
+        let _g = begin();
         let p = std::env::temp_dir().join(format!("playtime-{}.json", std::process::id()));
         let nu = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
         write(&p, &format!(r#"{{"updated":{nu},"open":{{"Waldstein":{nu}}}}}"#));
@@ -338,6 +460,7 @@ mod tests {
     /// Een onleesbaar of kapot bestand mag nooit een verkeerde tijd tonen — dan liever niets.
     #[test]
     fn kapot_of_afwezig_bestand_geeft_niets() {
+        let _g = begin();
         assert!(sample("/bestaat/echt/niet.json").is_err());
         let p = std::env::temp_dir().join(format!("passes-bad-{}.json", std::process::id()));
         write(&p, "{geen json");
@@ -345,5 +468,131 @@ mod tests {
         write(&p, r#"{"version":2}"#);
         assert!(sample(p.to_str().unwrap()).is_err(), "zonder passes-object: geen gegevens");
         let _ = std::fs::remove_file(p);
+    }
+
+    /// De kern van het logboek: een tegoed dat omhoog gaat = tijd toegekend. Spelen
+    /// (tegoed zakt) en de eerste lezing na een herstart mogen nooit als toekenning tellen.
+    #[test]
+    fn ziet_toegekende_speeltijd_en_zwijgt_bij_de_rest() {
+        let _g = begin();
+        let p = std::env::temp_dir().join(format!("passes-grant-{}.json", std::process::id()));
+        let f = |test: f64, pas: f64, used: f64| {
+            format!(
+                r#"{{"version":3,"passes":{{"Waldstein":{{"test_remaining":{test},
+                     "pass_remaining":{pas},"used":{used},"kind":"normal"}}}}}}"#
+            )
+        };
+
+        // Eerste lezing = ijkpunt. Er staat al een pas op, maar die is niet nét toegekend.
+        write(&p, &f(0.0, 3600.0, 0.0));
+        assert!(sample(p.to_str().unwrap()).unwrap().1.is_empty(), "herstart logt niets");
+
+        // Hij speelt een half uur: het tegoed zakt. Geen toekenning.
+        write(&p, &f(0.0, 1800.0, 1800.0));
+        assert!(sample(p.to_str().unwrap()).unwrap().1.is_empty(), "spelen is geen toekenning");
+
+        // Hij koopt 2u bij: het tegoed springt omhoog — dát is het bewijs.
+        write(&p, &f(0.0, 9000.0, 1800.0));
+        let g = sample(p.to_str().unwrap()).unwrap().1;
+        assert_eq!(g.len(), 1, "één toekenning");
+        assert_eq!(g[0].name, "Waldstein");
+        assert_eq!(g[0].added, 7200.0, "+2u");
+        assert_eq!(g[0].after, 9000.0, "stand erna");
+        assert_eq!(g[0].total_after, 9000.0);
+        assert!(!g[0].test, "gewone pastijd");
+
+        // Testtijd zit in een eigen potje en wordt apart gemeld.
+        write(&p, &f(900.0, 9000.0, 1800.0));
+        let g = sample(p.to_str().unwrap()).unwrap().1;
+        assert_eq!(g.len(), 1);
+        assert!(g[0].test && g[0].added == 900.0);
+        assert_eq!(g[0].total_after, 9900.0, "totaal = beide potjes");
+
+        // Ruis van een paar seconden is geen toekenning.
+        write(&p, &f(902.0, 9000.0, 1800.0));
+        assert!(sample(p.to_str().unwrap()).unwrap().1.is_empty(), "ruis telt niet");
+
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// Wie voor het eerst in het bestand verschijnt, kreeg zijn eerste pas — dat is een
+    /// echte toekenning, geen ijkpunt (het ijkpunt geldt enkel voor de eerste lezing).
+    #[test]
+    fn eerste_pas_van_een_nieuwe_speler_telt_wel() {
+        let _g = begin();
+        let p = std::env::temp_dir().join(format!("passes-nieuw-{}.json", std::process::id()));
+        write(&p, r#"{"version":3,"passes":{"Oud":{"pass_remaining":60.0,"test_remaining":0.0}}}"#);
+        sample(p.to_str().unwrap()).unwrap();
+
+        write(
+            &p,
+            r#"{"version":3,"passes":{"Oud":{"pass_remaining":60.0,"test_remaining":0.0},
+                 "Nieuw":{"pass_remaining":7200.0,"test_remaining":0.0}}}"#,
+        );
+        let g = sample(p.to_str().unwrap()).unwrap().1;
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].name, "Nieuw");
+        assert_eq!(g[0].added, 7200.0, "alles wat erop staat is nieuw");
+
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// De hele weg: toekenning → regel in het serverlogboek, onder de Discord-naam van
+    /// het lid. Dit is wat de admin op de Log-pagina onder "🎮 Hytale" te zien krijgt.
+    #[test]
+    fn schrijft_de_toekenning_in_het_logboek() {
+        let dbp = std::env::temp_dir().join(format!("market-grant-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&dbp);
+        let pool = db::init_pool(dbp.to_str().unwrap());
+        db::set_hytale_name(&pool, "u1", "Waldstein#0", "Waldstein");
+
+        log_grant(
+            &pool,
+            &Grant {
+                name: "Waldstein".into(),
+                added: 7200.0,
+                after: 9000.0,
+                total_after: 9000.0,
+                test: false,
+            },
+        );
+
+        let rows = db::recent_log(&pool, &["hytale"], 10);
+        assert_eq!(rows.len(), 1, "één regel in de categorie hytale");
+        assert_eq!(rows[0].event, "time_added");
+        assert_eq!(rows[0].actor_uid, "u1");
+        assert_eq!(rows[0].actor_name, "Waldstein#0", "het lid, niet enkel de in-game naam");
+        assert_eq!(rows[0].amount, Some(120), "toegevoegde tijd in minuten");
+        assert!(rows[0].detail.contains("+2h 00m"), "hoeveel erbij kwam: {}", rows[0].detail);
+        assert!(rows[0].detail.contains("2h 30m"), "en wat er daarna op stond");
+
+        // Een naam die aan geen enkel lid hangt, komt er nog steeds in — onder zichzelf.
+        log_grant(
+            &pool,
+            &Grant {
+                name: "Vreemde".into(),
+                added: 900.0,
+                after: 900.0,
+                total_after: 900.0,
+                test: true,
+            },
+        );
+        let rows = db::recent_log(&pool, &["hytale"], 10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].event, "test_added", "testtijd apart gemerkt");
+        assert_eq!(rows[0].actor_name, "Vreemde");
+        assert!(rows[0].actor_uid.is_empty());
+
+        let _ = std::fs::remove_file(dbp);
+    }
+
+    /// De leesbare vorm in het logboek.
+    #[test]
+    fn toont_tijd_leesbaar() {
+        assert_eq!(hm(7200.0), "2h 00m");
+        assert_eq!(hm(9000.0), "2h 30m");
+        assert_eq!(hm(900.0), "15m");
+        assert_eq!(hm(42.0), "42s");
+        assert_eq!(hm(-5.0), "0s");
     }
 }

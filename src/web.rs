@@ -3659,13 +3659,17 @@ struct LogQuery {
 /// De filterknoppen op de logpagina: (`?cat=`-sleutel, knoptekst, categorieën erachter).
 /// Eén knop mag meerdere categorieën bundelen — "Inventory" zit verspreid over `gem`
 /// (equip/unequip) en `booster` (gebruik), maar is voor een admin één ding.
-const LOG_GROUPS: [(&str, &str, &[&str]); 6] = [
+const LOG_GROUPS: [(&str, &str, &[&str]); 7] = [
     ("shop", "🛒 Shop", &["shop"]),
     ("inventory", "🎒 Inventory", &["gem", "booster"]),
     ("chest", "🎁 Chests", &["chest"]),
     ("coins", "🪙 Coins", &["daily", "level"]),
     ("admin", "⚙ Admin", &["admin"]),
     ("twitch", "🟣 Twitch", &["twitch"]),
+    // Speeltijd die de tale-kant écht op de klok zette. De Shop-regel zegt enkel dát er
+    // een pas gekocht is; deze zegt hoeveel tijd erbij kwam en wat er daarna op stond —
+    // het antwoord op "ik heb betaald maar er kwam niks bij".
+    ("hytale", "🎮 Hytale", &["hytale"]),
 ];
 
 /// De categorieën achter een filterknop, of None als de sleutel geen groep is.
@@ -3736,6 +3740,9 @@ async fn admin_log(
             // Dagelijkse check-in + level-up
             ("daily", "checkin") => ("#f59f00", "📅 daily"),
             ("level", "levelup") => ("#f76707", "⬆ level-up"),
+            // Speeltijd bijgeschreven op de klok van de server (bron: passes.json)
+            ("hytale", "time_added") => ("#2f9e44", "⏱ time added"),
+            ("hytale", "test_added") => ("#087f5b", "🧪 test time added"),
             // Twitch-whitelist
             ("twitch", "whitelist") => ("#9146FF", "🟣 twitch pass"),
             ("twitch", "rejected") => ("#e03131", "🚫 twitch reject"),

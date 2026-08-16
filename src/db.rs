@@ -2578,6 +2578,33 @@ pub fn get_hytale_name(pool: &DbPool, uid: &str) -> String {
     .unwrap_or_default()
 }
 
+/// Het Discord-lid achter een Hytale-naam: `(user_id, Discord-naam)`. Hoofdletter-
+/// ongevoelig, want de naam komt uit twee bronnen (het spel schrijft ze zoals de speler
+/// ze typte). Kijkt eerst in `coins` (de naam die het lid op de site zette) en anders in
+/// `hytale_whitelist` (een pas die op die naam landde, bv. via Twitch). None = onbekend;
+/// dan is er wel speeltijd maar geen lid om ze aan te hangen — enkel de in-game naam.
+pub fn member_by_hytale_name(pool: &DbPool, hytale_name: &str) -> Option<(String, String)> {
+    let n = hytale_name.trim().to_lowercase();
+    if n.is_empty() {
+        return None;
+    }
+    let conn = pool.get().ok()?;
+    conn.query_row(
+        "SELECT c.user_id, COALESCE(NULLIF(c.username, ''), c.user_id) FROM coins c
+          WHERE lower(c.hytale_name) = ?1
+          UNION ALL
+         SELECT w.user_id, COALESCE(NULLIF(c2.username, ''), w.user_id)
+           FROM hytale_whitelist w LEFT JOIN coins c2 ON c2.user_id = w.user_id
+          WHERE lower(w.hytale_name) = ?1
+          LIMIT 1",
+        params![n],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
 /// Bewaar/actualiseer de Hytale-naam van een lid. Verzet meteen de naam op een
 /// eventueel lopende whitelist-grant (dezelfde speler, andere in-game naam).
 pub fn set_hytale_name(pool: &DbPool, uid: &str, username: &str, hytale_name: &str) {
@@ -4340,6 +4367,30 @@ mod pass_link_test {
         // Ook een pas-rij (zonder vastgezette naam in `coins`) legt beslag op de naam.
         grant_day_whitelist(&pool, "twitch:9", "Sigilien", 3600.0, 1000.0);
         assert!(hytale_name_claimed_by_other(&pool, "sigilien", "u2"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Andersom: van in-game naam naar het lid erachter — nodig om een toekenning van
+    /// speeltijd in het logboek aan een Discord-lid te hangen.
+    #[test]
+    fn vindt_het_lid_achter_een_hytale_naam() {
+        let (pool, path) = fresh("byname");
+        set_hytale_name(&pool, "u1", "Waldstein#0", "Waldstein");
+        assert_eq!(
+            member_by_hytale_name(&pool, "waldstein"),
+            Some(("u1".into(), "Waldstein#0".into())),
+            "hoofdletters doen niet mee"
+        );
+        assert_eq!(member_by_hytale_name(&pool, "Onbekend"), None);
+        assert_eq!(member_by_hytale_name(&pool, "  "), None, "lege naam zoekt niets");
+
+        // Enkel een pas-rij (bv. een Twitch-redeem zonder site-login) volstaat ook.
+        grant_day_whitelist(&pool, "twitch:9", "Sigilien", 3600.0, 1000.0);
+        assert_eq!(
+            member_by_hytale_name(&pool, "Sigilien"),
+            Some(("twitch:9".into(), "twitch:9".into())),
+            "geen Discord-naam bekend ⇒ de uid als naam"
+        );
         assert!(!hytale_name_claimed_by_other(&pool, "sigilien", "twitch:9"));
 
         let _ = std::fs::remove_file(path);
