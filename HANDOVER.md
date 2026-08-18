@@ -1,5 +1,56 @@
 # Handover — Meadow Market (2026-08-18)
 
+## 💭 2026-08-18 — richting: actieve vs. inactieve leden (NIET gebouwd, wacht op Faybelle)
+
+Faybelle moest weg vóór ze het laatste antwoord kon lezen; het staat hier zodat er niets
+verloren gaat. **Er is niets aan gebouwd.**
+
+### Wat ze wil
+
+Weten **wie wie is** (Twitch), maar zonder rol als beloning voor het koppelen — dat idee is
+afgevoerd. In de plaats: een verschil tussen **actieve en inactieve leden**.
+
+* Inactieven worden **niet gekicked**.
+* Ze houden enkel hun **notificatie-rollen** (Livestream, News).
+* Na ± **een jaar** inactiviteit verliezen ze de andere rollen en zakken ze terug naar een
+  beperkter zicht op de server.
+
+Aanleiding: bijna niemand heeft zijn Twitch in market staan, en het gros van de Discord staat
+idle. Subscriber-rollen werken pas als mensen hun Twitch koppelen.
+
+### Wat we al kunnen meten, en waar de gaten zitten
+
+* `member_activity.last_seen` (deze DB) = laatste **bericht of reactie**, voedt Manage → 💤 Absent
+  met de ≥1 jaar-vlag. Twee scheefheden: **wie meeleest maar nooit typt telt als inactief**, en de
+  bot mist nog altijd **View Channel op 5 coin-kanalen** (openstaand punt hieronder) — daar zien we
+  activiteit domweg niet. Dat rechtzetten hoort vóór er rollen aan hangen; het is een
+  Discord-rechteninstelling, dus Faybelle's klik.
+* Twee signalen die we óók al hebben maar niet meetellen: een **site-login** (meteen ook het moment
+  dat we zijn Twitch te zien krijgen) en **speeltijd** op de server (tale's `playtime.json`).
+
+Wie op alle drie een jaar stil is, is echt weg; wie op één ervan stil is misschien niet.
+
+### Voorstel dat op tafel lag
+
+1. **Eerst meten, dan afnemen**: Absent uitbreiden met die drie signalen, zodat zichtbaar is wie
+   zou zakken vóór er één rol afgaat.
+2. Pas daarna het afnemen zelf, en **automatisch herstel** zodra iemand terugkomt en iets zegt —
+   anders wordt elke terugkeer een ticket.
+3. De rollen-kant hoort bij de **market-bot**, niet bij Argus: die ziet elk bericht al (daar komt
+   `last_seen` vandaan) en zit met de juiste rechten in Magic Meadow, terwijl Argus daar enkel
+   chat-rechten heeft en aan de Hytale-deur staat. Er komt dus geen derde bot bij.
+
+### Open vragen (in deze volgorde te beslissen)
+
+* **Wat telt als "actief"** — enkel bericht/reactie in Discord, of ook site-login en speeltijd?
+  Dit is de vraag die nog onbeantwoord bleef; al de rest hangt eraan.
+* Welke rollen precies horen bij "notificaties" (Livestream, News) en welke gaan eraf.
+* De drempel: is een jaar juist, of eerst een tussenstap?
+
+Achtergrond over wat een bot wél/niet over Twitch-koppelingen kan zien, en over het opruimen van
+Argus' oude slash-commando's: `tale/HANDOVER.md`, sectie 2026-08-18.
+
+
 ## ✅ 2026-08-18 (met Faybelle) — Accounts is een tabel geworden, met sorteerknop
 
 **LIVE** (deploy 12:48, site 200, geen fouten in het log). Faybelle keurde het uitzicht in de
