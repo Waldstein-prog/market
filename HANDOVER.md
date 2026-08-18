@@ -1,4 +1,122 @@
-# Handover — Meadow Market (2026-08-16)
+# Handover — Meadow Market (2026-08-18)
+
+## ✅ 2026-08-18 (met Faybelle) — Accounts is een tabel geworden, met sorteerknop
+
+**LIVE** (deploy 12:48, site 200, geen fouten in het log). Faybelle keurde het uitzicht in de
+browser goed; hierna gecommit.
+
+De chips-lijst van gisteren was niet wat ze voor ogen had. Nu een **tabel met drie kolommen**:
+**Twitch · Discord · Hytale**, nog altijd één rij per mens (`merge_people` ongewijzigd).
+
+* De **Twitch-naam is de knop**; het venster eronder is hetzelfde gebleven, maar zonder de
+  namen die nu in de tabel staan — daar rest **Twitch-ID**, de pas(sen), de reden als iets
+  ontbreekt en het naamveld. Dat venster is de plek voor "later misschien meer".
+* Wie we niet op Twitch kennen heeft in die kolom enkel het `*`; die knop **blijft klikbaar**,
+  anders zijn zijn gegevens niet meer te bereiken.
+* De pil-stijl blijft bestaan voor elders; in de tabel is `.accname` een gewone onderstreepte
+  naam (`.ctable .accname`). De tabel is `.ctable`, dus het horizontaal schuiven op een
+  telefoon was al geregeld.
+
+### Sorteren
+
+Standaard **meest actief bovenaan**. "Actief" is het enige wat we kunnen weten: `last_seen` uit
+`member_activity` — hetzelfde grootboek als Manage → 💤 Absent (laatste bericht of reactie).
+Wie daar niet in staat (o.a. de Twitch-only rijen) zakt naar **onderaan**, nooit bovenaan met
+een tijdstip 0. Idem voor rijen zonder Discord-naam bij het alfabetisch sorteren.
+
+Het knopje naast de kolomtitel *Discord* toont de huidige stand en draait rond:
+`A→Z` → `Z→A` → `Meest actief` → `Minst actief` → weer `A→Z`. Het sorteren gebeurt **in de
+pagina** (JS herschikt `<tr>`'s), dus zonder herladen; een refresh zet je terug op de
+standaard. De volgorde bij het binnenkomen is dezelfde regel in Rust — niet twee keer
+uitgevonden, wel twee keer geschreven: wijzig je de ene, kijk dan ook naar de andere.
+
+⚠️ Herhaling van de les van 15/08: de JS is nagekeken **zoals de server ze verstuurt** — de
+`\`-regeleindes in de Rust-string uitgevouwen en door `node --check` gehaald, plus de
+vergelijkingsfunctie los doorgerekend op een testrijtje (met lege naam en zonder activiteit).
+De broncode lezen zegt niets over wat er in de browser aankomt.
+
+
+## ✅ 2026-08-17 — Manage-tabs herschikt + Accounts toont de héle community
+
+**LIVE** (market 12:53, panel 12:53). Niemand online tijdens de deploy (zemerion logde 12:40
+uit), dus geen speeltijd of coins geraakt. Nog **niet gecommit** bij het afsluiten.
+
+### De klacht waar het mee begon
+
+De Accounts-tab toonde "een lijst met Twitch-ID's" en miste de helft van de mensen. Twee
+oorzaken, allebei nagekeken in de DB en niet geraden:
+
+1. `list_accounts` is een UNION van **inventory** en **hytale_whitelist** — dus enkel
+   *kopers*. De community is 42 Discord-leden; die kwamen allemaal via Twitch binnen (de
+   invite staat enkel op de stream), maar wie geen Hytale speelt kocht nooit iets en stond
+   er dus niet in.
+2. Een Twitch-redeem maakt een whitelist-rij op `user_id = twitch:<id>` **zonder** `coins`-rij.
+   Die rij heeft geen naam, dus viel de query terug op het id zelf → dát waren de "Twitch-ID's".
+   Gevolg: 7 mensen stonden er **twee keer** in (Discord-rij + Twitch-rij).
+
+### Wat de tab nu is
+
+Eén regel per **mens**, gebundeld (`merge_people` in `web.rs`, apart gezet zodat het te testen
+valt). Klik een naam → venster met Discord / Twitch / Twitch-ID / Hytale, zijn pas(sen) en het
+naamveld. Bundelen gebeurt op twee **harde** sleutels, nooit op een gok:
+
+* de geverifieerde Discord↔Twitch-koppeling (`coins.twitch_id`);
+* anders dezelfde **Hytale-naam** — die ligt na de eerste redeem vast en is aan tale-kant
+  sowieso één speeltijd-klok, dus twee rijen met dezelfde naam *zijn* dezelfde speler.
+
+Lukt geen van beide, dan blijft het een aparte regel. Liever een naam te veel dan twee mensen
+versmolten. ⚠️ Dit is **weergave** — er wordt niets samengevoegd in de DB.
+
+De getoonde naam is de **Twitch-naam** (Faybelle's regel: dat is waar iemand binnenkomt), met
+terugval op Discord → Hytale → id. Een `*` ervoor = Twitch-naam nog niet gekend; dat is meteen
+het lijstje van wie gevraagd mag worden zijn Twitch in Discord → Connections te koppelen.
+
+### De Twitch-naam wordt nu bewaard (tabel `twitch_names`)
+
+Ze was er altijd al en werd telkens weggegooid. Drie bronnen:
+
+* **redeem** — het EventSub-bericht draagt `user_login` (nu opgeslagen vóór élke andere
+  afweging, ook bij een geweigerde naam of een andere reward);
+* **site-login** — Discord geeft in `connections` de Twitch-**naam** náást het id;
+* **het logboek** — elke geslaagde redeem schreef `"<login> → <Hytale-naam> · 6h"` in
+  `server_log.detail`. `backfill_twitch_names` haalt ze daaruit terug bij élke start
+  (`INSERT OR IGNORE`, nieuwste logregel eerst). Op prod: **8 van 8** gevonden.
+
+⚠️ Geen enkele Twitch-API nodig, en een API zou het probleem ook niet oplossen: zonder redeem
+én zonder Connections-koppeling weten we niet dát een Twitch-account bij een Discord-lid hoort.
+Dat is bewust — anders kan iemand andermans pas claimen. Afspraak met Faybelle: eerst mensen
+vragen te koppelen; werkt dat niet, dan pas een keuzelijst uit haar volgers.
+
+### Nog een gat dat onderweg opdook
+
+Een lid kan een Hytale-naam in `coins` hebben zónder ooit iets te kopen (GhostToSpace). Dat
+staat niet in `list_accounts` → stond als "niet gekend". Vandaar `db::hytale_names`.
+Faybelle zelf heeft er **geen**: haar toegang komt rechtstreeks uit `Server/whitelist.json`
+(admin), market verkocht haar nooit iets. **Openstaande handeling: `Faybelle` één keer
+invullen in Manage → Accounts.**
+
+### Tabbalk
+
+⚙ Settings · 🖥 Panel (was "Server") · 📜 Log · 👁 Inventory Preview · 🛒 Shop ·
+👁 Shop Preview · 🪙 Coins · 📋 Channels · 👥 Accounts · 💤 Absent.
+Volgorde = keuze van de user: eerst waar je aan draait, dan elk onderwerp mét zijn preview.
+
+### Getest
+
+84 tests groen, 3 nieuw: het bundelen (dezelfde mens onder één naam, vreemden apart, geen
+ledenlijst = niet leeg) en het terughalen van de namen. De terughaal-regels ook **tegen de
+echte logregels** gedraaid vóór deploy → 8/8. Het uitzicht zelf is nog niet nagekeken.
+
+### 📌 Morgen
+
+* **Embeds-tab** (stap 4): alle 7 embeds uit `bot.rs` — level-up, de 4 chest-embeds, uurlijkse
+  earners, weekly leaderboard — inklapbaar en aanpasbaar via het `settings`-patroon
+  (`Kind::Text`). Faybelle wil het overzicht van álle embeds op één plek behouden.
+* **Inventory-tab** (stap 5): gem-volgorde (`items.position`), collecties en de tekst per gem
+  (`items.description`). De collectie-koppen "Basic Gems" en "Trinkets" staan **hardgecodeerd**
+  in `web.rs` — dat is wat deze tab moet bevrijden. Komt vlak vóór Inventory Preview te staan.
+* Beide tabs staan nog **niet** in de tabbalk: een tab die naar niets leidt is erger dan geen tab.
+* Nog te committen: deze wijziging draait wel al op prod.
 
 ## ✅ 2026-08-16 (nacht, met Faybelle) — de Log toont nu ook toegekende speeltijd
 

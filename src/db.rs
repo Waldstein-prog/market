@@ -225,6 +225,19 @@ pub fn init_pool(path: &str) -> DbPool {
             used_at  REAL NOT NULL,
             duration INTEGER NOT NULL,
             bought   REAL NOT NULL
+        );
+        -- De Twitch-LOGINNAAM bij een Twitch-id. Los van `coins`, want de helft van de
+        -- Twitch-accounts die we kennen heeft geen `coins`-rij: een redeem maakt enkel een
+        -- `hytale_whitelist`-rij op `twitch:<id>`. Twee bronnen vullen dit:
+        --   * een redeem (het EventSub-bericht draagt `user_login`);
+        --   * een site-login (Discord geeft de naam náást het id in `connections`).
+        -- Enkel weergave — nergens een beslissing op baseren. De brug tussen een Twitch- en
+        -- een Discord-account blijft `coins.twitch_id`, en die komt enkel uit een
+        -- geverifieerde Discord-verbinding.
+        CREATE TABLE IF NOT EXISTS twitch_names (
+            twitch_id TEXT PRIMARY KEY,
+            login     TEXT NOT NULL,
+            updated   REAL NOT NULL DEFAULT 0
         );",
     )
     .expect("kan tabel niet aanmaken");
@@ -449,6 +462,7 @@ pub fn init_pool(path: &str) -> DbPool {
     // omzetten. Bestaande (geseede + eigen) items blijven gewoon staan.
     seed_horseshoe(&pool);
     seed_weights(&pool);
+    backfill_twitch_names(&pool);
     pool
 }
 
@@ -2886,6 +2900,114 @@ pub fn set_twitch_id(pool: &DbPool, uid: &str, username: &str, twitch_id: &str) 
     .expect("set twitch_id");
 }
 
+/// Bewaar de Twitch-loginnaam bij een Twitch-id (weergave; zie tabel `twitch_names`).
+/// Lege id of naam = niets doen, zodat een half antwoord van Discord/Twitch nooit een
+/// bekende naam met een lege overschrijft.
+pub fn set_twitch_login(pool: &DbPool, twitch_id: &str, login: &str, now: f64) {
+    let (id, login) = (twitch_id.trim(), login.trim());
+    if id.is_empty() || login.is_empty() {
+        return;
+    }
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO twitch_names (twitch_id, login, updated) VALUES (?1, ?2, ?3)
+         ON CONFLICT(twitch_id) DO UPDATE SET login = excluded.login, updated = excluded.updated",
+        params![id, login, now],
+    )
+    .expect("set twitch login");
+}
+
+/// De vastgezette Hytale-naam per Discord-lid (enkel wie er één heeft).
+///
+/// Bestaat naast `list_accounts` omdat die enkel kópers en whitelist-rijen opsomt: een lid
+/// kan zijn naam vastgezet hebben zonder ooit iets te kopen (dan staat ze enkel in `coins`).
+/// Zonder dit stond zo iemand in Manage → Accounts als "Hytale: niet gekend".
+pub fn hytale_names(pool: &DbPool) -> std::collections::HashMap<String, String> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT user_id, hytale_name FROM coins WHERE hytale_name <> ''")
+        .expect("prep hytale_names");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query hytale_names");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Het gekoppelde Twitch-id per Discord-lid (enkel de leden die er één hebben).
+pub fn twitch_ids(pool: &DbPool) -> std::collections::HashMap<String, String> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT user_id, twitch_id FROM coins WHERE twitch_id <> ''")
+        .expect("prep twitch_ids");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query twitch_ids");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Alle gekende Twitch-loginnamen, per Twitch-id.
+pub fn twitch_logins(pool: &DbPool) -> std::collections::HashMap<String, String> {
+    let conn = pool.get().expect("db");
+    let mut stmt =
+        conn.prepare("SELECT twitch_id, login FROM twitch_names").expect("prep twitch_logins");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query twitch_logins");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Haal de Twitch-namen op die we vroeger enkel in het logboek schreven.
+///
+/// Elke geslaagde redeem logde "`<login> → <Hytale-naam> · 6h`" met `actor_uid =
+/// twitch:<id>`; een geweigerde redeem logde de login als `actor_name`. Dat is de enige
+/// plek waar de naam van vóór deze tabel bewaard bleef. `INSERT OR IGNORE`: wat al in
+/// `twitch_names` staat (uit een verse redeem of login) is recenter en blijft staan.
+/// Draait bij elke start — zelfhelend en te klein om te merken.
+fn backfill_twitch_names(pool: &DbPool) {
+    let conn = pool.get().expect("db");
+    let found: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT actor_uid, actor_name, detail FROM server_log
+                  WHERE category = 'twitch' AND actor_uid LIKE 'twitch:%'
+                  ORDER BY id DESC", // nieuwste eerst: wie op Twitch hernoemde, staat achteraan
+            )
+            .expect("prep backfill twitch names");
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2).unwrap_or_default(),
+                ))
+            })
+            .expect("query backfill twitch names");
+        rows.filter_map(Result::ok)
+            .filter_map(|(uid, actor_name, detail)| {
+                let id = uid.strip_prefix("twitch:")?.trim().to_string();
+                // "login → Naam · 6h" (geslaagd) — de pijl staat er enkel in die vorm.
+                let login = match detail.split_once(" → ") {
+                    Some((login, _)) => login.trim().to_string(),
+                    // Een geweigerde redeem heeft geen pijl; daar ís actor_name de login.
+                    None if detail.starts_with("invalid Hytale name:") => actor_name.trim().into(),
+                    None => return None,
+                };
+                if id.is_empty() || login.is_empty() {
+                    return None;
+                }
+                Some((id, login))
+            })
+            .collect()
+    };
+    for (id, login) in found {
+        conn.execute(
+            "INSERT OR IGNORE INTO twitch_names (twitch_id, login, updated) VALUES (?1, ?2, 0)",
+            params![id, login],
+        )
+        .ok();
+    }
+}
+
 /// De ooit-vastgezette Hytale-naam van een whitelist-rij, ongeacht of de pas nog geldig is.
 /// Gebruikt om de Twitch-naam vast te houden tussen redeems (de 1e redeem zet ze vast).
 pub fn get_whitelist_name(pool: &DbPool, uid: &str) -> Option<String> {
@@ -4342,6 +4464,61 @@ mod chest_counts_test {
 
 /// De brug van een Twitch-redeem naar het juiste Discord-lid. (De speeltijd-boekhouding
 /// zelf hoort bij de tale-kant — zie `crate::pass_ledger`.)
+#[cfg(test)]
+mod twitch_naam_test {
+    use super::*;
+
+    fn fresh(tag: &str) -> (DbPool, std::path::PathBuf) {
+        let p = std::env::temp_dir().join(format!("market-tn-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (init_pool(p.to_str().unwrap()), p)
+    }
+
+    /// De Twitch-namen van vóór deze tabel zitten enkel nog in het logboek. Loopt dit
+    /// terughalen stuk, dan staat de Accounts-lijst stil vol "niet gekend" zonder dat er
+    /// iets misgaat — precies het soort stille fout dat niemand opmerkt.
+    #[test]
+    fn haalt_oude_namen_uit_het_logboek() {
+        let (pool, path) = fresh("backfill");
+        // Zoals de bot ze schreef: geslaagd (met pijl) en geweigerd (naam als actor).
+        log_event(
+            &pool,
+            1.0,
+            &LogEntry::new("twitch", "whitelist")
+                .actor("twitch:42177911", "Zemerion")
+                .detail("zeferian → Zemerion · 6h"),
+        );
+        log_event(
+            &pool,
+            2.0,
+            &LogEntry::new("twitch", "rejected")
+                .actor("twitch:99", "iemand")
+                .detail("invalid Hytale name: 'Zemerion :) ' — refund manually in Twitch"),
+        );
+        // Ruis die géén naam mag opleveren.
+        log_event(&pool, 3.0, &LogEntry::new("shop", "buy").actor("twitch:7", "x").detail("kocht"));
+        backfill_twitch_names(&pool);
+
+        let namen = twitch_logins(&pool);
+        assert_eq!(namen.get("42177911").map(String::as_str), Some("zeferian"));
+        assert_eq!(namen.get("99").map(String::as_str), Some("iemand"), "geweigerde redeem telt ook");
+        assert!(!namen.contains_key("7"), "andere categorieën blijven buiten beschouwing");
+
+        // Een verse naam is recenter dan het logboek en mag niet teruggedraaid worden.
+        set_twitch_login(&pool, "42177911", "zeferian_nieuw", 10.0);
+        backfill_twitch_names(&pool);
+        assert_eq!(twitch_logins(&pool).get("42177911").map(String::as_str), Some("zeferian_nieuw"));
+
+        // Half antwoord van Discord/Twitch = niets overschrijven.
+        set_twitch_login(&pool, "42177911", "", 20.0);
+        set_twitch_login(&pool, "", "spookje", 20.0);
+        let namen = twitch_logins(&pool);
+        assert_eq!(namen.get("42177911").map(String::as_str), Some("zeferian_nieuw"));
+        assert!(!namen.contains_key(""));
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 #[cfg(test)]
 mod pass_link_test {
     use super::*;

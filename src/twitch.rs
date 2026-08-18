@@ -455,6 +455,10 @@ async fn on_redeem(ctx: &Ctx, event: &Value) {
         tracing::warn!("Twitch-redeem zonder user_id — genegeerd");
         return;
     }
+    // De loginnaam meteen bewaren, vóór élke andere afweging: ook een redeem van een
+    // ándere beloning of een geweigerde naam vertelt ons wie deze kijker is. Puur
+    // weergave (Manage → Accounts, het panel); het verandert niets aan wat hij krijgt.
+    db::set_twitch_login(&ctx.pool, tid, login, now_epoch());
 
     // Vers uit de settings: kiest de streamer een andere reward, dan geldt dat meteen.
     let day_id = settings::str_of(&ctx.pool, "twitch_reward_id");

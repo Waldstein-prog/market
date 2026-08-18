@@ -853,6 +853,31 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .namefix input{{width:11rem;padding:.32rem .45rem;border:1px solid #2c3d2a;border-radius:7px;
   background:#0e1510;color:#e8f0e4;font:inherit}}
 .namefix input:invalid{{border-color:#6e352c}}
+.accname{{padding:.3rem .8rem;border-radius:999px;border:1px solid #2c3d2a;background:#141d14;
+  color:#e8f0e4;font:inherit;font-size:.86rem;cursor:pointer;line-height:1.5}}
+.accname:hover{{background:#1c281c}}
+.accname.on{{background:{MEADOW};color:#0e1510;border-color:{MEADOW};font-weight:700}}
+.accname .nolink{{color:#c7a86a;font-weight:700}}
+.accname.on .nolink{{color:#0e1510}}
+.sortbtn{{margin-left:.4rem;padding:.1rem .5rem;border:1px solid #2c3d2a;border-radius:999px;
+  background:#141d14;color:#9db095;font:inherit;font-size:.72rem;font-weight:400;cursor:pointer}}
+.sortbtn:hover{{background:#1c281c;color:#e8f0e4}}
+/* Dezelfde knop, maar in de accounts-tabel: geen pil, gewoon een aanklikbare naam. */
+.ctable .accname{{padding:.15rem 0;border:0;border-radius:0;background:none;color:#cfe0c8;
+  text-decoration:underline;text-underline-offset:.18em;text-decoration-color:#3b4f36}}
+.ctable .accname:hover{{background:none;color:#e8f0e4;text-decoration-color:{MEADOW}}}
+.ctable .accname.on{{background:none;color:{MEADOW};font-weight:700;text-decoration-color:{MEADOW}}}
+.ctable .accname.on .nolink{{color:#c7a86a}}
+.ctable td .none{{color:#7d8f77;font-style:italic}}
+/* Zichtbaarheid via een klasse, NIET via het `hidden`-attribuut: één `display`-regel
+   elders overrult `hidden` en dan staat elk venster permanent open. */
+.accd{{display:none}}
+.accd.on{{display:block}}
+.acckv{{display:grid;grid-template-columns:max-content 1fr;gap:.35rem .9rem;
+  margin:.6rem 0 .9rem;font-size:.92rem;align-items:center}}
+.acckv .kk{{color:#9db095;white-space:nowrap}}
+.acckv .vv{{color:#e8f0e4}}
+.acckv .vv.none{{color:#7d8f77;font-style:italic}}
 .undoform{{margin:0}}
 .undonote{{font-size:.8rem}}
 .archline{{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-top:.35rem;font-size:.8rem}}
@@ -1022,12 +1047,15 @@ fn nav_html(active: &str, admin: bool) -> String {
     )
 }
 
-/// Sub-tabbalk binnen de Manage-sectie: Shop / Coins / Channels / Log / Server.
-/// `active` = "market" | "coins" | "channels" | "log".
+/// Sub-tabbalk binnen de Manage-sectie. `active` = de sleutel van de open tab.
 ///
-/// De Server-tab verlaat market: `/panel` is het Hytale-panel (aparte service,
-/// door Caddy geproxyd naar 127.0.0.1:8090) met een eigen wachtwoord-login. Het
-/// heeft dus geen `active`-toestand en linkt zelf terug naar `/admin/market`.
+/// Volgorde is een keuze van de user (2026-08-17): eerst waar je aan de knoppen draait
+/// (Settings, Panel, Log), daarna elk onderwerp mét zijn preview ernaast, en achteraan de
+/// ledenlijsten. Niet alfabetisch en niet historisch — op hoe vaak ze gebruikt worden.
+///
+/// De Panel-tab verlaat market: `/panel` is het Hytale-panel (aparte service, door Caddy
+/// geproxyd naar 127.0.0.1:8090) met een eigen wachtwoord-login. Het heeft dus geen
+/// `active`-toestand en linkt zelf terug naar `/admin/market`.
 fn admin_subtabs(active: &str) -> String {
     let item = |href: &str, key: &str, label: &str| {
         let on = if key == active { " on" } else { "" };
@@ -1035,16 +1063,16 @@ fn admin_subtabs(active: &str) -> String {
     };
     format!(
         "<div class=\"subtabs\">{}{}{}{}{}{}{}{}{}{}</div>",
+        item("/admin/settings", "settings", "⚙ Settings"),
+        item("/panel", "server", "🖥 Panel"),
+        item("/admin/log", "log", "📜 Log"),
+        item("/admin/inventory", "inv_preview", "👁 Inventory Preview"),
         item("/admin/market", "market", "🛒 Shop"),
-        item("/admin/inventory", "inv_preview", "🎒 Preview inventory"),
-        item("/admin/shop/preview", "shop_preview", "👁 Admin shop preview"),
-        item("/admin/accounts", "accounts", "👥 Accounts"),
-        item("/admin/absent", "absent", "💤 Absent"),
+        item("/admin/shop/preview", "shop_preview", "👁 Shop Preview"),
         item("/admin/coins", "coins", "🪙 Coins"),
         item("/admin/channels", "channels", "📋 Channels"),
-        item("/admin/settings", "settings", "⚙ Settings"),
-        item("/admin/log", "log", "📜 Log"),
-        item("/panel", "server", "🖥 Server"),
+        item("/admin/accounts", "accounts", "👥 Accounts"),
+        item("/admin/absent", "absent", "💤 Absent"),
     )
 }
 
@@ -2364,21 +2392,20 @@ async fn callback(
     {
         Ok(r) => match r.json::<Value>().await {
             Ok(v) => {
-                let twitch_id = v
-                    .as_array()
-                    .map(|conns| {
-                        conns
-                            .iter()
-                            .find(|c| {
-                                c["type"].as_str() == Some("twitch")
-                                    && c["verified"].as_bool() == Some(true)
-                            })
-                            .and_then(|c| c["id"].as_str())
-                            .unwrap_or_default()
-                            .to_string()
+                // Discord geeft de Twitch-NAAM (`name`) náást het id. Het id blijft de
+                // sleutel — een kijker kan zijn Twitch-naam wijzigen — maar de naam is het
+                // enige waar een mens iemand aan herkent, dus die nemen we mee.
+                let twitch = v.as_array().and_then(|conns| {
+                    conns.iter().find(|c| {
+                        c["type"].as_str() == Some("twitch") && c["verified"].as_bool() == Some(true)
                     })
-                    .unwrap_or_default();
+                });
+                let twitch_id =
+                    twitch.and_then(|c| c["id"].as_str()).unwrap_or_default().to_string();
+                let twitch_login =
+                    twitch.and_then(|c| c["name"].as_str()).unwrap_or_default().to_string();
                 db::set_twitch_id(&st.pool, &uid, &name, &twitch_id);
+                db::set_twitch_login(&st.pool, &twitch_id, &twitch_login, now_secs());
                 if !twitch_id.is_empty() {
                     tracing::info!("Discord-login {name}: Twitch-koppeling {twitch_id}");
                     // Zette zijn Twitch-pas al een Hytale-naam vast, dan is dát zijn naam.
@@ -4866,9 +4893,156 @@ struct AccountsQuery {
     err: Option<String>,
 }
 
-/// Manage → Accounts: alle leden die ooit iets kochten, met hun pas-status.
-/// Kolommen: lid, **Hytale-naam** (aanpasbaar), dagpas actief (+ resterende tijd),
-/// permanente pas. Later uit te breiden met meer info per account.
+/// Eén mens, met alle namen waaronder hij bij ons bekend staat.
+///
+/// Nodig omdat dezelfde persoon in de DB tot twee rijen heeft: zijn Discord-account en —
+/// als hij ooit een pas op Twitch redeemde — een `twitch:<id>`-rij zónder Discord-naam.
+/// Ongebundeld staat hij twee keer in de lijst en lijkt hij twee mensen.
+struct Person {
+    /// Het account waarop de naamcorrectie gebeurt (bij voorkeur het Discord-account).
+    uid: String,
+    discord: String,
+    hytale: String,
+    twitch_id: String,
+    twitch_login: String,
+    /// Pas-rijen die op deze persoon staan: (bron, resterende dagpas, permanent).
+    passes: Vec<(&'static str, Option<i64>, bool)>,
+    /// Staat hij nu op de Discord-server? (false = vertrokken, of enkel via Twitch gekend)
+    in_guild: bool,
+}
+
+impl Person {
+    /// De naam waaronder hij in de lijst staat. Twitch eerst: dat is waar de community
+    /// binnenkomt (de Discord-invite staat enkel op de stream), dus dat is de naam waarop
+    /// Faybelle iemand herkent. Daarna pas Discord, Hytale, en als laatste het kale id.
+    fn display(&self) -> &str {
+        for n in [&self.twitch_login, &self.discord, &self.hytale, &self.uid] {
+            if !n.is_empty() {
+                return n;
+            }
+        }
+        ""
+    }
+}
+
+/// Alle bronnen samenleggen tot één regel per mens, gesorteerd op de getoonde naam.
+///
+/// Apart van de pagina omdat dit de enige plek is waar iets fout kán gaan: twee mensen
+/// versmelten die het niet zijn, of iemand twee keer tonen.
+fn merge_people(
+    members: Vec<(String, String)>,
+    accounts: &[db::AccountRow],
+    hytale_names: &std::collections::HashMap<String, String>,
+    twitch_ids: &std::collections::HashMap<String, String>,
+    twitch_logins: &std::collections::HashMap<String, String>,
+) -> Vec<Person> {
+    let mut people: Vec<Person> = Vec::new();
+    let mut by_uid: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    fn slot(
+        people: &mut Vec<Person>,
+        by_uid: &mut std::collections::HashMap<String, usize>,
+        uid: &str,
+        in_guild: bool,
+    ) -> usize {
+        if let Some(i) = by_uid.get(uid) {
+            return *i;
+        }
+        people.push(Person {
+            uid: uid.to_string(),
+            discord: String::new(),
+            hytale: String::new(),
+            twitch_id: String::new(),
+            twitch_login: String::new(),
+            passes: Vec::new(),
+            in_guild,
+        });
+        by_uid.insert(uid.to_string(), people.len() - 1);
+        people.len() - 1
+    }
+
+    for (id, n) in members {
+        let i = slot(&mut people, &mut by_uid, &id, true);
+        people[i].discord = n;
+    }
+
+    // Wat market zelf weet, per Discord-account.
+    for a in accounts {
+        if a.user_id.starts_with("twitch:") {
+            continue; // pas hieronder, dan weten we al bij wie hij hoort
+        }
+        let i = slot(&mut people, &mut by_uid, &a.user_id, false);
+        if people[i].discord.is_empty() {
+            people[i].discord = a.username.clone();
+        }
+        if people[i].hytale.is_empty() {
+            people[i].hytale = a.hytale_name.clone();
+        }
+        if a.day_pass_secs_left.is_some() || a.perma {
+            people[i].passes.push(("Via de shop", a.day_pass_secs_left, a.perma));
+        }
+    }
+    // Namen die enkel in `coins` staan (vastgezet zonder ooit iets te kopen).
+    for (uid, hn) in hytale_names {
+        let i = slot(&mut people, &mut by_uid, uid, false);
+        if people[i].hytale.is_empty() {
+            people[i].hytale = hn.clone();
+        }
+    }
+    for (uid, tid) in twitch_ids {
+        let i = slot(&mut people, &mut by_uid, uid, false);
+        people[i].twitch_id = tid.clone();
+    }
+
+    // De Twitch-rijen bij de juiste mens leggen. Twee sleutels, allebei hard: de
+    // geverifieerde Discord-koppeling, en anders dezelfde Hytale-naam — die ligt na de
+    // eerste redeem vast en is aan tale-kant sowieso één speeltijd-klok, dus twee rijen met
+    // dezelfde Hytale-naam zíjn dezelfde speler. Lukt geen van beide, dan blijft het een
+    // aparte regel: liever een naam te veel dan twee mensen versmolten.
+    for a in accounts {
+        let Some(tid) = a.user_id.strip_prefix("twitch:") else {
+            continue;
+        };
+        let target = people
+            .iter()
+            .position(|p| !p.twitch_id.is_empty() && p.twitch_id == tid)
+            .or_else(|| {
+                let hn = a.hytale_name.trim();
+                if hn.is_empty() {
+                    return None;
+                }
+                people.iter().position(|p| p.hytale.eq_ignore_ascii_case(hn))
+            });
+        let i = match target {
+            Some(i) => i,
+            None => slot(&mut people, &mut by_uid, &a.user_id, false),
+        };
+        people[i].twitch_id = tid.to_string();
+        if people[i].hytale.is_empty() {
+            people[i].hytale = a.hytale_name.clone();
+        }
+        if a.day_pass_secs_left.is_some() || a.perma {
+            people[i].passes.push(("Via Twitch", a.day_pass_secs_left, a.perma));
+        }
+    }
+
+    for p in &mut people {
+        if let Some(login) = twitch_logins.get(&p.twitch_id) {
+            p.twitch_login = login.clone();
+        }
+    }
+    people.sort_by_key(|p| p.display().to_lowercase());
+    people
+}
+
+/// Manage → Accounts: iedereen die we kennen, **één rij per mens**.
+///
+/// De lijst is de Discord-ledenlijst (dat is de community), aangevuld met accounts die
+/// enkel in de DB staan. Klik een naam → alles wat we van die persoon weten.
+///
+/// Twee dingen die we NIET automatisch kunnen weten, en die dus gewoon leeg blijven:
+/// de Twitch-naam van wie nooit redeemde én zijn Twitch niet in Discord → Connections
+/// koppelde, en de Hytale-naam van wie zijn toegang niet via market kreeg (admins staan
+/// rechtstreeks in de whitelist van de server). Dat laatste is hier in te vullen.
 async fn admin_accounts(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -4877,67 +5051,194 @@ async fn admin_accounts(
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
-    let accounts = db::list_accounts(&st.pool, now_secs());
-    let rows: String = accounts
-        .iter()
-        .map(|a| {
-            let member = esc(&a.username);
-            // De naam is bewust rechtstreeks aanpasbaar: voor het lid zelf ligt ze vast
-            // zodra er tijd op staat, dus een typo bij de eerste redeem is enkel hier nog
-            // recht te zetten.
-            let namefix = format!(
-                "<form method=\"post\" action=\"/admin/accounts/name\" class=\"namefix\">\
-                   <input type=\"hidden\" name=\"uid\" value=\"{uid}\">\
-                   <input name=\"hytale_name\" value=\"{hn}\" maxlength=\"32\" required \
-                          pattern=\"[A-Za-z0-9_]{{1,32}}\" \
-                          title=\"letters, cijfers en _ — max 32 tekens\" \
-                          placeholder=\"(nog geen naam)\">\
-                   <button class=\"btn\" type=\"submit\">Opslaan</button>\
-                 </form>",
-                uid = esc(&a.user_id),
-                hn = esc(&a.hytale_name),
-            );
-            let daypass = match a.day_pass_secs_left {
-                Some(secs) => format!(
-                    "<span class=\"yes\">Ja</span> <span class=\"hint\">— {} resterend</span>",
-                    fmt_dur(secs)
-                ),
-                None => "<span class=\"no\">Nee</span>".to_string(),
-            };
-            let perma = if a.perma {
-                "<span class=\"yes\">Ja</span>"
-            } else {
-                "<span class=\"no\">Nee</span>"
-            };
-            // `data-uid` alvast meegeven: haakje voor de latere extra info / per-account acties.
+    let now = now_secs();
+    let accounts = db::list_accounts(&st.pool, now);
+    let hytale_names = db::hytale_names(&st.pool);
+    let twitch_ids = db::twitch_ids(&st.pool);
+    let twitch_logins = db::twitch_logins(&st.pool);
+
+    // De community = de Discord-ledenlijst. Ook wie nooit iets kocht hoort erin — dat was
+    // precies wat de oude tab (enkel kopers) niet toonde.
+    let (members, guild_note) = match st.dc.list_members(COINS_GUILD_ID).await {
+        Ok(members) => (members, String::new()),
+        Err(e) => (
+            Vec::new(),
             format!(
-                "<tr data-uid=\"{uid}\"><td>{member}</td><td>{namefix}</td>\
-                 <td>{daypass}</td><td>{perma}</td></tr>",
-                uid = esc(&a.user_id),
-            )
-        })
-        .collect();
-    let table = if accounts.is_empty() {
-        "<p class=\"muted\">Nobody has bought anything yet.</p>".to_string()
-    } else {
-        format!(
-            "<table class=\"ctable\"><thead><tr>\
-               <th>Lid</th><th>Hytale-naam</th><th>Dagpas actief</th><th>Permanente pas</th>\
-             </tr></thead><tbody>{rows}</tbody></table>"
-        )
+                "<div class=\"notice err\">⚠️ De Discord-ledenlijst kon niet opgehaald worden \
+                 ({}) — hieronder staan enkel de accounts die market zelf kent.</div>",
+                esc(&e)
+            ),
+        ),
     };
+    let mut people = merge_people(members, &accounts, &hytale_names, &twitch_ids, &twitch_logins);
+
+    // "Actief" is wat we van Discord kunnen weten: het laatste bericht of reactie
+    // (`member_activity`, dezelfde bron als Manage → Absent). Wie daar niet in staat, weten
+    // we niets van — die gaat onderaan, niet bovenaan met een tijdstip 0.
+    let seen: std::collections::HashMap<String, f64> = db::list_inactives(&st.pool)
+        .into_iter()
+        .map(|m| (m.user_id, m.last_seen))
+        .collect();
+    let last_seen = |p: &Person| seen.get(&p.uid).copied().unwrap_or(0.0);
+    people.sort_by(|a, b| {
+        last_seen(b)
+            .partial_cmp(&last_seen(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.display().to_lowercase().cmp(&b.display().to_lowercase()))
+    });
+
+    let known_twitch = people.iter().filter(|p| !p.twitch_login.is_empty()).count();
+    let mut rows = String::new();
+    let mut panels = String::new();
+    for (i, p) in people.iter().enumerate() {
+        // Een sterretje bij wie we (nog) niet op Twitch kennen: dat is de lijst mensen
+        // die je mag vragen hun Twitch in Discord → Connections te koppelen. Het staat
+        // waar zijn Twitch-naam hoort te staan, want dát is wat er ontbreekt.
+        let star = if p.twitch_login.is_empty() { "<span class=\"nolink\">*</span>" } else { "" };
+        // De naam in de eerste kolom is de knop: alles wat we verder van die persoon weten
+        // verschijnt onder de tabel. Ook zonder Twitch-naam blijft ze aanklikbaar (dan enkel
+        // het sterretje) — anders is die persoon zijn eigen gegevens niet meer te bereiken.
+        let cell = |v: &str| {
+            if v.is_empty() {
+                "<span class=\"none\">niet gekend</span>".to_string()
+            } else {
+                esc(v)
+            }
+        };
+        rows.push_str(&format!(
+            "<tr data-dc=\"{dcsort}\" data-seen=\"{seensort}\">\
+               <td><button class=\"accname\" type=\"button\" data-acc=\"{i}\">{star}{tw}</button></td>\
+               <td>{dc}</td><td>{hy}</td>\
+             </tr>",
+            tw = esc(&p.twitch_login),
+            dc = cell(&p.discord),
+            hy = cell(&p.hytale),
+            dcsort = esc(&p.discord.to_lowercase()),
+            seensort = last_seen(p) as i64,
+        ));
+
+        let val = |v: &str| {
+            if v.is_empty() {
+                "<span class=\"vv none\">niet gekend</span>".to_string()
+            } else {
+                format!("<span class=\"vv\">{}</span>", esc(v))
+            }
+        };
+        let mut pass_rows = String::new();
+        for (src, left, perma) in &p.passes {
+            let what = if *perma {
+                "permanente pas".to_string()
+            } else if let Some(secs) = left {
+                format!("{} speeltijd over", fmt_dur(*secs))
+            } else {
+                "geen tegoed meer".to_string()
+            };
+            pass_rows
+                .push_str(&format!("<div class=\"kk\">{src}</div><div class=\"vv\">{what}</div>"));
+        }
+        if pass_rows.is_empty() {
+            pass_rows.push_str(
+                "<div class=\"kk\">Pas</div><div class=\"vv none\">geen pas via market</div>",
+            );
+        }
+        // Waarom iemand hier niet volledig staat — zonder dat je het moet raden.
+        let note = if p.uid.starts_with("twitch:") {
+            "<p class=\"muted\" style=\"margin:.2rem 0 .6rem\">Enkel via Twitch gekend — deze \
+             kijker heeft zijn Twitch nog niet in Discord → Connections gekoppeld, dus we \
+             weten niet welk Discord-lid dit is.</p>"
+        } else if !p.in_guild {
+            "<p class=\"muted\" style=\"margin:.2rem 0 .6rem\">Staat niet meer op de \
+             Discord-server.</p>"
+        } else {
+            ""
+        };
+        panels.push_str(&format!(
+            "<div class=\"accd\" data-acc=\"{i}\">\
+               <div class=\"k\" style=\"margin:.2rem 0 .2rem\">{title}</div>{note}\
+               <div class=\"acckv\">\
+                 <div class=\"kk\">Twitch-ID</div>{tid}\
+                 {pass_rows}\
+               </div>\
+               <form method=\"post\" action=\"/admin/accounts/name\" class=\"namefix\">\
+                 <input type=\"hidden\" name=\"uid\" value=\"{uid}\">\
+                 <input name=\"hytale_name\" value=\"{hn}\" maxlength=\"32\" required \
+                        pattern=\"[A-Za-z0-9_]{{1,32}}\" \
+                        title=\"letters, cijfers en _ — max 32 tekens\" \
+                        placeholder=\"(nog geen naam)\">\
+                 <button class=\"btn\" type=\"submit\">Hytale-naam opslaan</button>\
+               </form>\
+             </div>",
+            title = esc(p.display()),
+            tid = val(&p.twitch_id),
+            uid = esc(&p.uid),
+            hn = esc(&p.hytale),
+        ));
+    }
+
     let notice = match (&q.msg, &q.err) {
         (Some(m), _) => format!("<div class=\"notice ok\">✅ {}</div>", esc(m)),
         (_, Some(e)) => format!("<div class=\"notice err\">⚠️ {}</div>", esc(e)),
         _ => String::new(),
     };
     let body = format!(
-        "{}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Accounts</div>{notice}{table}\
+        "{subtabs}<div class=\"k\" style=\"margin:.2rem 0 .6rem\">Accounts</div>\
+         {guild_note}{notice}\
+         <p class=\"muted\">{total} mensen · van {known_twitch} kennen we de Twitch-naam. \
+          Een <span style=\"color:#c7a86a;font-weight:700\">*</span> betekent: nog geen \
+          Twitch-naam — die komt vanzelf zodra hij zijn Twitch in Discord → Connections \
+          koppelt en op deze site inlogt, of een pas redeemt op de stream.</p>\
+         <table class=\"ctable\" id=\"acctable\"><thead><tr>\
+           <th>Twitch</th>\
+           <th>Discord <button class=\"sortbtn\" id=\"accsort\" type=\"button\">Meest actief</button></th>\
+           <th>Hytale</th>\
+         </tr></thead><tbody>{rows}</tbody></table>{panels}\
          <p class=\"muted\" style=\"margin-top:.8rem\">De Hytale-naam ligt voor het lid zelf \
           vast zodra er speeltijd op staat — hier is ze recht te zetten. De correctie loopt \
           mee over de Twitch↔Discord-koppeling, zodat er nergens een tweede naam achterblijft. \
-          Let op: speeltijd die aan serverkant al onder de oude naam staat, verhuist niet mee.</p>",
-        admin_subtabs("accounts"),
+          Let op: speeltijd die aan serverkant al onder de oude naam staat, verhuist niet mee.</p>\
+         <script>\
+         (function(){{\
+           var b = document.getElementById('accsort'), tb = document.querySelector('#acctable tbody');\
+           if (!b || !tb) return;\
+           /* De pagina komt al op 'meest actief' binnen; de eerste klik moet dus op de\
+              eerste stand van deze rij uitkomen, vandaar de start op -1. */\
+           var modes = ['name-asc', 'name-desc', 'seen-desc', 'seen-asc'], i = -1;\
+           var labels = {{'name-asc': 'A→Z', 'name-desc': 'Z→A',\
+                         'seen-desc': 'Meest actief', 'seen-asc': 'Minst actief'}};\
+           b.addEventListener('click', function(){{\
+             i = (i + 1) % modes.length;\
+             var m = modes[i];\
+             b.textContent = labels[m];\
+             var rows = Array.prototype.slice.call(tb.querySelectorAll('tr'));\
+             rows.sort(function(x, y){{\
+               if (m.charAt(0) === 'n') {{\
+                 var a = x.dataset.dc || '', c = y.dataset.dc || '';\
+                 /* Zonder Discord-naam altijd onderaan, in beide richtingen. */\
+                 if (!a !== !c) return a ? -1 : 1;\
+                 return m === 'name-asc' ? a.localeCompare(c) : c.localeCompare(a);\
+               }}\
+               var s = +x.dataset.seen || 0, t = +y.dataset.seen || 0;\
+               /* Nooit gezien = niets geweten, dus ook onderaan bij 'minst actief'. */\
+               if (!s !== !t) return s ? -1 : 1;\
+               return m === 'seen-desc' ? t - s : s - t;\
+             }});\
+             rows.forEach(function(r){{ tb.appendChild(r); }});\
+           }});\
+         }})();\
+         document.querySelectorAll('.accname').forEach(function(b){{\
+           b.addEventListener('click', function(){{\
+             var k = b.dataset.acc, was = b.classList.contains('on');\
+             document.querySelectorAll('.accname.on').forEach(function(x){{x.classList.remove('on')}});\
+             document.querySelectorAll('.accd.on').forEach(function(x){{x.classList.remove('on')}});\
+             if (was) return;\
+             b.classList.add('on');\
+             var d = document.querySelector('.accd[data-acc=\"'+k+'\"]');\
+             if (d) d.classList.add('on');\
+           }});\
+         }});\
+         </script>",
+        subtabs = admin_subtabs("accounts"),
+        total = people.len(),
     );
     Html(shell(
         "Accounts — Meadow Market",
@@ -5003,7 +5304,20 @@ async fn admin_account_name(
             let msg = format!("Hytale-naam staat nu op '{want}' (was: {was}){ook}.");
             Redirect::to(&format!("/admin/accounts?msg={}", pct(&msg))).into_response()
         }
-        Err(e) => Redirect::to(&format!("/admin/accounts?err={}", pct(&e))).into_response(),
+        Err(e) => {
+            // "onbekend account" = een Discord-lid dat market nog nooit zag (nooit een
+            // bericht, nooit ingelogd, nooit iets gekocht) — dan is er geen rij om de naam
+            // op te zetten. In gewone taal zeggen wat eraan schort i.p.v. de ruwe fout.
+            let uitleg = if e.starts_with("onbekend account") {
+                "Market kent dit lid nog niet: hij heeft nog nooit een bericht gestuurd, is \
+                 nooit op de site ingelogd en kocht nooit iets. Zodra dat één keer gebeurt, \
+                 kan de Hytale-naam hier ingevuld worden."
+                    .to_string()
+            } else {
+                e
+            };
+            Redirect::to(&format!("/admin/accounts?err={}", pct(&uitleg))).into_response()
+        }
     }
 }
 
@@ -5457,6 +5771,86 @@ fn content_type_for(name: &str) -> &'static str {
 // Dry-run: gem-Use haalt élke andere kleur-gem-rol weg (self-healing swap).
 // Test de pure selectie other_gem_role_ids — de kern van de Ruby-blijft-staan-fix.
 // ---------------------------------------------------------------------------
+#[cfg(test)]
+mod accounts_bundelen {
+    use super::merge_people;
+    use crate::db::AccountRow;
+    use std::collections::HashMap;
+
+    fn row(uid: &str, user: &str, hytale: &str) -> AccountRow {
+        AccountRow {
+            user_id: uid.into(),
+            username: user.into(),
+            hytale_name: hytale.into(),
+            day_pass_secs_left: None,
+            perma: false,
+        }
+    }
+
+    /// De kern van de tab: dezelfde mens onder één naam, en vreemden uit elkaar.
+    #[test]
+    fn een_regel_per_mens() {
+        let members = vec![
+            ("100".to_string(), "easycomes".to_string()),
+            ("200".to_string(), "Zemerion".to_string()),
+            ("300".to_string(), "HeijiCat".to_string()),
+            ("400".to_string(), "FayBelle".to_string()), // koopt niets, speelt wel
+        ];
+        let accounts = [
+            row("100", "easycomes", "easycomes"),
+            row("200", "Zemerion", "Zemerion"),
+            row("300", "HeijiCat", "Heiji_Cat"),
+            // Zijn Twitch-redeem: gekoppeld via connections (coins.twitch_id).
+            row("twitch:152265160", "twitch:152265160", "easycomes"),
+            // Niet gekoppeld, maar dezelfde Hytale-naam → dezelfde speler.
+            row("twitch:1092358930", "twitch:1092358930", "Heiji_Cat"),
+            // Kijker die we nergens anders kennen → blijft apart staan.
+            row("twitch:487352883", "twitch:487352883", "GhostToSpace"),
+        ];
+        let twitch_ids = HashMap::from([("100".to_string(), "152265160".to_string())]);
+        let logins = HashMap::from([
+            ("152265160".to_string(), "easycomes55".to_string()),
+            ("487352883".to_string(), "ghosttospace".to_string()),
+        ]);
+        // Zemerion zette zijn naam vast zonder ooit iets te kopen: enkel in `coins`.
+        let hytale = HashMap::from([("200".to_string(), "Zemerion".to_string())]);
+
+        let people = merge_people(members, &accounts, &hytale, &twitch_ids, &logins);
+        let namen: Vec<&str> = people.iter().map(|p| p.display()).collect();
+        assert_eq!(
+            namen,
+            ["easycomes55", "FayBelle", "ghosttospace", "HeijiCat", "Zemerion"],
+            "één regel per mens, Twitch-naam eerst, alfabetisch"
+        );
+
+        let easy = people.iter().find(|p| p.display() == "easycomes55").unwrap();
+        assert_eq!(easy.uid, "100", "de correctie gaat naar het Discord-account");
+        assert_eq!((easy.discord.as_str(), easy.hytale.as_str()), ("easycomes", "easycomes"));
+
+        let heiji = people.iter().find(|p| p.display() == "HeijiCat").unwrap();
+        assert_eq!(heiji.twitch_id, "1092358930", "zelfde Hytale-naam = zelfde mens");
+        assert!(heiji.twitch_login.is_empty(), "van hem kennen we de Twitch-naam nog niet");
+
+        let ghost = people.iter().find(|p| p.display() == "ghosttospace").unwrap();
+        assert_eq!(ghost.uid, "twitch:487352883");
+        assert!(ghost.discord.is_empty(), "geen Discord-koppeling = niet verzinnen");
+
+        let fay = people.iter().find(|p| p.display() == "FayBelle").unwrap();
+        assert!(fay.hytale.is_empty(), "market kent haar Hytale-naam niet — in te vullen in de tab");
+    }
+
+    /// Valt de Discord-ledenlijst weg (rate limit, token), dan mag de tab niet leeg zijn
+    /// en mag er zeker niemand versmelten.
+    #[test]
+    fn zonder_ledenlijst_blijft_de_db_zichtbaar() {
+        let accounts = [row("100", "easycomes", "easycomes")];
+        let people =
+            merge_people(Vec::new(), &accounts, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        assert_eq!(people.len(), 1);
+        assert!(!people[0].in_guild, "we weten niet of hij nog op de server staat");
+    }
+}
+
 #[cfg(test)]
 mod gem_swap_dryrun {
     use super::other_gem_role_ids;
