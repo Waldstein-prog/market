@@ -1,4 +1,153 @@
-# Handover — Meadow Market (2026-08-18)
+# Handover — Meadow Market (2026-08-25)
+
+## 🧱 2026-08-25 — Manage → Inventory (LIVE)
+
+Met Faybelle. Vraag: een gem van een nieuwe collectie belandde in de inventory onder
+"Basic Gems", ook al stond hij op een eigen schap. Dat was geen bug maar hardcode: de
+Gems-tab plakte álle items met categorie `inventory` onder één vaste kop.
+
+**Nu is de inventory ingesteld in plaats van gehardcodeerd.**
+
+- **Nieuwe tabel `inv_tabs`** (id, title, icon, `builtin`, position). Geseed met de drie
+  bestaande tabs: Coins / Gems / Trinkets. `builtin` (`coins`|`gems`|`trinkets`|leeg) is de
+  code-haak — de titel mag veranderen zonder dat er iets breekt. Eigen tabs hebben `builtin`
+  leeg en tonen enkel hun schappen.
+- **Nieuwe kolom `shelves.inv_tab`** — onder welke tab een schap valt. NULL = Gems
+  (`gems_tab_id`, met terugval op de eerste tab zodat een schap nooit onzichtbaar wordt).
+  Bij de seed krijgen schappen mét een booster-item de Trinkets-tab, zodat een lid na de
+  migratie exact ziet wat hij ervoor zag.
+- **Inventory-Gems groepeert per schap**: één kop per schap, schapnaam als titel. "Basic
+  Gems" bestaat niet meer als vaste kop. Zowel de ledenpagina (`inventory_home`) als
+  Manage → Inventory Preview draaien op dezelfde renderer `tab_groups`.
+- **Manage → 🎒 Inventory** (nieuw, tussen 📜 Log en 👁 Inventory Preview): tabs hernoemen
+  (icoon + naam), ↑↓ ordenen, eigen tab toevoegen/verwijderen; per tab de schappen met ↑↓ en
+  een keuzelijst "naar een andere tab"; per schap de items met ◀ ▶.
+- **Routes verhuisd**: `/admin/inventory` = de nieuwe instelpagina, de preview zit nu op
+  `/admin/inventory/preview` (zoals Shop = `/admin/market` + `/admin/shop/preview`).
+
+### Tweede ronde dezelfde dag (Faybelle, ook LIVE)
+
+- **Passen staan niet meer in de lijst** van Manage → Inventory. Ze horen in de shop
+  (Permanent Collection) en verschijnen na aankoop als icoontje in de **Coins**-tab; ze op de
+  inventory-instelpagina tonen was enkel verwarrend. Enkel categorie `inventory`/`booster`
+  staat er nog.
+- Omdat die rijen weg zijn, gebruiken de pijltjes daar `move_item_collectible`: die
+  **springt over de onzichtbare buren** (passen, gewone shop-items). Zonder dat leek een
+  pijltje soms niets te doen. In Manage → Shop blijft het gewone `move_item` gelden.
+- **Schapnaam ter plaatse aanpasbaar** op de Inventory-pagina (Rename-veldje per schap) —
+  die naam is nu de kop die een lid ziet, dus hij hoort daar aanpasbaar te zijn.
+- **Gem in een andere collectie zetten** kan nu ook vanaf die pagina: keuzelijst per gem
+  (dezelfde `set_item_shelf` als in Shop) + een ＋ per schap voor een nieuw item — invullen
+  (naam/prijs/afbeelding) gebeurt nog altijd in Manage → Shop, daar landt de ＋ ook.
+- `back=inventory` op de formulieren `item/move`, `item/shelf` en `shelf/rename` stuurt je
+  terug naar de Inventory-pagina i.p.v. naar Shop. Vaste keuze uit twee eigen paden — geen
+  vrije URL uit een formulier.
+
+### Derde ronde (Manage → Shop overzichtelijker, ook LIVE)
+
+- **Schappen ordenen in de Shop**: ▲▼ per schap, dezelfde `move_shelf` als op de
+  Inventory-pagina (`back=market` stuurt je terug naar Shop).
+- **Item-kaarten staan dicht.** Een kaart toont enkel afbeelding, naam, prijs en type; alle
+  invulvakken zitten in `.abody` en gaan open met **✏** (`ITEM_EDIT_JS`, puur weergave).
+  De **◀ ▶-pijltjes staan buiten dat blok** — ordenen zonder eerst elke kaart open te
+  klappen. Een net bewaarde kaart (`?saved=<id>`) opent vanzelf, anders zie je je eigen
+  wijziging niet terug.
+- Delete-item staat nu ín de opengeklapte kaart (niet meer per ongeluk aan te klikken).
+
+### Vierde ronde (Shop-beheer ziet eruit als de shop, ook LIVE)
+
+- Elke kaart in Manage → Shop toont bovenaan het item **zoals in de shop/Shop preview**
+  (dezelfde `shop_slot`). De kaart is dood: `.shoplook{pointer-events:none}` — er valt van
+  op de beheerpagina niets te kopen. Ze wordt getekend met de waarden van een gewone koper
+  (niet bezeten, naam gezet, `i64::MAX` coins, testpas toegelaten), anders zou de admin z'n
+  eigen situatie ("te duur", 🔒) de weergave sturen.
+- **◀ ▶ weg uit Manage → Shop**: de dagselectie wordt willekeurig getrokken, dus de volgorde
+  van een schap doet daar niets. Ordenen hoort in Manage → Inventory, want daar bepaalt de
+  volgorde wél wat een lid ziet. De ▲▼ voor de schappen zelf blijven in beide.
+
+### Vijfde ronde — gem ⇄ Discord-kleurrol expliciet (LIVE)
+
+Faybelle's vraag: nergens te zien welke kleurrol een gem geeft. Klopte: de koppeling was
+**impliciet op naam** (`role_id_by_name(item.name)`), en `items.role_id` stond in de DB maar
+werd nergens gelezen — erger nog, elke Save wiste hem, want de beheerkaart had geen veld.
+
+- **Keuzelijst "Discord colour role"** op elke gem-kaart in Manage → Shop (rollen via
+  `all_roles`, `@everyone` eruit). Gekozen rol wint; leeg = geen rol, enkel de site-kleur.
+- **Auto-koppeling**: bij elke weergave van Manage → Shop krijgt elke gem zonder rol de
+  gelijknamige rol toegewezen (`autolink_gem_roles`, idempotent). Zelfde gedrag als vroeger,
+  maar nu staat het vast in de keuzelijst — te controleren i.p.v. te raden (haar vraag).
+- Geen rol gekozen én geen gelijknamige rol ⇒ **⚠️-regel** op de kaart: het lid krijgt dan
+  enkel de site-kleur.
+- `use_gem` / `unequip_gem` / refund / test-reset lopen nu via `gem_role_id()` (gekozen rol,
+  anders de naam). `other_gem_role_ids` kreeg er de gems-met-role_id bij: een rol geldt als
+  gem-rol via het gekozen id, of — enkel zonder keuze — via de naam. Nieuwe test
+  `explicit_role_wins_over_the_name`; 85 tests groen.
+- `list_roles` geeft nu `(id, naam, hex)` en `sync_gem_colors` matcht eerst op `role_id`,
+  daarna pas op naam. Zo volgt de kleur ook een rol die anders heet dan de gem.
+- Valkuil: haalt `all_roles` niets op (Discord plat / rechten), dan toont de kaart géén
+  lijst maar een hidden veld met de huidige waarde — anders wist elke Save de keuze.
+
+**Lucky Horseshoe** (haar tweede vraag): die werkt, maar niet via een rol. Bezit = `weight 2`
+i.p.v. 1 bij de trekking van Fortuna's Favor (`db::chest_weight`), permanent, en de
+win-embed zegt "🍀 Their Lucky Horseshoe doubled the odds!". Geen Discord-rol aan verbonden.
+
+### Zesde ronde — "in the rotation" vinkte zichzelf weer aan (LIVE)
+
+Geen zelf-aanzettende rotatie: het **dagrotatie-blok is een eigen formulier** (met zijn
+eigen ✓ voor het gewicht). De 💾 Save van het item stuurt dat formulier niet mee, dus wie
+het vinkje uitzette en dan op 💾 duwde, kreeg gewoon de opgeslagen — nog altijd aangevinkte
+— stand terug. Niets sloeg iets over: het vinkje was nooit verstuurd.
+
+Fix: het vinkje bewaart zichzelf bij een klik (`onchange` → submit van zijn eigen form).
+`KEEP_SCROLL_JS` houdt de scrollpositie, en `?saved=<id>` klapt dezelfde kaart weer open.
+Geverifieerd: rotatie uit → 💾 Save → blijft uit.
+
+### Valkuilen die erin zitten
+
+- **Het is één lijst.** Schap-volgorde en item-volgorde zijn dezelfde `position` als in
+  Manage → Shop; ordenen in de Inventory verplaatst ze dus ook in de shop. Daarom staan de
+  niet-verzamelbare items van een schap gedimd mee in de lijst ("niet in de inventory"):
+  hun plaats telt mee, en zonder die regels lijkt een pijltje soms niets te doen.
+- **De permanente pas is categorie `boost`, niet `booster`** en dus geen gewoon
+  verzamel-item. Hij hangt als los kaartje achter de laatste groep van de Trinkets-tab
+  (parameter `extra` van `tab_groups`) — precies zoals vroeger.
+- `db::all_booster_items` is weg: de Trinkets-tab toont niet langer "alle boosters" maar de
+  schappen die eronder hangen.
+- De drie vaste tabs zijn niet te verwijderen (`delete_inv_tab` weigert ze); een eigen tab
+  wissen zet zijn schappen terug op NULL = Gems, er gaat nooit een item verloren.
+- De kop van de Trinkets-tab is nu de **schapnaam** (op prod: "Boosters"). Wil Faybelle daar
+  "Trinkets" zien staan, dan is dat een rename van het schap in Manage → Shop.
+
+### Getest (lokaal, `MARKET_WEB_ONLY=1`, dev-DB)
+
+Migratie schoon (3 tabs geseed, Boosters-schap → Trinkets), tab toevoegen/hernoemen/
+verplaatsen/wissen, schap naar een andere tab, schap ↑↓, item ◀ ▶ met terugkeer naar de
+juiste pagina, ledenpagina + preview + shop renderen 200. Ook getest dat een pijltje over een
+pas heen springt (schap "Hytale Access": DescTest ⇄ LabelTest, pas blijft staan).
+
+**Gedeployd** (`./deploy/deploy.sh`, service active, site 200, geen fouten in het log).
+**Nog niet gecommit.**
+
+
+## ✅ 2026-08-22 — check-in-streak in de inventory (LIVE)
+
+Drie deploys, alles draait op prod.
+
+- **Naast het grote saldo** staat nu 🔥 + de **lopende** check-in-streak, vet en groot maar duidelijk
+  kleiner, met bijschrift `current check-in streak` op dezelfde lijn als `current balance`. Op desktop
+  hangt dat blok ABSOLUUT rechts zodat het saldo exact gecentreerd blijft; op telefoonbreedte staan saldo
+  en streak als twee kolommen naast elkaar (`.balrow` wordt flex), want daar liep het lange bijschrift
+  over `current balance` heen.
+- **Nieuwe statregel** `Highest Daily Check-in Streak` (hoofdletters zo gevraagd, wijkt bewust af van de
+  buurregels), met hetzelfde 🔥 vóór het getal, tussen "Coins earned all-time" en "Chests opened".
+- **Time spent in Meadowland** verhuisd naar onder "Chests won".
+- **Nieuwe kolom** `coins.max_daily_streak`, vanaf nu bijgehouden in `award_daily`
+  (`MAX(max_daily_streak, excluded.daily_streak)`), plus een vangnet bij elke start
+  (`max_daily_streak = daily_streak` waar de lopende hoger is). Het verleden is **eenmalig** uit
+  `server_log` gehaald (`category='daily'`, detail `"streak N · balance X"`, marker
+  `max_streak_backfill_v1`). Het logboek begint pas 2026-07-14, dus wat daarvóór ligt valt terug op de
+  lopende streak. Uitkomst op prod: easycomes 42, Yâ-Ôd 42, FayBelle 40, HeijiCat 35, TimmyThumb 25,
+  Sigilien 10, Waldstein 10.
 
 ## 💭 2026-08-18 — richting: actieve vs. inactieve leden (NIET gebouwd, wacht op Faybelle)
 

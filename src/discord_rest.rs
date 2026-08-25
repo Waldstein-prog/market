@@ -83,7 +83,7 @@ impl Discord {
 
     /// Rollen van een guild: (naam, kleur-hex "#rrggbb"). Rollen zonder kleur (color 0)
     /// worden overgeslagen.
-    pub async fn list_roles(&self, guild: &str) -> Result<Vec<(String, String)>, String> {
+    pub async fn list_roles(&self, guild: &str) -> Result<Vec<(String, String, String)>, String> {
         let url = format!("{API}/guilds/{guild}/roles");
         let resp = self
             .client
@@ -100,12 +100,13 @@ impl Discord {
         let mut out = Vec::new();
         if let Some(roles) = arr.as_array() {
             for r in roles {
+                let id = r["id"].as_str().unwrap_or("").to_string();
                 let name = r["name"].as_str().unwrap_or("").to_string();
                 let color = r["color"].as_u64().unwrap_or(0);
                 if name.is_empty() || color == 0 {
                     continue;
                 }
-                out.push((name, format!("#{color:06x}")));
+                out.push((id, name, format!("#{color:06x}")));
             }
         }
         Ok(out)
@@ -178,7 +179,7 @@ impl Discord {
     }
 
     /// Alle rollen van de eigen guild als (id, naam) — inclusief kleurloze rollen.
-    /// (`list_roles` slaat kleurloze over en geeft geen id; deze is voor rol-matching.)
+    /// (`list_roles` slaat kleurloze rollen over; deze geeft ze allemaal.)
     pub async fn all_roles(&self) -> Result<Vec<(String, String)>, String> {
         let url = format!("{API}/guilds/{}/roles", self.guild);
         let resp = self

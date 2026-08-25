@@ -150,6 +150,15 @@ form.submit();});});})();</script>";
 /// Klik op een (bezeten) gem-kaart → toon je naam live in díe gem-kleur op de
 /// preview-swatches (dark/light/Discord-achtergrond). Louter een voorbeeld; Use zet de
 /// kleur echt vast. Markeert de gekozen kaart.
+/// ✏ Edit op een shop-kaart: klapt alle invulvakken van dát item open of dicht. De kaart
+/// staat standaard dicht (enkel afbeelding, naam, prijs, type), zodat een schap met tien
+/// items nog te overzien is. Puur weergave — er wordt niets bewaard door te klappen.
+const ITEM_EDIT_JS: &str = "<script>(function(){\
+  document.querySelectorAll('.aitem .aedit').forEach(function(b){\
+    b.addEventListener('click',function(){\
+      var card=b.closest('.aitem'),body=card.querySelector('.abody');if(!body)return;\
+      body.hidden=!body.hidden;card.classList.toggle('open',!body.hidden);});});})();</script>";
+
 const GEM_PREVIEW_JS: &str = "<script>(function(){\
 var sw=document.querySelectorAll('.nameshow .swatch');\
 document.querySelectorAll('.gemcard.previewable').forEach(function(card){\
@@ -257,9 +266,16 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/use/gem", post(use_gem))
         .route("/use/gem/unequip", post(unequip_gem))
         .route("/admin/market", get(admin_market))
-        .route("/admin/inventory", get(admin_inventory_preview))
         .route("/admin/shop/preview", get(admin_shop_preview))
         .route("/admin/shop/reroll", post(admin_shop_reroll))
+        .route("/admin/inventory", get(admin_inventory))
+        .route("/admin/inventory/preview", get(admin_inventory_preview))
+        .route("/admin/invtab/add", post(admin_invtab_add))
+        .route("/admin/invtab/update", post(admin_invtab_update))
+        .route("/admin/invtab/move", post(admin_invtab_move))
+        .route("/admin/invtab/delete", post(admin_invtab_delete))
+        .route("/admin/shelf/move", post(admin_shelf_move))
+        .route("/admin/shelf/tab", post(admin_shelf_tab))
         .route("/admin/shelf/add", post(admin_shelf_add))
         .route("/admin/shelf/rename", post(admin_shelf_rename))
         .route("/admin/shelf/delete", post(admin_shelf_delete))
@@ -504,6 +520,14 @@ details.acc[open]>summary::after{{transform:rotate(90deg)}}
 details.acc>p{{margin:0;padding:0 1rem .85rem;color:#c8d6c0;line-height:1.45}}
 details.acc .mc{{height:1.1em;vertical-align:-.2em}}
 .earned{{font-size:2.6rem;font-weight:800;color:{MEADOW};text-align:center;margin:.2rem 0 0;line-height:1}}
+/* Saldo blijft exact op de kaartbreedte gecentreerd; de streak hangt er ABSOLUUT naast.
+   Zou de streak gewoon in de flow staan, dan duwde hij het saldo naar links — en het saldo
+   moet gecentreerd blijven. `bottom:0` legt beide bijschriften op dezelfde lijn. */
+.balrow{{position:relative;margin:.2rem 0 0}}
+.balcap{{text-align:center;margin:.15rem 0 0}}
+.streakside{{position:absolute;right:0;bottom:0;max-width:40%;text-align:center}}
+.streaknum{{font-size:1.6rem;font-weight:800;color:{MEADOW};line-height:1;white-space:nowrap}}
+.streakside .balcap{{font-size:.72rem;line-height:1.2}}
 .levelrow{{display:flex;align-items:center;gap:.6rem;margin:1.1rem 0}}
 .lvlbadge{{background:{MEADOW};color:#0e1510;font-weight:800;border-radius:9px;
   padding:.3rem .6rem;font-size:.9rem;white-space:nowrap}}
@@ -898,6 +922,31 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   background:#141d14;color:{MEADOW};font-size:1.7rem;cursor:pointer;align-self:center}}
 .plus:hover{{background:#1a271a}}
 .ashelf{{border-top:1px solid #22301f;padding-top:1rem;margin-top:1.2rem}}
+/* Beheerkaart in de Shop: bovenaan het item zoals het in de shop staat (dezelfde
+   .slot-opmaak), daaronder ✏ Edit; de invulvakken zitten in .abody en staan dicht.
+   `pointer-events:none` maakt de shop-kaart dood — niets te kopen vanaf beheer. */
+.shoplook{{pointer-events:none;justify-content:center;overflow:visible;padding:0}}
+.aitem .aeditrow{{justify-content:center;margin:.3rem 0 .1rem}}
+.aitem.open{{outline:1px solid #3a4d38}}
+.hint.warn{{color:#e8b45a}}
+/* Manage -> Inventory: tabs met hun schappen. Compacte regels, want hier wordt enkel
+   geordend -- het echte item-formulier staat in Manage -> Shop. */
+.itab{{border:1px solid #22301f;border-radius:10px;padding:.7rem .8rem;margin:1rem 0;
+  background:#0e150e}}
+.ishelf{{border-top:1px solid #1b271a;margin-top:.7rem;padding-top:.6rem}}
+.ishelf-head{{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin-bottom:.4rem}}
+.ishelf-head b{{flex:1 1 140px}}
+.iitems{{display:flex;flex-wrap:wrap;gap:.4rem}}
+.ainv{{display:flex;align-items:center;gap:.4rem;padding:.25rem .45rem;width:340px;
+  max-width:100%;border:1px solid #2c3d2a;border-radius:8px;background:#141d14}}
+.ainv .mvshelf{{flex:0 1 130px;min-width:0}}
+.ainv select{{max-width:100%}}
+.ainv .thumb{{width:26px;height:26px;display:flex;align-items:center;justify-content:center}}
+.ainv .thumb img,.ainv .thumb .gem{{width:22px;height:22px;border-radius:50%;
+  object-fit:cover;display:block}}
+.ainv .nm{{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:.85rem}}
+.ashelf-head input.ic,.addbar input.ic{{width:3.4rem;text-align:center}}
 .ashelf-head{{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}}
 .ashelf-head .rn{{display:flex;gap:.3rem;flex:1 1 240px}}
 .addbar{{display:flex;gap:.4rem;margin-top:1.6rem;max-width:26rem}}
@@ -962,6 +1011,15 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
   .subtab{{font-size:.85rem;padding:.35rem .6rem}}
   .bigname{{font-size:1.5rem}}
   .earned{{font-size:2.1rem}}
+  .streaknum{{font-size:1.25rem}}
+  /* Op een telefoon is er te weinig breedte om de streak ABSOLUUT naast een gecentreerd
+     saldo te hangen: "current check-in streak" liep over "current balance". Daarom hier
+     twee kolommen naast elkaar die samen gecentreerd staan — het saldo schuift dan een
+     paar pixels naar links, maar niets overlapt nog. */
+  .balrow{{display:flex;align-items:flex-end;justify-content:center;gap:.9rem}}
+  .balmain{{min-width:0}}
+  .streakside{{position:static;max-width:42%;padding-bottom:.1rem}}
+  .streakside .balcap{{font-size:.68rem}}
   .coins{{font-size:2rem}}
   h1{{font-size:1.2rem}}
   /* Tabellen krijgen hun eigen zijwaartse schuifruimte i.p.v. de pagina te rekken. */
@@ -1062,11 +1120,12 @@ fn admin_subtabs(active: &str) -> String {
         format!("<a class=\"subtab{on}\" href=\"{href}\">{label}</a>")
     };
     format!(
-        "<div class=\"subtabs\">{}{}{}{}{}{}{}{}{}{}</div>",
+        "<div class=\"subtabs\">{}{}{}{}{}{}{}{}{}{}{}</div>",
         item("/admin/settings", "settings", "⚙ Settings"),
         item("/panel", "server", "🖥 Panel"),
         item("/admin/log", "log", "📜 Log"),
-        item("/admin/inventory", "inv_preview", "👁 Inventory Preview"),
+        item("/admin/inventory", "inventory", "🎒 Inventory"),
+        item("/admin/inventory/preview", "inv_preview", "👁 Inventory Preview"),
         item("/admin/market", "market", "🛒 Shop"),
         item("/admin/shop/preview", "shop_preview", "👁 Shop Preview"),
         item("/admin/coins", "coins", "🪙 Coins"),
@@ -1287,6 +1346,68 @@ fn booster_slot(it: &db::Item, owned: bool) -> String {
     )
 }
 
+/// De verzamelvakjes van één inventory-tab, **gegroepeerd per schap** (schapnaam als
+/// kop). Welk schap onder welke tab valt staat in Manage → Inventory; de volgorde van
+/// de schappen en van de items erbinnen is dezelfde lijst als in Manage → Shop.
+///
+/// Het soort kaartje volgt de categorie van het item, niet de tab: 'inventory' krijgt
+/// een gem-kaart (kleur-preview + Use), 'booster' een trinket-kaart zonder knop. Een
+/// schap zonder verzamelbare items levert geen kop op.
+///
+/// `owned = None` is preview-modus: alles onthuld (Manage → Inventory Preview).
+/// `extra` hangt losse kaartjes achter de laatste groep (de permanente pas, die geen
+/// gewoon verzamel-item is); zijn er geen groepen, dan krijgen ze de tab-titel als kop.
+fn tab_groups(
+    pool: &db::DbPool,
+    tab_id: i64,
+    tab_title: &str,
+    shelves: &[db::Shelf],
+    gems_tab: i64,
+    owned: Option<&std::collections::HashSet<i64>>,
+    name_color: &str,
+    extra: &str,
+) -> String {
+    let mut groups: Vec<(String, String)> = Vec::new();
+    for sh in shelves
+        .iter()
+        .filter(|s| s.inv_tab.unwrap_or(gems_tab) == tab_id)
+    {
+        let slots: String = db::shelf_items(pool, sh.id)
+            .iter()
+            .filter(|it| it.category == "inventory" || it.category == "booster")
+            .map(|it| {
+                let own = owned.map_or(true, |o| o.contains(&it.id));
+                if it.category == "booster" {
+                    booster_slot(it, own)
+                } else {
+                    let eq =
+                        own && !it.color.is_empty() && it.color.eq_ignore_ascii_case(name_color);
+                    gem_slot(it, own, eq)
+                }
+            })
+            .collect();
+        if !slots.is_empty() {
+            groups.push((sh.title.clone(), slots));
+        }
+    }
+    if !extra.is_empty() {
+        match groups.last_mut() {
+            Some(last) => last.1.push_str(extra),
+            None => groups.push((tab_title.to_string(), extra.to_string())),
+        }
+    }
+    groups
+        .iter()
+        .map(|(title, slots)| {
+            format!(
+                "<h2 class=\"shelf-title center fancy\">{}</h2>\
+                 <div class=\"shelf wrap gems6\">{slots}</div>",
+                esc(title)
+            )
+        })
+        .collect()
+}
+
 /// Inventory-home met sub-tabs Coins / Gems / Boosts.
 /// Onder welke Hytale-naam zoeken we de **speeltijd** van dit lid op?
 ///
@@ -1479,8 +1600,8 @@ fn inventory_home(
             }
         }
     };
-    // Speeltijd op de server, onder de all-time-regel. Komt van de tale-kant (playtime.json)
-    // en telt ALLE tijd in het spel — ook tijd zonder pas, dus niet te verwarren met het
+    // Speeltijd op de server, onderaan de statregels (onder "Chests won"). Komt van de
+    // tale-kant (playtime.json) en telt ALLE tijd in het spel — ook tijd zonder pas, dus niet te verwarren met het
     // pas-verbruik. Zoeken gebeurt op de Hytale-naam die dit lid vastzette; is die er niet,
     // dan die van zijn pas. Geen naam of nog nooit gespeeld ⇒ geen regel.
     let playtime_row = {
@@ -1496,18 +1617,26 @@ fn inventory_home(
     };
     // Chest-teller onder de all-time-regel: hoeveel chests dit lid meeopende en won.
     let (opened, won) = db::chest_counts(pool, uid);
+    // Check-in-streak: de lopende naast het saldo, de hoogste ooit als statregel.
+    let streak = db::get_daily_streak(pool, uid);
+    let max_streak = db::get_max_daily_streak(pool, uid);
     let coins_panel = format!(
-        "<div class=\"earned\">{MC} <span data-bal>{coins}</span></div>\
-         <p class=\"muted\" style=\"text-align:center;margin:.15rem 0 0\">current balance</p>\
+        "<div class=\"balrow\"><div class=\"balmain\">\
+           <div class=\"earned\">{MC} <span data-bal>{coins}</span></div>\
+           <p class=\"muted balcap\">current balance</p></div>\
+           <div class=\"streakside\"><div class=\"streaknum\">🔥 {streak}</div>\
+             <p class=\"muted balcap\">current check-in streak</p></div></div>\
          <div class=\"levelrow\"><span class=\"lvlbadge\" data-lvl>Lv {lvl}</span>\
            <div class=\"bar\"><div class=\"fill\" data-fill style=\"width:{pct}%\"></div></div>\
            <span class=\"lvlnm\" data-lvlnm>{nm}</span></div>\
          <div class=\"statrow\"><span class=\"k\">Coins earned all-time</span>\
-           <span>{MC} <b data-earned>{total_earned}</b></span></div>{playtime_row}\
+           <span>{MC} <b data-earned>{total_earned}</b></span></div>\
+         <div class=\"statrow\"><span class=\"k\">Highest Daily Check-in Streak</span>\
+           <span>🔥 <b>{max_streak}</b></span></div>\
          <div class=\"statrow\"><span class=\"k\">Chests opened</span>\
            <span><b>{opened}</b></span></div>\
          <div class=\"statrow\"><span class=\"k\">Chests won</span>\
-           <span><b>{won}</b></span></div>{grants}{pass_row}",
+           <span><b>{won}</b></span></div>{playtime_row}{grants}{pass_row}",
         grants = grants_html(grants),
     );
 
@@ -1533,25 +1662,23 @@ fn inventory_home(
             nm = esc(name),
         )
     };
-    // Verzamelkaart: elk (niet-pas) shop-item krijgt een kaart — grijs met "?" tot je het
-    // koopt, daarna onthuld (afbeelding + naam + uitleg). ALLE gems staan samen in één set
-    // ("Basic Gems"), zo compact mogelijk: `.shelf wrap` vult de rij en wrapt pas als hij vol
-    // is — geen vaste rij-per-schap meer. Volgorde = schap-volgorde (primary → secondary → …).
-    let slots: String = db::list_shelves(pool)
-        .iter()
-        .flat_map(|(sid, _)| db::shelf_items(pool, *sid))
-        .filter(|it| it.category == "inventory")
-        .map(|it| {
-            let own = owned.contains(&it.id);
-            let eq = own && !it.color.is_empty() && it.color.eq_ignore_ascii_case(&name_color);
-            gem_slot(&it, own, eq)
-        })
-        .collect();
-    let collection = if slots.is_empty() {
-        String::new()
-    } else {
-        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap gems6\">{slots}</div>")
-    };
+    // Verzamelkaarten: elk verzamelbaar shop-item krijgt een kaartje — grijs met "?" tot je
+    // het koopt, daarna onthuld (afbeelding + naam + uitleg). De indeling komt volledig uit
+    // Manage → Inventory: welke tabs er zijn, en welk schap onder welke tab valt. Binnen een
+    // tab staat er één kop per schap; een schap zonder eigen tab valt onder Gems.
+    let tabs = db::list_inv_tabs(pool);
+    let shelves = db::list_shelves_full(pool);
+    let gems_tab = db::gems_tab_id(pool);
+    let collection = tab_groups(
+        pool,
+        gems_tab,
+        "Gems",
+        &shelves,
+        gems_tab,
+        Some(&owned),
+        &name_color,
+        "",
+    );
     // Admin-testhulp: verzamel-aankopen terugdraaien (coins terug). (Sync gem colors staat
     // op de Manage-pagina.)
     let admin_reset = if admin {
@@ -1599,49 +1726,91 @@ fn inventory_home(
         // Geen naam- of "no pass"-tekst meer: spelers kennen hun eigen naam wel, en de
         // whitelist-status hierboven zegt al of ze toegang hebben.
 
-        // Boosters (Lucky Horseshoe): permanent verzamel-item, getoond als grey-out-slot
-        // zoals de gems — vergrendeld "???" tot je het koopt, daarna onthuld. Géén Use:
-        // bezit = altijd dubbele kans bij de treasure chest (Fortuna's Favor).
-        let booster_owned: std::collections::HashSet<i64> =
-            db::owned_item_ids(pool, uid).into_iter().collect();
-        let boosters = db::all_booster_items(pool);
-        let mut cards: String = boosters
-            .iter()
-            .map(|it| booster_slot(it, booster_owned.contains(&it.id)))
-            .collect();
-        // Permanente pas als greyed-out verzamelvakje — hoort visueel het best hier. LET OP:
-        // hij is category 'boost', NIET 'booster', dus hij zit NOOIT in de rnd-korf en blijft
-        // altijd gewoon in de shop te koop. Onthuld zodra je permanente toegang bezit.
-        if let Some(perma) = db::boost_items(pool).into_iter().find(|it| it.duration == 0) {
-            cards.push_str(&booster_slot(&perma, db::has_perma_access(pool, uid)));
-        }
-        let shelf = if cards.is_empty() {
-            String::new()
-        } else {
-            format!("<h2 class=\"shelf-title center fancy\">Trinkets</h2><div class=\"shelf\">{cards}</div>")
+        // Trinkets: de schappen die in Manage → Inventory onder déze tab hangen, elk met
+        // hun eigen kop. Wat hier staat is dus in te stellen, niet meer "alle boosters".
+        //
+        // De permanente pas is géén gewoon verzamel-item (categorie 'boost', NIET 'booster')
+        // maar hoort visueel wel bij de trinkets, dus die hangt als los kaartje achter de
+        // laatste groep. Het verschil is niet cosmetisch: een item met categorie 'boost' en
+        // duration 0 gééft permanente Hytale-toegang bij aankoop.
+        let perma = db::boost_items(pool)
+            .into_iter()
+            .find(|it| it.duration == 0)
+            .map(|it| booster_slot(&it, db::has_perma_access(pool, uid)))
+            .unwrap_or_default();
+        let shelf = match tabs.iter().find(|t| t.builtin == "trinkets") {
+            Some(t) => tab_groups(
+                pool,
+                t.id,
+                &t.title,
+                &shelves,
+                gems_tab,
+                Some(&owned),
+                &name_color,
+                &perma,
+            ),
+            None => String::new(),
         };
         format!("{status}{shelf}")
     };
 
-    let cls = |t: &str| if t == active { " on" } else { "" };
+    // De tabs zelf komen uit Manage → Inventory: naam, icoon en volgorde staan daar, en er
+    // kunnen eigen tabs bij voor een nieuwe verzameling. `builtin` blijft de code-haak voor
+    // de drie tabs met vaste inhoud; een eigen tab toont enkel zijn schappen. De sleutels
+    // coins/gems/boosts blijven ongewijzigd — `?tab=gems` staat in redirects en links.
+    let key = |t: &db::InvTab| match t.builtin.as_str() {
+        "coins" => "coins".to_string(),
+        "gems" => "gems".to_string(),
+        "trinkets" => "boosts".to_string(),
+        _ => format!("t{}", t.id),
+    };
+    let active_key = tabs
+        .iter()
+        .map(key)
+        .find(|k| k == active)
+        .or_else(|| tabs.first().map(key))
+        .unwrap_or_else(|| "coins".to_string());
+    let mut subtabs = String::new();
+    let mut panels = String::new();
+    for t in &tabs {
+        let k = key(t);
+        let on = if k == active_key { " on" } else { "" };
+        // De Coins-tab draagt het muntje als afbeelding; de rest een gewone emoji.
+        let icon = if t.builtin == "coins" {
+            MC.to_string()
+        } else {
+            esc(&t.icon)
+        };
+        subtabs.push_str(&format!(
+            "<button class=\"subtab{on}\" data-t=\"{k}\">{icon} {title}</button>",
+            title = esc(&t.title),
+        ));
+        let body = match t.builtin.as_str() {
+            "coins" => coins_panel.clone(),
+            "gems" => gems_panel.clone(),
+            "trinkets" => boosts_panel.clone(),
+            _ => tab_groups(
+                pool,
+                t.id,
+                &t.title,
+                &shelves,
+                gems_tab,
+                Some(&owned),
+                &name_color,
+                "",
+            ),
+        };
+        panels.push_str(&format!("<div class=\"panel{on}\" id=\"p-{k}\">{body}</div>"));
+    }
     format!(
         "<div class=\"bigname\">{uname}</div>\
-         <div class=\"subtabs center\">\
-           <button class=\"subtab{ca}\" data-t=\"coins\">{MC} Coins</button>\
-           <button class=\"subtab{cg}\" data-t=\"gems\">💎 Gems</button>\
-           <button class=\"subtab{cb}\" data-t=\"boosts\">🍀 Trinkets</button></div>\
-         <div class=\"panel{ca}\" id=\"p-coins\">{coins_panel}</div>\
-         <div class=\"panel{cg}\" id=\"p-gems\">{gems_panel}</div>\
-         <div class=\"panel{cb}\" id=\"p-boosts\">{boosts_panel}</div>\
+         <div class=\"subtabs center\">{subtabs}</div>{panels}\
          <script>(function(){{var ts=document.querySelectorAll('.subtab');\
            ts.forEach(function(b){{b.addEventListener('click',function(){{\
              ts.forEach(function(x){{x.classList.remove('on');}});b.classList.add('on');\
              document.querySelectorAll('.panel').forEach(function(p){{p.classList.remove('on');}});\
              document.getElementById('p-'+b.dataset.t).classList.add('on');}});}});}})();</script>{KEEP_SCROLL_JS}",
         uname = esc(name),
-        ca = cls("coins"),
-        cg = cls("gems"),
-        cb = cls("boosts"),
     )
 }
 
@@ -1798,6 +1967,193 @@ async fn admin_shop_preview(
         .into_response()
 }
 
+/// Manage → **Inventory**: de tabs die een lid op zijn inventory-pagina ziet, en welk
+/// schap onder welke tab valt. Alles hier is indeling en volgorde — de items zelf (naam,
+/// prijs, afbeelding, categorie) blijven in Manage → Shop, want het is één lijst: een
+/// schap staat in de shop én voedt de inventory.
+///
+/// Enkel wat écht in de inventory belandt staat hier: passen (categorie 'boost') en
+/// gewone shop-items horen thuis in Manage → Shop. De pijltjes gebruiken daarom
+/// `move_item_collectible`, dat over die onzichtbare buren heen springt — anders lijkt
+/// een pijltje soms niets te doen.
+async fn admin_inventory(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some((_uid, name)) = require_admin(&st, &headers) else {
+        return Redirect::to("/").into_response();
+    };
+    let tabs = db::list_inv_tabs(&st.pool);
+    let shelves = db::list_shelves_full(&st.pool);
+    let gems_tab = db::gems_tab_id(&st.pool);
+    // Een schap kan naar elke tab behalve de Coins-tab: die draagt vaste inhoud.
+    let tab_opts = |cur: i64| -> String {
+        tabs.iter()
+            .filter(|t| t.builtin != "coins")
+            .map(|t| {
+                let sel = if t.id == cur { " selected" } else { "" };
+                format!(
+                    "<option value=\"{}\"{sel}>{} {}</option>",
+                    t.id,
+                    esc(&t.icon),
+                    esc(&t.title)
+                )
+            })
+            .collect()
+    };
+    // Elke gem kan naar een ander schap = een andere collectie. Dit is dezelfde
+    // verplaatsing als de "Move to shelf" in Manage → Shop; het item houdt zijn naam,
+    // prijs en afbeelding en komt achteraan in het nieuwe schap.
+    let shelf_opts = |cur: i64| -> String {
+        shelves
+            .iter()
+            .map(|sh| {
+                let sel = if sh.id == cur { " selected" } else { "" };
+                format!("<option value=\"{}\"{sel}>{}</option>", sh.id, esc(&sh.title))
+            })
+            .collect()
+    };
+    let arrows = |action: &str, id: i64, up: &str, down: &str| {
+        format!(
+            "<form method=\"post\" action=\"{action}\" class=\"iform\">\
+               <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+               <input type=\"hidden\" name=\"dir\" value=\"-1\">\
+               <button class=\"btn small ghost\" type=\"submit\" title=\"Move up\">{up}</button></form>\
+             <form method=\"post\" action=\"{action}\" class=\"iform\">\
+               <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+               <input type=\"hidden\" name=\"dir\" value=\"1\">\
+               <button class=\"btn small ghost\" type=\"submit\" title=\"Move down\">{down}</button></form>"
+        )
+    };
+    let sections: String = tabs
+        .iter()
+        .map(|t| {
+            let del = if t.builtin.is_empty() {
+                format!(
+                    "<form method=\"post\" action=\"/admin/invtab/delete\" class=\"iform\" \
+                       onsubmit=\"return confirm('Delete tab? De schappen komen dan onder Gems te staan.')\">\
+                       <input type=\"hidden\" name=\"id\" value=\"{}\">\
+                       <button class=\"btn small danger\" type=\"submit\">Delete tab</button></form>",
+                    t.id
+                )
+            } else {
+                String::new()
+            };
+            let inner = if t.builtin == "coins" {
+                "<p class=\"muted\">Vaste inhoud: saldo, level, check-in-streak en de statregels. \
+                 Hier hangen geen schappen onder.</p>"
+                    .to_string()
+            } else {
+                let rows: String = shelves
+                    .iter()
+                    .filter(|sh| sh.inv_tab.unwrap_or(gems_tab) == t.id)
+                    .map(|sh| {
+                        let items: String = db::shelf_items(&st.pool, sh.id)
+                            .iter()
+                            .filter(|it| it.category == "inventory" || it.category == "booster")
+                            .map(|it| {
+                                let nm = if it.name.trim().is_empty() {
+                                    "(naamloos)".to_string()
+                                } else {
+                                    esc(&it.name)
+                                };
+                                format!(
+                                    "<div class=\"ainv\"><div class=\"thumb\">{thumb}</div>\
+                                       <div class=\"nm\" title=\"{nm}\">{nm}</div>\
+                                       <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
+                                         <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                                         <input type=\"hidden\" name=\"dir\" value=\"-1\">\
+                                         <input type=\"hidden\" name=\"back\" value=\"inventory\">\
+                                         <button class=\"btn small ghost\" type=\"submit\" title=\"Move left\">◀</button></form>\
+                                       <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
+                                         <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                                         <input type=\"hidden\" name=\"dir\" value=\"1\">\
+                                         <input type=\"hidden\" name=\"back\" value=\"inventory\">\
+                                         <button class=\"btn small ghost\" type=\"submit\" title=\"Move right\">▶</button></form>\
+                                       <form method=\"post\" action=\"/admin/item/shelf\" class=\"mvshelf\">\
+                                         <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                                         <input type=\"hidden\" name=\"back\" value=\"inventory\">\
+                                         <select name=\"shelf_id\" title=\"In een andere collectie zetten\">{sopts}</select>\
+                                         <button class=\"btn small\" type=\"submit\">Move</button></form></div>",
+                                    thumb = thumb_html(&it.image, &it.color),
+                                    id = it.id,
+                                    sopts = shelf_opts(sh.id),
+                                )
+                            })
+                            .collect();
+                        let items = if items.is_empty() {
+                            "<p class=\"muted\">Niets uit dit schap komt in de inventory.</p>"
+                                .to_string()
+                        } else {
+                            items
+                        };
+                        format!(
+                            "<div class=\"ishelf\"><div class=\"ishelf-head\">\
+                               <form class=\"rn\" method=\"post\" action=\"/admin/shelf/rename\">\
+                                 <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
+                                 <input type=\"hidden\" name=\"back\" value=\"inventory\">\
+                                 <input name=\"title\" value=\"{title}\" \
+                                   title=\"Deze naam staat als kop in de inventory\">\
+                                 <button class=\"btn small\" type=\"submit\">Rename</button></form>{mv}\
+                               <form method=\"post\" action=\"/admin/shelf/tab\" class=\"mvshelf\">\
+                                 <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
+                                 <select name=\"tab_id\" title=\"Naar een andere tab\">{opts}</select>\
+                                 <button class=\"btn small\" type=\"submit\">Move</button></form></div>\
+                             <div class=\"iitems\">{items}\
+                               <form method=\"post\" action=\"/admin/item/add\">\
+                                 <input type=\"hidden\" name=\"zone\" value=\"shelf\">\
+                                 <input type=\"hidden\" name=\"shelf_id\" value=\"{sid}\">\
+                                 <button class=\"plus\" type=\"submit\" \
+                                   title=\"Nieuw item in deze collectie (invullen gebeurt in Shop)\">＋</button>\
+                                 </form></div></div>",
+                            title = esc(&sh.title),
+                            mv = arrows("/admin/shelf/move", sh.id, "▲", "▼"),
+                            sid = sh.id,
+                            opts = tab_opts(t.id),
+                        )
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    "<p class=\"muted\">Nog geen schap onder deze tab — verplaats er een met \
+                     de keuzelijst hierboven, of maak een nieuw schap in Manage → Shop.</p>"
+                        .to_string()
+                } else {
+                    rows
+                }
+            };
+            format!(
+                "<section class=\"itab\"><div class=\"ashelf-head\">\
+                   <form class=\"rn\" method=\"post\" action=\"/admin/invtab/update\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                     <input class=\"ic\" name=\"icon\" value=\"{icon}\" title=\"Icoon (emoji)\">\
+                     <input name=\"title\" value=\"{title}\">\
+                     <button class=\"btn small\" type=\"submit\">Rename</button></form>{mv}{del}</div>\
+                 {inner}</section>",
+                id = t.id,
+                icon = esc(&t.icon),
+                title = esc(&t.title),
+                mv = arrows("/admin/invtab/move", t.id, "▲", "▼"),
+            )
+        })
+        .collect();
+    let body = format!(
+        "{subtabs}<h1>🎒 Inventory management</h1>\
+         <p class=\"muted\">De tabs die een lid op zijn inventory-pagina ziet, en welk schap \
+         eronder valt. Eén kop per schap — de gems van een schap staan dus samen. Volgorde van \
+         schappen en items is dezelfde lijst als in Manage → Shop; nieuwe schappen en items \
+         maak je daar.</p>{sections}\
+         <form class=\"addbar\" method=\"post\" action=\"/admin/invtab/add\">\
+           <input class=\"ic\" name=\"icon\" placeholder=\"✨\" title=\"Icoon (emoji)\">\
+           <input name=\"title\" placeholder=\"Naam van de nieuwe tab\">\
+           <button class=\"btn\" type=\"submit\">+ Tab</button></form>{KEEP_SCROLL_JS}",
+        subtabs = admin_subtabs("inventory"),
+    );
+    Html(shell(
+        "Inventory — Meadow Market",
+        &chrome(&name, "admin", true, ""),
+        true,
+        &body,
+    ))
+    .into_response()
+}
+
 /// Admin-preview van de VOLLEDIGE inventory: alle verzamel-items (gems + boosters) getoond
 /// als owned/ontgrendeld, zodat je kunt inschatten hoe een volle inventory eruitziet. Enkel
 /// admin. Puur visueel — de knoppen (Use/Unequip) blijven functioneel zoals bij een lid.
@@ -1805,36 +2161,41 @@ async fn admin_inventory_preview(State(st): State<AppState>, headers: HeaderMap)
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
-    let all_items: Vec<db::Item> = db::list_shelves(&st.pool)
+    // Zelfde indeling als bij een lid (tabs → schappen), maar alles onthuld en onder
+    // elkaar in plaats van achter tabs: zo zie je in één blik hoe een volle inventory
+    // eruitziet. De Coins-tab valt weg — daar staat geen verzameling in.
+    let tabs = db::list_inv_tabs(&st.pool);
+    let shelves = db::list_shelves_full(&st.pool);
+    let gems_tab = db::gems_tab_id(&st.pool);
+    let sets: String = tabs
         .iter()
-        .flat_map(|(sid, _)| db::shelf_items(&st.pool, *sid))
+        .filter(|t| t.builtin != "coins")
+        .map(|t| {
+            let groups = tab_groups(
+                &st.pool,
+                t.id,
+                &t.title,
+                &shelves,
+                gems_tab,
+                None,
+                "",
+                "",
+            );
+            if groups.is_empty() {
+                return String::new();
+            }
+            format!(
+                "<h1 class=\"shoptitle\">{icon} {title}</h1>{groups}",
+                icon = esc(&t.icon),
+                title = esc(&t.title),
+            )
+        })
         .collect();
-    // Alle gems als owned → afbeelding + naam + volledige omschrijving.
-    let gems: String = all_items
-        .iter()
-        .filter(|it| it.category == "inventory")
-        .map(|it| gem_slot(it, true, false))
-        .collect();
-    let gems_set = if gems.is_empty() {
-        String::new()
-    } else {
-        format!("<h2 class=\"shelf-title center fancy\">Basic Gems</h2><div class=\"shelf wrap gems6\">{gems}</div>")
-    };
-    // Alle boosters als owned.
-    let boosters: String = all_items
-        .iter()
-        .filter(|it| it.category == "booster")
-        .map(|it| booster_slot(it, true))
-        .collect();
-    let boost_set = if boosters.is_empty() {
-        String::new()
-    } else {
-        format!("<h2 class=\"shelf-title center fancy\">Trinkets</h2><div class=\"shelf wrap gems6\">{boosters}</div>")
-    };
     let body = format!(
         "{subtabs}<h1 class=\"shoptitle\">🎒 Preview inventory</h1>\
-         <p class=\"muted\">Every collectible shown as owned/unlocked — to gauge how a full inventory looks.</p>\
-         {gems_set}{boost_set}{KEEP_SCROLL_JS}",
+         <p class=\"muted\">Elk verzamelstuk getoond als bezit/ontgrendeld — om in te \
+         schatten hoe een volle inventory eruitziet. De indeling komt uit Manage → \
+         Inventory.</p>{sets}{KEEP_SCROLL_JS}",
         subtabs = admin_subtabs("inv_preview"),
     );
     Html(shell("Inventory preview — Meadow Market", &chrome(&name, "admin", true, ""), true, &body))
@@ -2833,18 +3194,41 @@ pub(crate) fn valid_hytale_name(s: &str) -> bool {
 fn other_gem_role_ids(
     all_roles: &[(String, String)], // (id, naam)
     held: &std::collections::HashSet<String>,
-    gem_names: &[String],
-    keep: &str,
+    // Alle gems als (naam, role_id). role_id leeg ⇒ die gem hangt aan de gelijknamige rol.
+    gems: &[(String, String)],
+    keep_name: &str,
+    keep_rid: &str,
 ) -> Vec<String> {
+    // Hoort deze rol bij een gem? Met een expliciet gekozen rol telt enkel dát id — de
+    // naam van de gem zegt dan niets meer over welke rol hij zet.
+    let is_gem_role = |rid: &str, rname: &str| {
+        gems.iter().any(|(gname, grid)| {
+            if grid.is_empty() {
+                gname.eq_ignore_ascii_case(rname)
+            } else {
+                grid == rid
+            }
+        })
+    };
     all_roles
         .iter()
         .filter(|(rid, rname)| {
-            held.contains(rid)
-                && !rname.eq_ignore_ascii_case(keep)
-                && gem_names.iter().any(|g| g.eq_ignore_ascii_case(rname))
+            let keep = (!keep_rid.is_empty() && keep_rid == rid)
+                || (keep_rid.is_empty() && rname.eq_ignore_ascii_case(keep_name));
+            held.contains(rid) && !keep && is_gem_role(rid, rname)
         })
         .map(|(rid, _)| rid.clone())
         .collect()
+}
+
+/// Het Discord-rol-ID dat bij een gem hoort: de rol die er in Manage → Shop expliciet aan
+/// hangt (`items.role_id`), en anders — zoals het altijd werkte — de rol met dezelfde naam
+/// als de gem. `Ok(None)` = er is niets te vinden om toe te kennen.
+async fn gem_role_id(st: &AppState, gem_name: &str, explicit: &str) -> Result<Option<String>, String> {
+    if !explicit.is_empty() {
+        return Ok(Some(explicit.to_string()));
+    }
+    st.dc.role_id_by_name(gem_name).await
 }
 
 /// Een bezeten gem "gebruiken": zet je naamkleur (site) én ken de bijhorende Discord-rol
@@ -2872,15 +3256,16 @@ async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<B
     match (st.dc.all_roles().await, st.dc.member_role_ids(&uid).await) {
         (Ok(roles), Ok(held)) => {
             let held: std::collections::HashSet<String> = held.into_iter().collect();
-            let gem_names = db::inventory_item_names(&st.pool);
-            for rid in other_gem_role_ids(&roles, &held, &gem_names, &item.name) {
+            let gems = db::inventory_gem_roles(&st.pool);
+            for rid in other_gem_role_ids(&roles, &held, &gems, &item.name, &item.role_id) {
                 let _ = st.dc.set_role(&uid, &rid, false).await;
             }
         }
         _ => {
             let prev = db::get_equipped_gem(&st.pool, &uid);
             if !prev.is_empty() && !prev.eq_ignore_ascii_case(&item.name) {
-                if let Ok(Some(rid)) = st.dc.role_id_by_name(&prev).await {
+                let explicit = db::gem_role_id_for_name(&st.pool, &prev);
+                if let Ok(Some(rid)) = gem_role_id(&st, &prev, &explicit).await {
                     let _ = st.dc.set_role(&uid, &rid, false).await;
                 }
             }
@@ -2900,8 +3285,8 @@ async fn use_gem(State(st): State<AppState>, headers: HeaderMap, Form(f): Form<B
             .detail(item.name.clone()),
     );
 
-    // Discord-rol toekennen (gem-naam = rolnaam).
-    let msg = match st.dc.role_id_by_name(&item.name).await {
+    // Discord-rol toekennen: de gekozen rol, of anders de gelijknamige.
+    let msg = match gem_role_id(&st, &item.name, &item.role_id).await {
         Ok(Some(rid)) => match st.dc.set_role(&uid, &rid, true).await {
             Ok(_) => format!("✨ Equipped {} — your Discord name colour is now set.", item.name),
             Err(e) => format!("⚠️ Couldn't assign the '{}' Discord role: {e}", item.name),
@@ -2941,7 +3326,7 @@ async fn unequip_gem(
         &db::LogEntry::new("gem", "unequip").actor(&uid, &name).detail(item.name.clone()),
     );
 
-    let msg = match st.dc.role_id_by_name(&item.name).await {
+    let msg = match gem_role_id(&st, &item.name, &item.role_id).await {
         Ok(Some(rid)) => match st.dc.set_role(&uid, &rid, false).await {
             Ok(_) => format!("Unequipped {} — your name colour is back to default.", item.name),
             Err(e) => format!("⚠️ Couldn't remove the '{}' Discord role: {e}", item.name),
@@ -2972,6 +3357,14 @@ fn human_duration(secs: i64) -> String {
 /// de shop staat (None = doet niet mee). Eigen formuliertje met ✓ i.p.v. de autosave van
 /// het hoofdformulier: één gewicht wijzigen verandert de kans van **alle** items (ze delen
 /// de pot), dus de pagina moet daarna opnieuw renderen om de juiste percentages te tonen.
+/// Het dagrotatie-blok van een item: het vinkje "In the rotation" en het lot-gewicht.
+///
+/// LET OP: dit is een **eigen formulier**, los van de 💾 Save van het item — het gewicht
+/// heeft zijn eigen ✓-knop. Het vinkje ging daardoor verloren als je het uitzette en
+/// daarna op 💾 Save duwde: die knop stuurt dit formulier niet mee, dus de pagina laadde
+/// gewoon de opgeslagen (nog altijd aangevinkte) stand terug — het leek alsof de rotatie
+/// zichzelf weer aanzette (Faybelle 2026-08-25). Daarom bewaart het vinkje zichzelf nu
+/// meteen bij een klik (`onchange` → submit van zijn eigen formulier).
 fn rotation_ui(it: &db::Item, odds: Option<f64>) -> String {
     let checked = if it.in_rotation { " checked" } else { "" };
     // Kans + de praktische vertaling ervan ("≈ 1 dag op 16"), want een percentage per dag
@@ -3000,8 +3393,10 @@ fn rotation_ui(it: &db::Item, odds: Option<f64>) -> String {
         "<form method=\"post\" action=\"/admin/item/rotation\" class=\"rotbox\">\
            <input type=\"hidden\" name=\"id\" value=\"{id}\">\
            <div class=\"lbl\">Daily rotation</div>\
-           <label class=\"chk\"><input type=\"checkbox\" name=\"in_rotation\" value=\"1\"{checked}>\
-             In the rotation <span class=\"hint\">(uit = nooit in de dagshop)</span></label>\
+           <label class=\"chk\"><input type=\"checkbox\" name=\"in_rotation\" value=\"1\"{checked} \
+               onchange=\"this.form.submit()\">\
+             In the rotation <span class=\"hint\">(uit = nooit in de dagshop; \
+               bewaart zichzelf)</span></label>\
            <div class=\"arow\">\
              <input class=\"num\" name=\"weight\" value=\"{w}\" inputmode=\"decimal\" \
                title=\"Lot-gewicht: hoger = vaker. Enkel de verhouding tot de andere items telt.\">\
@@ -3022,6 +3417,11 @@ fn admin_item(
     pool: &DbPool,
     it: &db::Item,
     shelves: &[(i64, String)],
+    // Alle Discord-rollen (id, naam) van de guild, voor de kleurrol-keuzelijst van een gem.
+    // Leeg = de rollen konden niet opgehaald worden (Discord onbereikbaar / geen rechten):
+    // dan tonen we géén lijst, maar houden we de bestaande keuze vast in een hidden veld —
+    // anders zou elke Save de gekozen rol wissen.
+    roles: &[(String, String)],
     saved: Option<i64>,
     odds: Option<f64>,
 ) -> String {
@@ -3189,6 +3589,46 @@ fn admin_item(
         String::new()
     };
 
+    // Kleurrol van een gem. Standaard hangt een gem aan de Discord-rol met dezelfde naam;
+    // met deze keuzelijst kan er een andere rol aan vast (dan telt de naam niet meer mee).
+    // Enkel zinvol op een 'inventory'-item: passen en boosters kennen geen kleurrol toe.
+    let role_field = if it.category != "inventory" {
+        String::new()
+    } else if roles.is_empty() {
+        format!(
+            "<input type=\"hidden\" name=\"role_id\" value=\"{}\">",
+            esc(&it.role_id)
+        )
+    } else {
+        let by_name = roles.iter().any(|(_, n)| n.eq_ignore_ascii_case(&it.name));
+        let opts: String = roles
+            .iter()
+            .map(|(rid, rname)| {
+                let sel = if *rid == it.role_id { " selected" } else { "" };
+                format!("<option value=\"{rid}\"{sel}>{}</option>", esc(rname))
+            })
+            .collect();
+        // Waarschuwing enkel als er níks te vinden is: geen gekozen rol én geen
+        // gelijknamige rol ⇒ Use zet wel de kleur op de site, maar niets in Discord.
+        let warn = if it.role_id.is_empty() && !by_name {
+            format!(
+                "<div class=\"hint warn\">⚠️ Geen Discord-rol met de naam \"{}\" — \
+                 kies er hier een, anders krijgt het lid enkel de kleur op de site.</div>",
+                esc(&it.name)
+            )
+        } else {
+            String::new()
+        };
+        let none_sel = if it.role_id.is_empty() { " selected" } else { "" };
+        format!(
+            "<label class=\"fld\">Discord colour role \
+               <span class=\"hint\">(toegekend bij Use)</span>\
+               <select name=\"role_id\">\
+                 <option value=\"\"{none_sel}>— geen rol: enkel de kleur op de site —</option>\
+                 {opts}</select></label>{warn}"
+        )
+    };
+
     // Bevestigings-flits na een bewaaractie (?saved=<id>).
     let flash = if saved == Some(it.id) {
         "<div class=\"savedflash\">✓ Saved</div>"
@@ -3263,8 +3703,29 @@ fn admin_item(
         )
     };
 
+    // Bovenaan de beheerkaart staat het item **zoals het in de shop staat** — dezelfde
+    // `shop_slot` als de Shop preview, zodat je meteen ziet wat een lid ziet (Faybelle
+    // 2026-08-25). De kaart is dood: `.shoplook` zet `pointer-events` uit, dus er valt
+    // niets te kopen vanaf de beheerpagina. De waarden zijn die van een gewone koper met
+    // genoeg coins — anders zou de kaart hier "te duur" of 🔒 tonen door de admin z'n
+    // eigen situatie, en dat zegt niets over hoe het item eruitziet.
+    //
+    // Geen ◀ ▶ meer op deze pagina: de dagselectie wordt willekeurig getrokken, dus de
+    // volgorde van een schap doet er in de shop niet toe. Ordenen gebeurt in
+    // Manage → Inventory, want dáár bepaalt ze wat een lid ziet.
+    //
+    // Alle invulvakken zitten in `.abody` en gaan pas open met ✏ — met alles open tegelijk
+    // is een schap met tien items niet te overzien. Net bewaard (?saved=<id>) ⇒ open,
+    // anders zie je je eigen wijziging niet terug.
+    let open = saved == Some(it.id);
+    let card = shop_slot(it, false, true, false, i64::MAX, true);
     format!(
-        "<div class=\"aitem\" id=\"item-{id}\">{flash}\
+        "<div class=\"aitem{opencls}\" id=\"item-{id}\">{flash}\
+         <div class=\"shelf shop shoplook\">{card}</div>\
+         <div class=\"arow aeditrow\">\
+           <button class=\"btn small ghost aedit\" type=\"button\" \
+             title=\"Alle velden van dit item openen/sluiten\">✏ Edit</button></div>\
+         <div class=\"abody\"{hidden}>\
          <div class=\"imgblock\">\
            <div class=\"lbl\">Main image <span class=\"hint\">(drag &amp; drop or browse)</span></div>\
            <div class=\"thumb\">{thumb}</div>\
@@ -3283,22 +3744,16 @@ fn admin_item(
              <option value=\"noninv\"{cn}>Non-inventory item</option>\
              <option value=\"booster\"{cboo}>Booster (lucky item)</option>\
              <option value=\"boost\"{cb}>Hytale pass</option></select></label>\
-           {dur_field}{so_field}{tp_field}\
+           {role_field}{dur_field}{so_field}{tp_field}\
            <button class=\"btn small save\" type=\"submit\">💾 Save</button></form>\
          {allow_ui}{rot_ui}{stock_ui}{img2_ui}\
          <div class=\"arow\">\
-           <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
-             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-             <input type=\"hidden\" name=\"dir\" value=\"-1\">\
-             <button class=\"btn small ghost\" type=\"submit\" title=\"Move left\">◀</button></form>\
-           <form method=\"post\" action=\"/admin/item/move\" class=\"iform\">\
-             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-             <input type=\"hidden\" name=\"dir\" value=\"1\">\
-             <button class=\"btn small ghost\" type=\"submit\" title=\"Move right\">▶</button></form>\
            <form method=\"post\" action=\"/admin/item/delete\" class=\"iform\" onsubmit=\"return confirm('Delete item?')\">\
              <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-             <button class=\"btn small danger\" type=\"submit\">Delete</button></form></div>{move_shelf}</div>",
+             <button class=\"btn small danger\" type=\"submit\">Delete</button></form></div>{move_shelf}</div></div>",
         thumb = item_thumb(it),
+        opencls = if open { " open" } else { "" },
+        hidden = if open { "" } else { " hidden" },
         id = it.id,
         name = esc(&it.name),
         desc = esc(&it.description),
@@ -3323,6 +3778,22 @@ async fn admin_market(
     };
     let saved = q.saved;
     let all_shelves = db::list_shelves(&st.pool);
+    // Rollen van de guild voor de kleurrol-keuzelijst. Lukt het niet (Discord plat, geen
+    // rechten), dan verschijnt er geen lijst en blijft de bestaande keuze gewoon staan.
+    // @everyone staat als rol in de lijst maar is er geen om toe te kennen.
+    let roles: Vec<(String, String)> = st
+        .dc
+        .all_roles()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, n)| n != "@everyone")
+        .collect();
+    // Gems die nog aan niets hangen meteen aan hun gelijknamige rol koppelen, zodat de
+    // keuzelijst hieronder de rol toont die het lid ook echt krijgt. Gedrag blijft gelijk
+    // (dat is dezelfde rol die de naam-terugval zou vinden); het staat nu enkel zwart op
+    // wit, klaar om na te kijken. Idempotent, dus veilig bij elke paginaweergave.
+    db::autolink_gem_roles(&st.pool, &roles);
     // Kans per item op één plek berekenen: de items delen dezelfde pot, dus de kans van
     // een item hangt af van álle andere gewichten — niet per schap te bepalen.
     let pool = db::rotation_pool(&st.pool);
@@ -3338,7 +3809,7 @@ async fn admin_market(
         .map(|(sid, title)| {
             let items: String = db::shelf_items(&st.pool, *sid)
                 .iter()
-                .map(|it| admin_item(&st.pool, it, &all_shelves, saved, odds_of(it)))
+                .map(|it| admin_item(&st.pool, it, &all_shelves, &roles, saved, odds_of(it)))
                 .collect();
             format!(
                 "<section class=\"ashelf\"><div class=\"ashelf-head\">\
@@ -3346,6 +3817,16 @@ async fn admin_market(
                      <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
                      <input name=\"title\" value=\"{title}\">\
                      <button class=\"btn small\" type=\"submit\">Rename</button></form>\
+                   <form method=\"post\" action=\"/admin/shelf/move\" class=\"iform\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
+                     <input type=\"hidden\" name=\"dir\" value=\"-1\">\
+                     <input type=\"hidden\" name=\"back\" value=\"market\">\
+                     <button class=\"btn small ghost\" type=\"submit\" title=\"Schap omhoog\">▲</button></form>\
+                   <form method=\"post\" action=\"/admin/shelf/move\" class=\"iform\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
+                     <input type=\"hidden\" name=\"dir\" value=\"1\">\
+                     <input type=\"hidden\" name=\"back\" value=\"market\">\
+                     <button class=\"btn small ghost\" type=\"submit\" title=\"Schap omlaag\">▼</button></form>\
                    <form method=\"post\" action=\"/admin/shelf/delete\" onsubmit=\"return confirm('Delete shelf and its items?')\">\
                      <input type=\"hidden\" name=\"id\" value=\"{sid}\">\
                      <button class=\"btn small danger\" type=\"submit\">Delete shelf</button></form></div>\
@@ -3361,7 +3842,7 @@ async fn admin_market(
 
     let lucky_items: String = db::lucky_items(&st.pool)
         .iter()
-        .map(|it| admin_item(&st.pool, it, &all_shelves, saved, odds_of(it)))
+        .map(|it| admin_item(&st.pool, it, &all_shelves, &roles, saved, odds_of(it)))
         .collect();
     let lucky = format!(
         "<section class=\"ashelf\"><div class=\"ashelf-head\"><b>🍀 Lucky items</b></div>\
@@ -3388,7 +3869,7 @@ async fn admin_market(
          {rot_info}{shelves}{lucky}\
          <form class=\"addbar\" method=\"post\" action=\"/admin/shelf/add\">\
            <input name=\"title\" placeholder=\"New shelf name\" required>\
-           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}{AUTOSAVE_JS}{DND_JS}"
+           <button class=\"btn\" type=\"submit\">＋ Shelf</button></form>{KEEP_SCROLL_JS}{SAVED_FLASH_JS}{AUTOSAVE_JS}{DND_JS}{ITEM_EDIT_JS}"
     );
     let body = format!("{}{}", admin_subtabs("market"), body);
     Html(shell("Manage — Meadow Market", &chrome(&name, "admin", true, ""), true, &body)).into_response()
@@ -3921,7 +4402,8 @@ async fn admin_refund(
         Ok(out) => {
             // Gem-rol op Discord intrekken bij de kóper (db-laag kon dat niet async doen).
             if !out.gem_role_removed.is_empty() && !out.buyer_uid.is_empty() {
-                if let Ok(Some(rid)) = st.dc.role_id_by_name(&out.gem_role_removed).await {
+                let explicit = db::gem_role_id_for_name(&st.pool, &out.gem_role_removed);
+                if let Ok(Some(rid)) = gem_role_id(&st, &out.gem_role_removed, &explicit).await {
                     let _ = st.dc.set_role(&out.buyer_uid, &rid, false).await;
                 }
             }
@@ -4534,6 +5016,9 @@ struct ShelfAdd {
 struct ShelfRename {
     id: i64,
     title: String,
+    /// Van welke pagina het formulier kwam: leeg = Shop, "inventory" = Manage → Inventory.
+    #[serde(default)]
+    back: String,
 }
 #[derive(Deserialize)]
 struct IdForm {
@@ -4546,14 +5031,42 @@ struct ItemAdd {
     shelf_id: Option<i64>,
 }
 #[derive(Deserialize)]
+struct TabForm {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    icon: String,
+}
+#[derive(Deserialize)]
+struct MoveForm {
+    id: i64,
+    dir: i64,
+    /// Van welke pagina het pijltje kwam: leeg = Inventory, "market" = Manage → Shop.
+    #[serde(default)]
+    back: String,
+}
+#[derive(Deserialize)]
+struct ShelfTabForm {
+    id: i64,
+    tab_id: i64,
+}
+#[derive(Deserialize)]
 struct ItemMove {
     id: i64,
     dir: i64,
+    /// Van welke pagina het pijltje kwam: leeg = Shop, "inventory" = Manage → Inventory.
+    #[serde(default)]
+    back: String,
 }
 #[derive(Deserialize)]
 struct ItemShelf {
     id: i64,
     shelf_id: i64,
+    /// Van welke pagina het formulier kwam: leeg = Shop, "inventory" = Manage → Inventory.
+    #[serde(default)]
+    back: String,
 }
 #[derive(Deserialize)]
 struct SavedQuery {
@@ -4585,6 +5098,89 @@ struct ItemUpdate {
     description: String,
 }
 
+/// Nieuwe inventory-tab. Zonder titel gebeurt er niets — een naamloze tab is
+/// onvindbaar op de pagina van een lid.
+async fn admin_invtab_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<TabForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let t = f.title.trim();
+        if !t.is_empty() {
+            db::add_inv_tab(&st.pool, t, f.icon.trim());
+        }
+    }
+    Redirect::to("/admin/inventory").into_response()
+}
+
+/// Naam + icoon van een tab. Ook de drie vaste tabs mogen hernoemd worden: de code
+/// hangt aan hun `builtin`-sleutel, niet aan hun titel.
+async fn admin_invtab_update(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<TabForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        let t = f.title.trim();
+        if !t.is_empty() {
+            db::update_inv_tab(&st.pool, f.id, t, f.icon.trim());
+        }
+    }
+    Redirect::to("/admin/inventory").into_response()
+}
+
+async fn admin_invtab_move(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<MoveForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::move_inv_tab(&st.pool, f.id, f.dir);
+    }
+    Redirect::to("/admin/inventory").into_response()
+}
+
+/// Eigen tab weg. De drie vaste tabs weigert `delete_inv_tab` zelf, en de schappen
+/// die eronder hingen vallen terug op Gems — er gaat nooit een item verloren.
+async fn admin_invtab_delete(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<IdForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::delete_inv_tab(&st.pool, f.id);
+    }
+    Redirect::to("/admin/inventory").into_response()
+}
+
+/// Schap één plaats omhoog/omlaag. Dit is dezelfde volgorde als in Manage → Shop.
+async fn admin_shelf_move(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<MoveForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::move_shelf(&st.pool, f.id, f.dir);
+    }
+    if f.back == "market" {
+        return Redirect::to("/admin/market").into_response();
+    }
+    Redirect::to("/admin/inventory").into_response()
+}
+
+/// Schap onder een andere inventory-tab hangen.
+async fn admin_shelf_tab(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ShelfTabForm>,
+) -> Response {
+    if require_admin(&st, &headers).is_some() {
+        db::set_shelf_tab(&st.pool, f.id, Some(f.tab_id));
+    }
+    Redirect::to("/admin/inventory").into_response()
+}
+
 async fn admin_shelf_add(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -4609,6 +5205,9 @@ async fn admin_shelf_rename(
         if !t.is_empty() {
             db::rename_shelf(&st.pool, f.id, t);
         }
+    }
+    if f.back == "inventory" {
+        return Redirect::to("/admin/inventory").into_response();
     }
     Redirect::to("/admin/market").into_response()
 }
@@ -4768,8 +5367,17 @@ async fn admin_item_move(
     headers: HeaderMap,
     Form(f): Form<ItemMove>,
 ) -> Response {
+    // Vaste keuze uit twee eigen pagina's, geen vrije URL uit het formulier.
+    let from_inventory = f.back == "inventory";
     if require_admin(&st, &headers).is_some() {
-        db::move_item(&st.pool, f.id, f.dir);
+        if from_inventory {
+            db::move_item_collectible(&st.pool, f.id, f.dir);
+        } else {
+            db::move_item(&st.pool, f.id, f.dir);
+        }
+    }
+    if from_inventory {
+        return Redirect::to("/admin/inventory").into_response();
     }
     Redirect::to("/admin/market").into_response()
 }
@@ -4782,6 +5390,9 @@ async fn admin_item_shelf(
 ) -> Response {
     if require_admin(&st, &headers).is_some() {
         db::set_item_shelf(&st.pool, f.id, f.shelf_id);
+    }
+    if f.back == "inventory" {
+        return Redirect::to("/admin/inventory").into_response();
     }
     Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
 }
@@ -5616,7 +6227,8 @@ async fn admin_reset_collection(State(st): State<AppState>, headers: HeaderMap) 
         // Eerst de eventueel geëquipte gem-rol op Discord intrekken.
         let prev = db::get_equipped_gem(&st.pool, &uid);
         if !prev.is_empty() {
-            if let Ok(Some(rid)) = st.dc.role_id_by_name(&prev).await {
+            let explicit = db::gem_role_id_for_name(&st.pool, &prev);
+            if let Ok(Some(rid)) = gem_role_id(&st, &prev, &explicit).await {
                 let _ = st.dc.set_role(&uid, &rid, false).await;
             }
         }
@@ -5870,10 +6482,12 @@ mod gem_swap_dryrun {
         .collect()
     }
 
-    fn gem_names() -> Vec<String> {
+    /// Gems als (naam, role_id). Leeg role_id = hangt aan de gelijknamige rol, de
+    /// afspraak die gold vóór de keuzelijst in Manage → Shop bestond.
+    fn gems() -> Vec<(String, String)> {
         ["Ruby", "Lapis Lazuli", "Sapphire", "Amber", "Topaz"]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (s.to_string(), String::new()))
             .collect()
     }
 
@@ -5881,7 +6495,7 @@ mod gem_swap_dryrun {
     fn swap_strips_only_the_other_gem_role() {
         // Lid draagt Ruby (oude kleur) + Flowerborn; equipt nu Lapis Lazuli.
         let held: HashSet<String> = ["10", "99"].iter().map(|s| s.to_string()).collect();
-        let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "Lapis Lazuli");
+        let strip = other_gem_role_ids(&roles(), &held, &gems(), "Lapis Lazuli", "");
         assert_eq!(strip, vec!["10".to_string()], "enkel de Ruby-rol wordt weggehaald");
     }
 
@@ -5891,7 +6505,7 @@ mod gem_swap_dryrun {
         // Equipt Lapis → beide oude gem-rollen weg, Flowerborn blijft, Lapis niet in de lijst.
         let held: HashSet<String> =
             ["10", "12", "99"].iter().map(|s| s.to_string()).collect();
-        let mut strip = other_gem_role_ids(&roles(), &held, &gem_names(), "Lapis Lazuli");
+        let mut strip = other_gem_role_ids(&roles(), &held, &gems(), "Lapis Lazuli", "");
         strip.sort();
         assert_eq!(strip, vec!["10".to_string(), "12".to_string()]);
         assert!(!strip.contains(&"99".to_string()), "niet-gem-rol Flowerborn blijft");
@@ -5901,15 +6515,27 @@ mod gem_swap_dryrun {
     fn re_equipping_same_gem_strips_nothing() {
         // Lid draagt al Lapis en equipt Lapis opnieuw → niets weghalen.
         let held: HashSet<String> = ["11"].iter().map(|s| s.to_string()).collect();
-        let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "Lapis Lazuli");
+        let strip = other_gem_role_ids(&roles(), &held, &gems(), "Lapis Lazuli", "");
         assert!(strip.is_empty(), "dezelfde gem opnieuw = geen enkele revoke");
+    }
+
+    #[test]
+    fn explicit_role_wins_over_the_name() {
+        // "Lapis Lazuli" hangt expliciet aan rol 12 (die "Sapphire" heet). Wie Ruby draagt
+        // en Lapis equipt, moet Ruby kwijtspelen maar rol 12 houden — ook al heet die
+        // anders dan de gem.
+        let mut gems = gems();
+        gems[1].1 = "12".to_string();
+        let held: HashSet<String> = ["10", "12", "99"].iter().map(|s| s.to_string()).collect();
+        let strip = other_gem_role_ids(&roles(), &held, &gems, "Lapis Lazuli", "12");
+        assert_eq!(strip, vec!["10".to_string()], "enkel Ruby weg; de gekozen rol blijft");
     }
 
     #[test]
     fn ignores_gem_roles_the_member_does_not_hold() {
         // Case-ongevoelig, en rollen die het lid niet draagt blijven buiten schot.
         let held: HashSet<String> = ["10"].iter().map(|s| s.to_string()).collect();
-        let strip = other_gem_role_ids(&roles(), &held, &gem_names(), "sapphire");
+        let strip = other_gem_role_ids(&roles(), &held, &gems(), "sapphire", "");
         assert_eq!(strip, vec!["10".to_string()], "Ruby weg; Sapphire niet gedragen → niet geraakt");
     }
 }

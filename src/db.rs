@@ -34,7 +34,8 @@ pub fn init_pool(path: &str) -> DbPool {
             name_color   TEXT NOT NULL DEFAULT '',
             perma_access INTEGER NOT NULL DEFAULT 0,
             discord_color TEXT NOT NULL DEFAULT '',
-            daily_streak INTEGER NOT NULL DEFAULT 0
+            daily_streak INTEGER NOT NULL DEFAULT 0,
+            max_daily_streak INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS sessions (
             token    TEXT PRIMARY KEY,
@@ -45,6 +46,14 @@ pub fn init_pool(path: &str) -> DbPool {
         CREATE TABLE IF NOT EXISTS shelves (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             title    TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            inv_tab  INTEGER                       -- onder welke inventory-tab dit schap valt
+        );
+        CREATE TABLE IF NOT EXISTS inv_tabs (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            title    TEXT NOT NULL,
+            icon     TEXT NOT NULL DEFAULT '',
+            builtin  TEXT NOT NULL DEFAULT '',     -- 'coins'|'gems'|'trinkets'|'' (zelf gemaakt)
             position INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS items (
@@ -253,6 +262,7 @@ pub fn init_pool(path: &str) -> DbPool {
     ensure_column(&conn, "coins", "discord_color", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "hytale_name", "TEXT NOT NULL DEFAULT ''");
     ensure_column(&conn, "coins", "daily_streak", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column(&conn, "coins", "max_daily_streak", "INTEGER NOT NULL DEFAULT 0");
     ensure_column(&conn, "coins", "equipped_gem", "TEXT NOT NULL DEFAULT ''");
     // Het Twitch-account dat dit lid in Discord aan zijn profiel hing (Discord →
     // Instellingen → Verbindingen). Gelezen bij de login via de OAuth-scope
@@ -299,6 +309,66 @@ pub fn init_pool(path: &str) -> DbPool {
             .ok();
         }
     }
+    // Hoogste check-in-streak ooit. De kolom bestond nog niet toen de huidige streaks
+    // gelopen werden, dus vullen we ze EENMALIG uit het logboek: elke daily-check-in staat
+    // daar met "streak N · balance X" in `detail`. Het logboek begint op 2026-07-14; wat
+    // daarvóór ligt is niet meer te achterhalen. Draait exact één keer (gemarkeerd in
+    // settings), daarna houdt `award_daily` de piek zelf bij.
+    {
+        let done: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'max_streak_backfill_v1'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("q streak-backfill flag");
+        if done.is_none() {
+            let rows: Vec<(String, String)> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT actor_uid, detail FROM server_log
+                          WHERE category = 'daily' AND event = 'checkin' AND actor_uid <> ''",
+                    )
+                    .expect("prep streaklog");
+                let it = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                    .expect("q streaklog");
+                it.filter_map(Result::ok).collect()
+            };
+            let mut piek: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            for (uid, detail) in rows {
+                let Some(rest) = detail.strip_prefix("streak ") else {
+                    continue;
+                };
+                let Ok(n) = rest.split_whitespace().next().unwrap_or("").parse::<i64>() else {
+                    continue;
+                };
+                let e = piek.entry(uid).or_insert(0);
+                *e = (*e).max(n);
+            }
+            for (uid, n) in piek {
+                conn.execute(
+                    "UPDATE coins SET max_daily_streak = ?2
+                      WHERE user_id = ?1 AND max_daily_streak < ?2",
+                    params![uid, n],
+                )
+                .ok();
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('max_streak_backfill_v1', '1')",
+                [],
+            )
+            .ok();
+        }
+    }
+    // Vangnet bij elke start: een lopende streak is per definitie de ondergrens van de
+    // hoogste ooit. Dekt ook het stuk verleden waar geen logregels voor bestaan.
+    conn.execute(
+        "UPDATE coins SET max_daily_streak = daily_streak WHERE daily_streak > max_daily_streak",
+        [],
+    )
+    .ok();
     // Lucky Horseshoe: 0 = geen boost, 1 = dubbele lot-kans bij de eerstvolgende
     // uitbetalende treasure chest waaraan het lid meedoet (nadien terug op 0).
     ensure_column(&conn, "coins", "chest_luck", "INTEGER NOT NULL DEFAULT 0");
@@ -396,6 +466,8 @@ pub fn init_pool(path: &str) -> DbPool {
         conn.execute("ALTER TABLE items DROP COLUMN auto_sold_out", []).ok();
     }
     ensure_column(&conn, "inventory", "item_id", "INTEGER NOT NULL DEFAULT 0");
+    // Welke inventory-tab een schap voedt. NULL = de Gems-tab (zie `gems_tab_id`).
+    ensure_column(&conn, "shelves", "inv_tab", "INTEGER");
     ensure_column(&conn, "role_grants", "label", "TEXT NOT NULL DEFAULT ''");
     // Refund-vlag op shop-aankopen in het logboek: 0 = nog terug te draaien, 1 = al gerefund.
     ensure_column(&conn, "server_log", "refunded", "INTEGER NOT NULL DEFAULT 0");
@@ -457,6 +529,7 @@ pub fn init_pool(path: &str) -> DbPool {
     }
     drop(conn);
     drop_legacy_hytale_shelf(&pool);
+    seed_inv_tabs(&pool);
     // seed_gems is bewust NIET meer aangeroepen: items worden nu manueel beheerd in Manage
     // Shop, en de categorie-migratie hierboven zou een re-seed telkens naar 'inventory'
     // omzetten. Bestaande (geseede + eigen) items blijven gewoon staan.
@@ -963,6 +1036,47 @@ fn drop_legacy_hytale_shelf(pool: &DbPool) {
     conn.execute(
         "INSERT INTO settings (key, value) VALUES ('hytale_shelf_dropped_v1', '1')
          ON CONFLICT(key) DO UPDATE SET value = '1'",
+        [],
+    )
+    .ok();
+}
+
+/// De drie vaste tabs van de Inventory-pagina (Coins / Gems / Trinkets) één keer
+/// aanmaken. Vanaf dan zijn naam, icoon en volgorde te wijzigen in Manage → Inventory,
+/// en kunnen er eigen tabs bij. `builtin` blijft de code-haak: die bepaalt welke tab
+/// het saldo-overzicht draagt, welke de naamkleur-preview en welke de pas-status —
+/// niet de titel, want die mag veranderen.
+///
+/// Bij diezelfde eerste keer krijgen bestaande schappen hun tab: alles wat een
+/// booster-item bevat gaat naar Trinkets, de rest valt (via NULL) terug op Gems. Zo
+/// ziet een lid na de migratie exact wat hij ervoor zag.
+fn seed_inv_tabs(pool: &DbPool) {
+    let conn = pool.get().expect("db");
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM inv_tabs", [], |r| r.get(0))
+        .unwrap_or(0);
+    if n > 0 {
+        return;
+    }
+    for (pos, (title, icon, builtin)) in [
+        ("Coins", "", "coins"),
+        ("Gems", "\u{1f48e}", "gems"),
+        ("Trinkets", "\u{1f340}", "trinkets"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        conn.execute(
+            "INSERT INTO inv_tabs (title, icon, builtin, position) VALUES (?1, ?2, ?3, ?4)",
+            params![title, icon, builtin, pos as i64],
+        )
+        .expect("seed inv_tab");
+    }
+    conn.execute(
+        "UPDATE shelves SET inv_tab = (SELECT id FROM inv_tabs WHERE builtin = 'trinkets')
+          WHERE inv_tab IS NULL
+            AND id IN (SELECT shelf_id FROM items
+                        WHERE category = 'booster' AND shelf_id IS NOT NULL)",
         [],
     )
     .ok();
@@ -1794,6 +1908,20 @@ pub fn get_daily_streak(pool: &DbPool, user_id: &str) -> i64 {
     .unwrap_or(0)
 }
 
+/// De hoogste daily-streak die dit lid ooit haalde (0 als er nog geen daily geclaimd is).
+/// Wordt bijgehouden in `award_daily`; het verleden is eenmalig uit het logboek gevuld.
+pub fn get_max_daily_streak(pool: &DbPool, user_id: &str) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT max_daily_streak FROM coins WHERE user_id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .expect("query max_daily_streak")
+    .unwrap_or(0)
+}
+
 /// Daily-beloning: tel `amount` bij, zet last_daily (eigen 24u-cooldown) en de
 /// nieuwe `streak`, houd max_balance bij. Returnt het nieuwe totaal.
 /// Boekt de daily **atomisch**: de `WHERE last_daily <= ?guard_ts` op de upsert zorgt dat
@@ -1815,13 +1943,14 @@ pub fn award_daily(
     // vuurt de INSERT (geen conflict, WHERE niet van toepassing) → eerste daily werkt altijd.
     let changed = conn
         .execute(
-            "INSERT INTO coins (user_id, username, coins, last_daily, daily_streak, max_balance, total_earned)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?3, ?3)
+            "INSERT INTO coins (user_id, username, coins, last_daily, daily_streak, max_daily_streak, max_balance, total_earned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?3, ?3)
          ON CONFLICT(user_id) DO UPDATE SET
              coins        = coins + excluded.coins,
              username     = excluded.username,
              last_daily   = excluded.last_daily,
              daily_streak = excluded.daily_streak,
+             max_daily_streak = MAX(max_daily_streak, excluded.daily_streak),
              max_balance  = MAX(max_balance, coins + excluded.coins),
              total_earned = total_earned + excluded.coins
          WHERE last_daily <= ?6",
@@ -2071,6 +2200,173 @@ pub fn delete_shelf(pool: &DbPool, id: i64) {
         .expect("del shelf");
 }
 
+/// Verplaats een rij één plaats omhoog (dir<0) of omlaag (dir>0) in een tabel met een
+/// `position`-kolom, en hernummer daarna lineair — zo blijft het werken bij gelijke of
+/// oude posities. `table` komt enkel uit deze module, nooit uit een formulier.
+fn move_in_table(conn: &rusqlite::Connection, table: &str, id: i64, dir: i64) {
+    if dir == 0 {
+        return;
+    }
+    let mut ids: Vec<i64> = {
+        let Ok(mut stmt) = conn.prepare(&format!("SELECT id FROM {table} ORDER BY position, id"))
+        else {
+            return;
+        };
+        let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) else {
+            return;
+        };
+        rows.filter_map(Result::ok).collect()
+    };
+    let Some(i) = ids.iter().position(|x| *x == id) else {
+        return;
+    };
+    let j = if dir < 0 {
+        if i == 0 {
+            return;
+        }
+        i - 1
+    } else {
+        if i + 1 >= ids.len() {
+            return;
+        }
+        i + 1
+    };
+    ids.swap(i, j);
+    for (pos, rid) in ids.iter().enumerate() {
+        conn.execute(
+            &format!("UPDATE {table} SET position = ?2 WHERE id = ?1"),
+            params![rid, pos as i64],
+        )
+        .expect("renumber");
+    }
+}
+
+/// Eén tab op de Inventory-pagina van een lid.
+#[derive(Clone)]
+pub struct InvTab {
+    pub id: i64,
+    pub title: String,
+    pub icon: String,
+    /// 'coins' | 'gems' | 'trinkets' voor de drie vaste tabs, leeg voor eigen tabs.
+    pub builtin: String,
+}
+
+pub fn list_inv_tabs(pool: &DbPool) -> Vec<InvTab> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT id, title, icon, builtin FROM inv_tabs ORDER BY position, id")
+        .expect("prepare inv_tabs");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(InvTab {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                icon: r.get(2)?,
+                builtin: r.get(3)?,
+            })
+        })
+        .expect("query inv_tabs");
+    rows.filter_map(Result::ok).collect()
+}
+
+/// De Gems-tab: waar een schap zonder eigen tab (`inv_tab IS NULL`) onder valt.
+/// Valt terug op de eerste tab, zodat er nooit schappen onzichtbaar worden.
+pub fn gems_tab_id(pool: &DbPool) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT id FROM inv_tabs ORDER BY (builtin = 'gems') DESC, position, id LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+}
+
+/// Nieuwe tab onderaan. Returnt het id.
+pub fn add_inv_tab(pool: &DbPool, title: &str, icon: &str) -> i64 {
+    let conn = pool.get().expect("db");
+    let pos: i64 = conn
+        .query_row("SELECT COALESCE(MAX(position)+1,0) FROM inv_tabs", [], |r| r.get(0))
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO inv_tabs (title, icon, builtin, position) VALUES (?1, ?2, '', ?3)",
+        params![title, icon, pos],
+    )
+    .expect("add inv_tab");
+    conn.last_insert_rowid()
+}
+
+pub fn update_inv_tab(pool: &DbPool, id: i64, title: &str, icon: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE inv_tabs SET title = ?2, icon = ?3 WHERE id = ?1",
+        params![id, title, icon],
+    )
+    .expect("rename inv_tab");
+}
+
+pub fn move_inv_tab(pool: &DbPool, id: i64, dir: i64) {
+    let conn = pool.get().expect("db");
+    move_in_table(&conn, "inv_tabs", id, dir);
+}
+
+/// Eigen tab weghalen. De drie vaste tabs blijven staan (er hangt code aan), en de
+/// schappen die eronder hingen vallen terug op de Gems-tab — nooit items weggooien.
+pub fn delete_inv_tab(pool: &DbPool, id: i64) {
+    let conn = pool.get().expect("db");
+    let builtin: String = conn
+        .query_row("SELECT builtin FROM inv_tabs WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()
+        .expect("q inv_tab")
+        .unwrap_or_default();
+    if !builtin.is_empty() {
+        return;
+    }
+    conn.execute("UPDATE shelves SET inv_tab = NULL WHERE inv_tab = ?1", params![id])
+        .ok();
+    conn.execute("DELETE FROM inv_tabs WHERE id = ?1", params![id])
+        .expect("del inv_tab");
+}
+
+/// Een schap met zijn inventory-tab (NULL = Gems).
+pub struct Shelf {
+    pub id: i64,
+    pub title: String,
+    pub inv_tab: Option<i64>,
+}
+
+pub fn list_shelves_full(pool: &DbPool) -> Vec<Shelf> {
+    let conn = pool.get().expect("db");
+    let mut stmt = conn
+        .prepare("SELECT id, title, inv_tab FROM shelves ORDER BY position, id")
+        .expect("prepare shelves_full");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(Shelf {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                inv_tab: r.get(2)?,
+            })
+        })
+        .expect("query shelves_full");
+    rows.filter_map(Result::ok).collect()
+}
+
+pub fn set_shelf_tab(pool: &DbPool, id: i64, tab_id: Option<i64>) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE shelves SET inv_tab = ?2 WHERE id = ?1", params![id, tab_id])
+        .expect("set shelf tab");
+}
+
+/// Schap één plaats omhoog/omlaag. Deze volgorde stuurt zowel de Inventory als de
+/// schappen op de Shop-pagina — het is één lijst.
+pub fn move_shelf(pool: &DbPool, id: i64, dir: i64) {
+    let conn = pool.get().expect("db");
+    move_in_table(&conn, "shelves", id, dir);
+}
+
 /// Nieuw leeg item toevoegen aan een schap (zone='shelf') of aan lucky. Returnt id.
 pub fn add_item(pool: &DbPool, zone: &str, shelf_id: Option<i64>) -> i64 {
     let conn = pool.get().expect("db");
@@ -2153,16 +2449,27 @@ pub fn set_stock_unlimited(pool: &DbPool, id: i64) {
         .expect("stock unlimited");
 }
 
-/// Zet de kleur van elk 'inventory'-item (gem) op de kleur van de gelijknamige Discord-rol.
-/// `roles` = (rolnaam, hex-kleur "#rrggbb"). Matcht hoofdletter-ongevoelig op de itemnaam.
-/// Retourneert het aantal bijgewerkte items.
-pub fn sync_gem_colors(pool: &DbPool, roles: &[(String, String)]) -> usize {
+/// Zet de kleur van elk 'inventory'-item (gem) op de kleur van zijn Discord-rol.
+/// `roles` = (rol-id, rolnaam, hex-kleur "#rrggbb").
+///
+/// Hangt er een rol expliciet aan het item (`items.role_id`, keuzelijst in Manage → Shop),
+/// dan telt **die** — ook als de gem anders heet dan de rol. Staat er geen, dan blijft de
+/// oude afspraak gelden: gelijknamige rol, hoofdletter-ongevoelig. Retourneert het aantal
+/// bijgewerkte items.
+pub fn sync_gem_colors(pool: &DbPool, roles: &[(String, String, String)]) -> usize {
     let conn = pool.get().expect("db");
     let mut n = 0;
-    for (name, hex) in roles {
+    for (rid, name, hex) in roles {
         n += conn
             .execute(
-                "UPDATE items SET color = ?2 WHERE category = 'inventory' AND LOWER(name) = LOWER(?1)",
+                "UPDATE items SET color = ?3 WHERE category = 'inventory' AND role_id = ?1",
+                params![rid, name, hex],
+            )
+            .unwrap_or(0);
+        n += conn
+            .execute(
+                "UPDATE items SET color = ?2 WHERE category = 'inventory' AND role_id = ''
+                   AND LOWER(name) = LOWER(?1)",
                 params![name, hex],
             )
             .unwrap_or(0);
@@ -2201,6 +2508,18 @@ pub fn clear_item_image2(pool: &DbPool, id: i64) {
 /// z'n eigen zone/schap. Herschrijft de posities lineair, dus ook robuust bij
 /// gelijke/oude posities.
 pub fn move_item(pool: &DbPool, id: i64, dir: i64) {
+    move_item_inner(pool, id, dir, false);
+}
+
+/// Zoals `move_item`, maar het item springt over alles heen wat niet in de inventory
+/// terechtkomt (passen, gewone shop-items). Nodig op de Inventory-pagina: die rijen
+/// staan daar niet, en een pijltje dat met een onzichtbare buur wisselt lijkt niets
+/// te doen. In de Shop blijft het gewone `move_item` gelden — daar staan ze wél.
+pub fn move_item_collectible(pool: &DbPool, id: i64, dir: i64) {
+    move_item_inner(pool, id, dir, true);
+}
+
+fn move_item_inner(pool: &DbPool, id: i64, dir: i64, skip_hidden: bool) {
     if dir == 0 {
         return;
     }
@@ -2216,35 +2535,47 @@ pub fn move_item(pool: &DbPool, id: i64, dir: i64) {
     else {
         return;
     };
-    // Geordende siblings in dezelfde zone/schap.
-    let mut ids: Vec<i64> = {
+    // Geordende siblings in dezelfde zone/schap, met hun categorie.
+    let mut ids: Vec<(i64, String)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT id FROM items WHERE zone = ?1 AND IFNULL(shelf_id,-1) = IFNULL(?2,-1)
+                "SELECT id, category FROM items
+                 WHERE zone = ?1 AND IFNULL(shelf_id,-1) = IFNULL(?2,-1)
                  ORDER BY position, id",
             )
             .expect("prepare siblings");
-        stmt.query_map(params![zone, shelf], |r| r.get::<_, i64>(0))
-            .expect("query siblings")
-            .filter_map(Result::ok)
-            .collect()
+        stmt.query_map(params![zone, shelf], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .expect("query siblings")
+        .filter_map(Result::ok)
+        .collect()
     };
-    let Some(i) = ids.iter().position(|x| *x == id) else {
+    let Some(i) = ids.iter().position(|(x, _)| *x == id) else {
         return;
     };
-    let j = if dir < 0 {
-        if i == 0 {
-            return;
+    // Buur zoeken in de gevraagde richting; bij `skip_hidden` de eerste die ook echt
+    // in de inventory staat.
+    let mut j = i;
+    loop {
+        j = if dir < 0 {
+            if j == 0 {
+                return;
+            }
+            j - 1
+        } else {
+            if j + 1 >= ids.len() {
+                return;
+            }
+            j + 1
+        };
+        let cat = ids[j].1.as_str();
+        if !skip_hidden || cat == "inventory" || cat == "booster" {
+            break;
         }
-        i - 1
-    } else {
-        if i + 1 >= ids.len() {
-            return;
-        }
-        i + 1
-    };
+    }
     ids.swap(i, j);
-    for (pos, iid) in ids.iter().enumerate() {
+    for (pos, (iid, _)) in ids.iter().enumerate() {
         conn.execute(
             "UPDATE items SET position = ?2 WHERE id = ?1",
             params![iid, pos as i64],
@@ -2504,19 +2835,6 @@ pub fn chest_weight(pool: &DbPool, uid: &str) -> u32 {
     } else {
         1
     }
-}
-
-/// Alle booster-items (category 'booster', bv. de Lucky Horseshoe), op positie —
-/// ongeacht bezit. Voedt de grey-out-slots op de Boosts-tab.
-pub fn all_booster_items(pool: &DbPool) -> Vec<Item> {
-    let conn = pool.get().expect("db");
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT {ITEM_COLS} FROM items WHERE category = 'booster' ORDER BY position, id"
-        ))
-        .expect("prepare all_booster_items");
-    let rows = stmt.query_map([], row_to_item).expect("query boosters");
-    rows.filter_map(Result::ok).collect()
 }
 
 /// Zet de permanente-toegangsvlag (na gebruik van de permanente pas).
@@ -3163,18 +3481,56 @@ pub fn owned_item_ids(pool: &DbPool, uid: &str) -> Vec<i64> {
     rows.filter_map(Result::ok).collect()
 }
 
-/// Namen van alle gem-/kleuritems (category 'inventory'). Elk komt overeen met een
-/// gelijknamige Discord-kleurrol; gebruikt om bij een gem-Use alle ándere kleurrollen
-/// van het lid weg te halen (max één actieve gem-kleur).
-pub fn inventory_item_names(pool: &DbPool) -> Vec<String> {
+/// Alle gems (category 'inventory') als (naam, role_id). `role_id` is leeg zolang er in
+/// Manage → Shop geen rol gekozen is; dan geldt de gelijknamige rol. Gebruikt om bij een
+/// gem-Use alle ándere kleurrollen van het lid weg te halen (max één actieve gem-kleur).
+pub fn inventory_gem_roles(pool: &DbPool) -> Vec<(String, String)> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
-        .prepare("SELECT name FROM items WHERE category = 'inventory'")
-        .expect("prep inventory_item_names");
+        .prepare("SELECT name, role_id FROM items WHERE category = 'inventory'")
+        .expect("prep inventory_gem_roles");
     let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .expect("query inventory_item_names");
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("query inventory_gem_roles");
     rows.filter_map(Result::ok).collect()
+}
+
+/// Gems zonder gekozen rol koppelen aan de Discord-rol met dezelfde naam. `roles` =
+/// (rol-id, rolnaam).
+///
+/// Dit verandert niets aan wie wat krijgt: het is precies de rol die de naam-terugval
+/// anders bij elke Use zou opzoeken. Het zet ze enkel vást, zodat in Manage → Shop de
+/// echte rol in de keuzelijst staat en een admin kan **controleren** of ze juist is in
+/// plaats van te raden (Faybelle 2026-08-25). Idempotent: raakt enkel gems met een lege
+/// `role_id`. Retourneert het aantal gekoppelde gems.
+pub fn autolink_gem_roles(pool: &DbPool, roles: &[(String, String)]) -> usize {
+    let conn = pool.get().expect("db");
+    let mut n = 0;
+    for (rid, rname) in roles {
+        n += conn
+            .execute(
+                "UPDATE items SET role_id = ?2
+                  WHERE category = 'inventory' AND role_id = '' AND LOWER(name) = LOWER(?1)",
+                params![rname, rid],
+            )
+            .unwrap_or(0);
+    }
+    n
+}
+
+/// De expliciet gekozen Discord-rol van de gem met deze naam, of leeg als er geen
+/// gekozen is (dan geldt de gelijknamige rol).
+pub fn gem_role_id_for_name(pool: &DbPool, name: &str) -> String {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT role_id FROM items WHERE category = 'inventory' AND LOWER(name) = LOWER(?1)",
+        params![name],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 /// De naam van de momenteel "gebruikte" gem (voor de bijhorende Discord-rol). Leeg = geen.
