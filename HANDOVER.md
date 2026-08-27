@@ -1,4 +1,51 @@
-# Handover — Meadow Market (2026-08-25)
+# Handover — Meadow Market (2026-08-27)
+
+## 🐛 2026-08-27 — "Use doet niets": 2FA-plicht op de server + twee echte fouten (LIVE)
+
+Faybelle kocht Charoite (nieuw schap **Air Gems**) en zag bij Use niets gebeuren: geen
+kleur, geen Discord-rol, en Unequip verscheen nooit. Drie oorzaken die elkaar maskeerden.
+
+**1. De echte blokkade: 2FA-plicht op de guild.** Faybelle had 2FA aangezet; daardoor stond
+Magic Meadow op `mfa_level 1` ("2FA verplicht voor moderatie-acties"). Bij zo'n server
+weigert Discord **elke** rolwijziging door een bot als de **eigenaar van de bot-app** geen
+2FA aan heeft — ongeacht Manage Roles, ongeacht rolhoogte. Lezen bleef gewoon werken, dus
+de rollen-keuzelijst en de kleur-sync deden niets vermoeden. De app Fortuna is persoonlijk
+eigendom van het account **Waldstein** (geen team), dus zijn 2FA is de bepalende.
+De 403 kwam terug als `50001 Missing Access`, **niet** als het verwachte `60003`; laat je
+daar niet door misleiden. Faybelle heeft de plicht weer uitgezet → meteen opgelost
+(geverifieerd: Cinnabar eraf, Topaz erop).
+**Openstaand:** app naar een **Discord-team** op Faybelle's naam (alleen Waldstein kan de
+transfer doen, is onomkeerbaar, token blijft dezelfde). Pas dáárna mag de 2FA-plicht terug
+aan. Magic Meadow is een Community-server, dus die plicht kan later ook via Community
+afgedwongen worden.
+
+**2. Kleurloze gems.** `sync_gem_colors` koppelt op **rolnaam** en draait enkel bij het
+opstarten (+ de admin-knop). De rollen Lepidolite / Lavender Jade / Charoite waren ná de
+laatste herstart gemaakt, dus die drie gems stonden op `color = ''`. Nu staat er naast elke
+kleurrol-keuzelijst een **🎨 Kleur van de rol** (`/admin/item/rolecolor`, submit-knop met
+`formaction` in hetzelfde update-formulier, dus hij leest de *gekozen* rol, ook vóór Save)
+met een kleurbolletje en een waarschuwing zolang er geen kleur is.
+
+**3. Unequip keek naar de verkeerde bron.** `tab_groups` besliste "draagt hij dit?" door
+`items.color` met `coins.name_color` te vergelijken. Een gem zonder kleur matcht dan nooit,
+dus bleef er "Use" staan op een gem die je wél droeg — hij lijkt dood. Kijkt nu naar
+`coins.equipped_gem` (parameter `equipped` i.p.v. `name_color`).
+
+**Geen bug:** dat de dagrotatie 4× een air gem gaf. De pot (19 items, gewicht 10, horseshoe
+2) en `draw_weighted` kloppen; kans op "alle 4 uit die 6" is ~0,5%. Gesimuleerd.
+
+### Valkuilen bij het debuggen van dit soort dingen
+- De prod-VPS heeft **geen `sqlite3`-binary**: lees `coins.db` read-only via
+  `ssh hytale python3 -c '...sqlite3.connect("file:/opt/market/coins.db?mode=ro",uri=True)...'`.
+- De Discord-API achter Cloudflare weigert requests **zonder User-Agent** met
+  `403 error code 1010`. Zet bij handmatige calls altijd
+  `User-Agent: DiscordBot (https://magicmeadow.org, 1.0)` — anders jaag je op een spook.
+- De guild-ID in `secrets.json` op prod is **verouderd**; `market.service` overschrijft hem
+  met `DISCORD_GUILD_ID=1296469405651435592`. Gebruik de env-waarde.
+- De bot heeft géén View Audit Log, dus achteraf niet te zien wie welke rol zette.
+- De tests compileerden sinds `0e79b19` niet meer (`admin_item` kreeg een rollen-parameter);
+  in deze commit rechtgezet. `cargo test --release` = 85 groen.
+
 
 ## 🧱 2026-08-25 — Manage → Inventory (LIVE)
 
