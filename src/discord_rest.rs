@@ -537,7 +537,11 @@ fn iso8601_to_secs(s: &str) -> Option<f64> {
 fn explain(code: u16, body: &str) -> String {
     match code {
         401 => "Bot token invalid (401).".to_string(),
-        403 => "No permission (403): the bot lacks 'Manage Roles' or its role is not above the target role."
+        // Drie oorzaken geven exact dezelfde 403, en de eerste kostte ons een halve dag
+        // zoeken (Faybelle 2026-08-27): stond de server op "2FA verplicht voor moderatie",
+        // dan weigert Discord élke rolwijziging door de bot, hoeveel rechten hij ook heeft.
+        403 => "No permission (403): the server may require 2FA for moderation actions, \
+                or the bot lacks 'Manage Roles', or its role sits below the target role."
             .to_string(),
         404 => "Not found (404): guild, user or role does not exist.".to_string(),
         429 => "Rate limited (429): please wait.".to_string(),

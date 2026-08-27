@@ -2477,6 +2477,20 @@ pub fn sync_gem_colors(pool: &DbPool, roles: &[(String, String, String)]) -> usi
     n
 }
 
+/// De kleurrol van één gem vastzetten **en** meteen de kleur van díe rol overnemen.
+/// Hoort bij het 🎨-knopje naast de keuzelijst in Manage → Shop: wie daar bewust een rol
+/// kiest, verwacht dat de gem ook die kleur krijgt — de losse kleur-sync koppelt op
+/// rolnaam en loopt enkel bij het opstarten, dus een rol die daarna gemaakt wordt bleef
+/// kleurloos achter (Faybelle 2026-08-27).
+pub fn set_item_role_and_color(pool: &DbPool, id: i64, role_id: &str, color: &str) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE items SET role_id = ?2, color = ?3 WHERE id = ?1",
+        params![id, role_id, color],
+    )
+    .expect("set item role/color");
+}
+
 pub fn set_item_image(pool: &DbPool, id: i64, image: &str) {
     let conn = pool.get().expect("db");
     conn.execute("UPDATE items SET image = ?2 WHERE id = ?1", params![id, image])

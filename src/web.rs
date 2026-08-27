@@ -284,6 +284,7 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/admin/item/delete", post(admin_item_delete))
         .route("/admin/item/stock", post(admin_item_stock))
         .route("/admin/item/rotation", post(admin_item_rotation))
+        .route("/admin/item/rolecolor", post(admin_item_role_color))
         .route("/admin/item/allow/add", post(admin_item_allow_add))
         .route("/admin/item/testpass/activate", post(admin_item_testpass_activate))
         .route("/admin/item/allow/remove", post(admin_item_allow_remove))
@@ -798,6 +799,11 @@ a.link,button.link{{color:{MEADOW};background:none;border:0;padding:0;cursor:poi
 .aitem .fld{{display:flex;flex-direction:column;gap:.12rem;text-align:left;
   font-size:.62rem;color:#9db095;font-weight:700}}
 .aitem .hint{{font-weight:400;color:#6b7d63}}
+/* Kleurrol-regel op de gem-kaart: het bolletje toont de kleur die de gem nu heeft,
+   met ernaast de knop die ze van de gekozen rol overneemt. */
+.aitem .crow{{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap;margin:.15rem 0 .1rem}}
+.aitem .cswatch{{width:.85rem;height:.85rem;border-radius:50%;border:1px solid #2c3d2a;
+  flex:none}}
 /* Voorraad in de shop: klein regeltje onder de prijs. */
 .slot .stock{{font-size:.72rem;color:#9db095;font-weight:600;margin:.1rem 0 .2rem}}
 .slot .stock.none{{color:#c0562f}}
@@ -1364,7 +1370,11 @@ fn tab_groups(
     shelves: &[db::Shelf],
     gems_tab: i64,
     owned: Option<&std::collections::HashSet<i64>>,
-    name_color: &str,
+    // De gem die dit lid nú draagt (`coins.equipped_gem`), leeg = geen. Dát is de bron van
+    // waarheid voor de Unequip-knop — niet de naamkleur. Een gem zonder kleur (de rol had er
+    // geen, of ze is nooit gesynct) matcht anders nooit met de naamkleur, en dan blijft er
+    // eeuwig "Use" staan op een gem die je wél draagt: hij lijkt dood (Faybelle 2026-08-27).
+    equipped: &str,
     extra: &str,
 ) -> String {
     let mut groups: Vec<(String, String)> = Vec::new();
@@ -1380,8 +1390,7 @@ fn tab_groups(
                 if it.category == "booster" {
                     booster_slot(it, own)
                 } else {
-                    let eq =
-                        own && !it.color.is_empty() && it.color.eq_ignore_ascii_case(name_color);
+                    let eq = own && !equipped.is_empty() && it.name.eq_ignore_ascii_case(equipped);
                     gem_slot(it, own, eq)
                 }
             })
@@ -1644,6 +1653,7 @@ fn inventory_home(
     let owned: std::collections::HashSet<i64> =
         db::owned_item_ids(pool, uid).into_iter().collect();
     let name_color = db::get_name_color(pool, uid);
+    let equipped = db::get_equipped_gem(pool, uid);
     let shown_color = if name_color.is_empty() {
         "#e8f0e4".to_string()
     } else {
@@ -1676,7 +1686,7 @@ fn inventory_home(
         &shelves,
         gems_tab,
         Some(&owned),
-        &name_color,
+        &equipped,
         "",
     );
     // Admin-testhulp: verzamel-aankopen terugdraaien (coins terug). (Sync gem colors staat
@@ -1746,7 +1756,7 @@ fn inventory_home(
                 &shelves,
                 gems_tab,
                 Some(&owned),
-                &name_color,
+                &equipped,
                 &perma,
             ),
             None => String::new(),
@@ -1796,7 +1806,7 @@ fn inventory_home(
                 &shelves,
                 gems_tab,
                 Some(&owned),
-                &name_color,
+                &equipped,
                 "",
             ),
         };
@@ -3616,8 +3626,25 @@ fn admin_item(
                  kies er hier een, anders krijgt het lid enkel de kleur op de site.</div>",
                 esc(&it.name)
             )
+        } else if it.color.is_empty() {
+            // Kleurloze gem: Use zet dan niets zichtbaars op de site én de knop blijft
+            // op "Use" staan i.p.v. "Unequip". Zeggen wat eraan te doen is.
+            "<div class=\"hint warn\">⚠️ Deze gem heeft nog geen kleur — klik 🎨 om ze \
+             van de gekozen rol over te nemen.</div>"
+                .to_string()
         } else {
             String::new()
+        };
+        // De huidige kleur staat er als bolletje bij: zo zie je meteen of het 🎨-knopje
+        // gepakt heeft, zonder naar de shop te moeten navigeren.
+        let swatch = if it.color.is_empty() {
+            "<span class=\"hint\">geen kleur</span>".to_string()
+        } else {
+            format!(
+                "<span class=\"cswatch\" style=\"background:{c}\"></span>\
+                 <span class=\"hint\">{c}</span>",
+                c = esc(&it.color)
+            )
         };
         let none_sel = if it.role_id.is_empty() { " selected" } else { "" };
         format!(
@@ -3625,7 +3652,12 @@ fn admin_item(
                <span class=\"hint\">(toegekend bij Use)</span>\
                <select name=\"role_id\">\
                  <option value=\"\"{none_sel}>— geen rol: enkel de kleur op de site —</option>\
-                 {opts}</select></label>{warn}"
+                 {opts}</select></label>\
+             <div class=\"crow\">{swatch}\
+               <button class=\"btn small ghost\" type=\"submit\" \
+                 formaction=\"/admin/item/rolecolor\" \
+                 title=\"Neem de kleur van de gekozen rol over als kleur van deze gem\">\
+                 🎨 Kleur van de rol</button></div>{warn}"
         )
     };
 
@@ -5246,6 +5278,47 @@ async fn admin_item_add(
     Redirect::to("/admin/market").into_response()
 }
 
+/// 🎨 naast de kleurrol-keuzelijst: neem de kleur van de **gekozen** rol over als kleur
+/// van deze gem, en zet die keuze meteen vast. De keuzelijst bepaalt welke Discord-rol een
+/// lid bij Use krijgt; de kleur op de site kwam tot nu enkel uit de kleur-sync, die op
+/// **rolnaam** koppelt en enkel bij het opstarten loopt. Een rol die daarna gemaakt werd
+/// (of een rol met een andere naam dan de gem) liet de gem dus kleurloos achter — en een
+/// kleurloze gem ziet er op de site uit alsof Use niets doet (Faybelle 2026-08-27).
+async fn admin_item_role_color(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ItemUpdate>,
+) -> Response {
+    if require_admin(&st, &headers).is_none() {
+        return Redirect::to("/").into_response();
+    }
+    let Some(item) = db::get_item(&st.pool, f.id) else {
+        return Redirect::to("/admin/market").into_response();
+    };
+    // De rol die dit item écht zet: de gekozen rol, en anders — precies zoals `use_gem`
+    // zelf terugvalt — de rol met dezelfde naam als de gem.
+    let chosen = f.role_id.trim().to_string();
+    let rid = if chosen.is_empty() {
+        st.dc.role_id_by_name(&item.name).await.ok().flatten().unwrap_or_default()
+    } else {
+        chosen.clone()
+    };
+    // `list_roles` slaat rollen zonder eigen kleur (color 0) over: valt er niets over te
+    // nemen, dan blijft de kleur staan zoals ze was i.p.v. leeggemaakt te worden.
+    let color = st
+        .dc
+        .list_roles(&st.cfg.guild_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(id, _, _)| *id == rid)
+        .map(|(_, _, hex)| hex);
+    if let Some(hex) = color {
+        db::set_item_role_and_color(&st.pool, f.id, &chosen, &hex);
+    }
+    Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
+}
+
 async fn admin_item_update(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -6826,7 +6899,7 @@ mod testpas_namenlijst {
         db::set_hytale_name(&pool, "u2", "FayBelle", "FayBelle");
         db::item_allow_add(&pool, 7, "u1", "Waldstein", 100.0);
 
-        let kaart = super::admin_item(&pool, &pas(), &[], None, Some(0.5));
+        let kaart = super::admin_item(&pool, &pas(), &[], &[], None, Some(0.5));
         assert!(kaart.contains("/admin/item/allow/add"), "keuzelijst om een naam toe te voegen");
         assert!(kaart.contains("/admin/item/allow/remove"), "✕ om er een af te halen");
         assert!(kaart.contains("Waldstein"), "wie erop staat, staat op de kaart");
@@ -6838,7 +6911,7 @@ mod testpas_namenlijst {
         // De gewone pas houdt al die vakjes wél.
         let mut gewoon = pas();
         gewoon.test_pass = false;
-        let kaart2 = super::admin_item(&pool, &gewoon, &[], None, Some(0.5));
+        let kaart2 = super::admin_item(&pool, &gewoon, &[], &[], None, Some(0.5));
         assert!(kaart2.contains("name=\"price\" type="));
         assert!(kaart2.contains("name=\"sold_out\""));
         assert!(kaart2.contains("/admin/item/stock"));
