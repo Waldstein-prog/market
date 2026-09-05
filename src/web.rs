@@ -53,6 +53,11 @@ const MC: &str = "<img class=\"mc\" src=\"https://cdn.discordapp.com/emojis/1526
 // Ticket-afbeelding voor de 24h-pas, ingebakken in de binary (geserveerd op /img/ticket.png).
 const TICKET_IMG: &[u8] = include_bytes!("../artwork/24hHytale.png");
 const CHEST_PNG: &[u8] = include_bytes!("../artwork/treasure chest.png"); // chest-embed image via URL (/img/chest.png)
+/// Faybelle's verjaardagsafbeelding (uit haar repo meadowmarket-art); hangt in het
+/// Fortuna's Gift-embed via /img/birthday.png.
+const BIRTHDAY_PNG: &[u8] = include_bytes!("../artwork/Happy Birthday (1).png");
+/// Faybelle's goodie bags (zelfde repo); hangt in het feest-embed in #general.
+const GOODIEBAGS_PNG: &[u8] = include_bytes!("../artwork/Goodie Bags.png");
 /// Ronde Hytale-knop; draagt de aflopende pas-timer op de Coins-tab (/img/hytalepass.png).
 const HYTALE_PASS_PNG: &[u8] = include_bytes!("../artwork/HytalePass_Button.png");
 /// "Spicy Sale"-display-font (1001fonts.com, gratis personal+commercial), ingebakken in de
@@ -323,6 +328,8 @@ pub async fn serve(cfg: Config, pool: DbPool) {
         .route("/uploads/{name}", get(serve_upload))
         .route("/img/ticket.png", get(serve_ticket))
         .route("/img/chest.png", get(serve_chest))
+        .route("/img/birthday.png", get(serve_birthday))
+        .route("/img/goodiebags.png", get(serve_goodiebags))
         .route("/img/hytalepass.png", get(serve_hytale_pass))
         .route("/fonts/spicy-sale.ttf", get(serve_spicy_sale_font))
         .route("/info", get(info_page))
@@ -1179,8 +1186,10 @@ fn level_info(earned: i64) -> (i64, i64, i64) {
     }
 }
 
-/// Adminlijst (Discord-ID's) die de shop mogen beheren.
-const ADMINS: [&str; 2] = ["391337551543271433", "233179495094419456"];
+/// Adminlijst (Discord-ID's) die de shop mogen beheren. Enkel FayBelle: zij is
+/// de eigenaar van het project. Waldstein hielp bij de opstart en is op
+/// 05/09/2026 op haar vraag uit de lijst gehaald.
+const ADMINS: [&str; 1] = ["233179495094419456"];
 
 pub(crate) fn is_admin(uid: &str) -> bool {
     ADMINS.contains(&uid)
@@ -6337,6 +6346,24 @@ async fn serve_chest() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         CHEST_PNG,
+    )
+        .into_response()
+}
+
+/// De verjaardagsafbeelding in het Fortuna's Gift-embed.
+async fn serve_birthday() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        BIRTHDAY_PNG,
+    )
+        .into_response()
+}
+
+/// De goodie bags in het verjaardagsfeest-embed.
+async fn serve_goodiebags() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        GOODIEBAGS_PNG,
     )
         .into_response()
 }

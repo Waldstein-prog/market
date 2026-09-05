@@ -55,6 +55,7 @@ pub const COINS: &str = "Coins per bericht";
 pub const DAILY: &str = "Daily-beloning";
 pub const CHEST: &str = "Treasure chest";
 pub const TWITCH: &str = "Twitch-redeem → Hytale-pas";
+pub const BIRTHDAY: &str = "Verjaardag";
 // (Er waren ook groepen "Shop" en "Hytale-passen — testfase"; die staan leeg sinds de
 // shoprotatie én de testerslijst per item geregeld worden in Manage → Shop i.p.v. met
 // een instelling hier.)
@@ -63,6 +64,50 @@ pub const TWITCH: &str = "Twitch-redeem → Hytale-pas";
 /// die vóór deze refactor als `const` in `bot.rs` stonden — een lege DB gedraagt
 /// zich dus exact zoals de bot van vóór de Settings-tab.
 pub const SPECS: &[Spec] = &[
+    Spec {
+        key: "birthday_gift",
+        label: "Verjaardagscadeau",
+        group: BIRTHDAY,
+        kind: Kind::Int,
+        default: 1000.0,
+        text_default: "",
+        min: 0.0,
+        max: 100000.0,
+        help: "Coins in het verjaardagscadeau. Het lid klikt de knop in #butterbots; de coins tellen mee voor level en all-time, zoals alle coins.",
+    },
+    Spec {
+        key: "party_bag_min",
+        label: "Goodie bag min",
+        group: BIRTHDAY,
+        kind: Kind::Int,
+        default: 200.0,
+        text_default: "",
+        min: 0.0,
+        max: 100000.0,
+        help: "Laagste bedrag in een Party Goodie Bag. Elke klikker loot een bedrag tussen dit en het maximum.",
+    },
+    Spec {
+        key: "party_bag_max",
+        label: "Goodie bag max",
+        group: BIRTHDAY,
+        kind: Kind::Int,
+        default: 500.0,
+        text_default: "",
+        min: 0.0,
+        max: 100000.0,
+        help: "Hoogste bedrag in een Party Goodie Bag. Ligt dit onder het minimum, dan geldt het minimum.",
+    },
+    Spec {
+        key: "party_hours",
+        label: "Feestje duurt (uren)",
+        group: BIRTHDAY,
+        kind: Kind::Int,
+        default: 24.0,
+        text_default: "",
+        min: 1.0,
+        max: 168.0,
+        help: "Hoe lang de goodie-bag-knop klikbaar blijft. Daarna gaat het bericht uit de pins en wordt de knop grijs.",
+    },
     Spec {
         key: "msg_cooldown_sec",
         label: "Cooldown",

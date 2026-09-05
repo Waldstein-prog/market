@@ -209,6 +209,38 @@ pub fn init_pool(path: &str) -> DbPool {
             ts      REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_level_gifts_uid ON level_gifts(uid, claimed);
+        -- Verjaardagen: één rij per lid, gevuld op de dag dat MEE6 hem de
+        -- Birthday-rol gaf. `day` = MM-DD (de verjaardag zelf), `year` = het
+        -- geboortejaar zodra we het kennen (nog niet geoogst — zie handover).
+        -- Zo hoeft niemand zich later nog te registreren.
+        -- Verjaardagsfeestjes: één rij per goodie-bag-post in #general, met het
+        -- einde van de 24 uur. Overleeft een herstart; `party_bags` houdt bij wie
+        -- er al een zakje pakte (één per persoon per feestje).
+        CREATE TABLE IF NOT EXISTS parties (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            host_uid   TEXT NOT NULL,
+            host_name  TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL DEFAULT 0,
+            opened     REAL NOT NULL,
+            expires    REAL NOT NULL,
+            closed     INTEGER NOT NULL DEFAULT 0,
+            test       INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS party_bags (
+            party_id INTEGER NOT NULL,
+            uid      TEXT NOT NULL,
+            amount   INTEGER NOT NULL,
+            ts       REAL NOT NULL,
+            PRIMARY KEY (party_id, uid)
+        );
+        CREATE TABLE IF NOT EXISTS birthdays (
+            uid        TEXT PRIMARY KEY,
+            day        TEXT NOT NULL,
+            year       INTEGER,
+            first_seen REAL NOT NULL,
+            last_seen  REAL NOT NULL
+        );
         -- Namenlijst PER ITEM: enkel de leden die hier voor dat item op staan kunnen het
         -- kopen. Gebruikt door de Test Pass (het vakje 'Naam' op de item-kaart in Manage →
         -- Shop). Geen schakelaar: de lijst ís de regel, dus een testpas zonder rijen kan
@@ -1805,6 +1837,231 @@ pub enum GiftClaim {
     AlreadyClaimed, // al opgehaald
     NotYours,       // iemand anders klikte
     NotFound,       // cadeau bestaat niet (meer)
+}
+
+/// Leg vast dat dit lid vandaag de Birthday-rol kreeg. `day` = "MM-DD".
+/// Bestaat de rij al, dan blijft de eerste vaststelling staan en schuift enkel
+/// `last_seen` op (de verjaardag zelf verandert niet).
+pub fn record_birthday(pool: &DbPool, uid: &str, day: &str, ts: f64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO birthdays (uid, day, year, first_seen, last_seen) VALUES (?1, ?2, NULL, ?3, ?3)
+         ON CONFLICT(uid) DO UPDATE SET last_seen = ?3",
+        rusqlite::params![uid, day, ts],
+    )
+    .expect("insert birthday");
+}
+
+/// Tijdstip van het laatste verjaardagscadeau van dit lid (geclaimd of niet).
+/// De caller vergelijkt zelf de jaren in Brusselse tijd — de grendel tegen MEE6
+/// die de rol op- en afzet, en tegen het vangnet dat dezelfde jarige opnieuw ziet.
+pub fn last_birthday_gift_ts(pool: &DbPool, uid: &str) -> Option<f64> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT MAX(ts) FROM level_gifts WHERE uid = ?1 AND kind = 'birthday'",
+        rusqlite::params![uid],
+        |r| r.get::<_, Option<f64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// (jaar, maand, dag) van een epoch in Brusselse tijd.
+pub fn brussels_ymd(ts: f64) -> (i64, i64, i64) {
+    let utc = ts as i64;
+    let local = utc + brussels_offset(utc);
+    civil_from_days(local.div_euclid(86400))
+}
+
+/// Alle bekende verjaardagen (uid → dag MM-DD, geboortejaar indien gekend).
+/// Nog geen lezer: de tabel vult zich vanaf nu, de kolom in Manage → Accounts
+/// is de volgende stap.
+#[allow(dead_code)]
+pub fn all_birthdays(pool: &DbPool) -> Vec<(String, String, Option<i64>)> {
+    let conn = pool.get().expect("db");
+    let mut st = conn
+        .prepare("SELECT uid, day, year FROM birthdays ORDER BY day")
+        .expect("q birthdays");
+    let rows = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .expect("map birthdays");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// Leg het geboortejaar vast (berekend uit de leeftijd in Psyche's bericht).
+/// Blijft daarna staan: volgend jaar hoeft er niets meer uitgelezen te worden.
+pub fn set_birth_year(pool: &DbPool, uid: &str, year: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE birthdays SET year = ?2 WHERE uid = ?1",
+        params![uid, year],
+    )
+    .expect("update birth year");
+}
+
+/// Het geboortejaar van een lid, als we het kennen.
+pub fn birth_year(pool: &DbPool, uid: &str) -> Option<i64> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT year FROM birthdays WHERE uid = ?1",
+        params![uid],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+// --- verjaardagsfeestje (goodie bags) -----------------------------------
+
+/// Open een feestje: één rij per verjaardagspost in #general. `expires` = het
+/// einde van de 24 uur; `test` = 1 voor `!partytestlive` (dan blijft het bij het
+/// kanaal waar getest wordt en gaat er niets naar #coins).
+pub fn create_party(
+    pool: &DbPool,
+    host_uid: &str,
+    host_name: &str,
+    channel_id: u64,
+    opened: f64,
+    expires: f64,
+    test: bool,
+) -> i64 {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "INSERT INTO parties (host_uid, host_name, channel_id, opened, expires, test)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![host_uid, host_name, channel_id as i64, opened, expires, test as i64],
+    )
+    .expect("insert party");
+    conn.last_insert_rowid()
+}
+
+/// Het bericht-id bijhouden zodat de sluiter de knop kan grijzen en ontpinnen.
+pub fn set_party_message(pool: &DbPool, party_id: i64, message_id: u64) {
+    let conn = pool.get().expect("db");
+    conn.execute(
+        "UPDATE parties SET message_id = ?2 WHERE id = ?1",
+        params![party_id, message_id as i64],
+    )
+    .expect("update party msg");
+}
+
+/// Alle nog lopende feestjes: (id, kanaal, bericht, einde, test). Overleeft een
+/// herstart — de sluiter leest dit elke minuut opnieuw.
+pub fn open_parties(pool: &DbPool) -> Vec<(i64, u64, u64, f64, bool)> {
+    let conn = pool.get().expect("db");
+    let mut st = conn
+        .prepare("SELECT id, channel_id, message_id, expires, test FROM parties WHERE closed = 0")
+        .expect("q parties");
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)? as u64,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, f64>(3)?,
+                r.get::<_, i64>(4)? != 0,
+            ))
+        })
+        .expect("map parties");
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// De jarige bij een feestje: (uid, naam). De uid is nodig om te zien of de
+/// klikker de jarige zélf is — die krijgt een eigen regeltje in #coins.
+pub fn party_host(pool: &DbPool, party_id: i64) -> Option<(String, String)> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT host_uid, host_name FROM parties WHERE id = ?1",
+        params![party_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
+/// Feestje afsluiten (knop grijs, bericht ontpind).
+pub fn close_party(pool: &DbPool, party_id: i64) {
+    let conn = pool.get().expect("db");
+    conn.execute("UPDATE parties SET closed = 1 WHERE id = ?1", params![party_id])
+        .expect("close party");
+}
+
+/// Wanneer een cadeau werd aangemaakt (het moment dat het embed verscheen).
+/// Het feestje mag maar binnen 24 u ná dat moment starten.
+pub fn level_gift_ts(pool: &DbPool, gift_id: i64) -> Option<f64> {
+    let conn = pool.get().expect("db");
+    conn.query_row(
+        "SELECT ts FROM level_gifts WHERE id = ?1",
+        params![gift_id],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// Uitkomst van een klik op een goodie bag.
+pub enum BagClaim {
+    Granted(i64),   // bedrag toegekend
+    AlreadyTaken,   // dit lid pakte er al één op dit feestje
+    Closed,         // de 24 uur zijn om (of het feestje bestaat niet meer)
+}
+
+/// Pak een goodie bag: het bedrag wordt hier pas geloot en meteen geboekt, alles
+/// in één transactie. De primaire sleutel (party_id, uid) is de grendel — twee
+/// snelle kliks kunnen nooit twee zakjes opleveren. De coins tellen als échte
+/// verdienste (`total_earned` + `earn_log`), zoals alle coins.
+pub fn claim_party_bag(
+    pool: &DbPool,
+    party_id: i64,
+    uid: &str,
+    username: &str,
+    amount: i64,
+    ts: f64,
+) -> BagClaim {
+    let mut conn = pool.get().expect("db");
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .expect("tx bag");
+    let open: Option<(f64, i64, i64)> = tx
+        .query_row(
+            "SELECT expires, closed, test FROM parties WHERE id = ?1",
+            params![party_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .expect("q party");
+    // Een testfeestje (`!partytestlive`) loot wél een bedrag maar boekt niets:
+    // de knop, de grendel en het regeltje zijn te zien, de saldo's blijven heel.
+    let test = match open {
+        Some((expires, closed, test)) if closed == 0 && ts < expires => test != 0,
+        _ => return BagClaim::Closed,
+    };
+    let n = tx
+        .execute(
+            "INSERT OR IGNORE INTO party_bags (party_id, uid, amount, ts) VALUES (?1, ?2, ?3, ?4)",
+            params![party_id, uid, amount, ts],
+        )
+        .expect("insert bag");
+    if n == 0 {
+        return BagClaim::AlreadyTaken;
+    }
+    if !test {
+        tx.execute(
+            "INSERT INTO coins (user_id, username, coins, max_balance, total_earned)
+             VALUES (?1, ?2, ?3, ?3, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET
+                 coins        = coins + excluded.coins,
+                 username     = excluded.username,
+                 max_balance  = MAX(max_balance, coins + excluded.coins),
+                 total_earned = total_earned + excluded.coins",
+            params![uid, username, amount],
+        )
+        .expect("credit bag");
+        let _ = tx.execute(
+            "INSERT INTO earn_log (user_id, amount, ts) VALUES (?1, ?2, ?3)",
+            params![uid, amount, ts],
+        );
+    }
+    tx.commit().expect("commit bag");
+    BagClaim::Granted(amount)
 }
 
 /// Claim een cadeau: atomisch (claimed 0→1) zodat dubbelklikken nooit dubbel uitbetaalt.

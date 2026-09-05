@@ -61,6 +61,10 @@ const SITE_ACCESS_CUSTOM_ID: &str = "site_access"; // "site"-knop → under-cons
 // hetzelfde (test)kanaal → er verschijnt een chest met een knop. Klikken = meedoen;
 // chest_pop_delay_min later popt hij en wint één random klikker de getrokken prijs.
 // Die vijf staan in Settings; wat hier overblijft is niet-economisch.
+const BIRTHDAY_ROLE_ID: u64 = 1422232059815919697; // Magic Meadow 🎂Birthday!🎂 (MEE6 zet hem op de dag zelf)
+const CHEST_PING_ROLE_ID: u64 = 1544290527283912785; // Magic Meadow 🪙Chest!! — wordt gepingd bij een verjaardagsfeestje
+const PSYCHE_BOT_ID: u64 = 1398743174104613026; // MEE6 ("Psyche") — zijn verjaardagsbericht in #general levert de leeftijd
+const BUTTERBOTS_CHANNEL_ID: u64 = 1526293748906987591; // Magic Meadow 🦋butterbots — hier komt het verjaardagscadeau
 const CHEST_SPAWN_CHANNEL_ID: u64 = 1296469405651435594; // Magic Meadow #general — nu enkel nog de terugval voor `chestrescue` als het logboek het originele kanaal niet kent. Natuurlijke chests volgen de coin-kanalen (zie maybe_spawn_chest).
 const CHEST_TICK_SECS: u64 = 2; // interval waarmee de M:SS-timer in de embed wordt bijgewerkt (vloeiender)
 const CHEST_SPAWN_ON_START: bool = false; // (was test) — nu vervangen door het !chest dev-commando
@@ -408,6 +412,31 @@ async fn event_handler(
                 }
             }
         }
+        serenity::FullEvent::GuildMemberUpdate {
+            old_if_available,
+            event,
+            ..
+        } => {
+            // Kreeg dit lid net de Birthday-rol? Dan post Fortuna het cadeau.
+            // Stond de oude rollenlijst niet in de cache, dan vangt de
+            // jaar-grendel in post_birthday_gift een dubbel cadeau op.
+            if event.guild_id.get() == PROD_GUILD_ID {
+                let has_now = event.roles.iter().any(|r| r.get() == BIRTHDAY_ROLE_ID);
+                let had_before = old_if_available
+                    .as_ref()
+                    .map(|m| m.roles.iter().any(|r| r.get() == BIRTHDAY_ROLE_ID))
+                    .unwrap_or(false);
+                if has_now && !had_before {
+                    let uid = event.user.id.to_string();
+                    let name = event
+                        .user
+                        .global_name
+                        .clone()
+                        .unwrap_or_else(|| event.user.name.clone());
+                    post_birthday_gift(&ctx.http, &data.pool, &uid, &name).await;
+                }
+            }
+        }
         serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } => {
             // Lid verliet de prod-server → saldo archiveren + resetten (verse start bij terugkeer).
             if guild_id.get() == PROD_GUILD_ID {
@@ -428,6 +457,10 @@ async fn event_handler(
                     handle_chest_click(ctx, mc, data).await?;
                 } else if mc.data.custom_id.starts_with("lg:") {
                     handle_level_claim(ctx, mc, data).await?;
+                } else if mc.data.custom_id.starts_with("bg:") {
+                    handle_birthday_claim(ctx, mc, data).await?;
+                } else if mc.data.custom_id.starts_with("pb:") {
+                    handle_party_claim(ctx, mc, data).await?;
                 } else if mc.data.custom_id.starts_with("wg:") {
                     handle_weekly_claim(ctx, mc, data).await?;
                 } else if mc.data.custom_id == SITE_ACCESS_CUSTOM_ID {
@@ -575,6 +608,528 @@ async fn respond_ephemeral(
     )
     .await?;
     Ok(())
+}
+
+// --- verjaardagscadeau ---------------------------------------------------
+
+/// Het verjaardags-embed. De tekst staat er letterlijk zoals Faybelle ze
+/// schreef; de `#`-regel is Discords grootste tekstformaat.
+fn birthday_embed() -> serenity::CreateEmbed {
+    serenity::CreateEmbed::new()
+        .title("🎁 Fortuna's Gift")
+        .description(
+            "# <:MM_party:1522596802874835014> HAPPY BIRTHDAY!! <:MM_party:1522596802874835014>\n\
+             Fortuna wishes you an amazing birthday.\n**You** are Celebrated!",
+        )
+        .image("https://magicmeadow.org/img/birthday.png")
+        .colour(0xF1_C4_0F)
+}
+
+/// De knop onder het verjaardags-embed. `enabled = false` geeft de dode versie
+/// voor `!birthdaytest`: wel te zien, niets te claimen.
+fn birthday_button_row(custom_id: String, enabled: bool) -> serenity::CreateActionRow {
+    serenity::CreateActionRow::Buttons(vec![serenity::CreateButton::new(custom_id)
+        .emoji('🎁')
+        .label("Open your Gift!")
+        .style(serenity::ButtonStyle::Success)
+        .disabled(!enabled)])
+}
+
+/// (jaar, "MM-DD") van een tijdstip in Brusselse tijd — zodat een verjaardag die
+/// 's ochtends om 9u binnenkomt niet op de vorige dag valt.
+fn birthday_date(ts: f64) -> (i64, String) {
+    let (y, m, d) = db::brussels_ymd(ts);
+    (y, format!("{m:02}-{d:02}"))
+}
+
+/// Het eerste getal in een tekst dat een leeftijd kán zijn (1 t/m 120). Lange
+/// getallenreeksen (user-id's in mentions, jaartallen) vallen er vanzelf uit.
+fn first_age(text: &str) -> Option<i64> {
+    let mut run = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() {
+            run.push(c);
+            continue;
+        }
+        if !run.is_empty() {
+            if let Ok(n) = run.parse::<i64>() {
+                if (1..=120).contains(&n) {
+                    return Some(n);
+                }
+            }
+            run.clear();
+        }
+    }
+    None
+}
+
+/// Zoek in de recente berichten van #general het verjaardagsbericht van Psyche
+/// (MEE6) over dít lid en haal er de leeftijd uit → geboortejaar.
+///
+/// Het bericht wordt herkend aan: van Psyche, het woord "birthday" erin, en de
+/// persoon erin vernoemd (als mention óf met zijn naam). Staat er geen leeftijd
+/// in, dan houdt die persoon ze bewust voor zich en blijft het jaar leeg.
+/// Het gevonden bericht gaat integraal naar de logs — het formaat is nog nooit
+/// in het echt gezien, dus zo kunnen we bij de eerste jarige nakijken of de
+/// leeftijd er correct uit komt.
+async fn harvest_birth_year(
+    http: &Arc<serenity::Http>,
+    uid: &str,
+    name: &str,
+    year: i64,
+) -> Option<i64> {
+    let msgs = serenity::ChannelId::new(PROD_GENERAL_CHANNEL_ID)
+        .messages(http, serenity::GetMessages::new().limit(50))
+        .await
+        .map_err(|e| tracing::warn!("kan #general niet lezen voor de leeftijd: {e}"))
+        .ok()?;
+    let needle = name.to_lowercase();
+    for m in msgs.iter().filter(|m| m.author.id.get() == PSYCHE_BOT_ID) {
+        let mut blob = m.content.clone();
+        for e in &m.embeds {
+            if let Some(t) = &e.title {
+                blob.push(' ');
+                blob.push_str(t);
+            }
+            if let Some(d) = &e.description {
+                blob.push(' ');
+                blob.push_str(d);
+            }
+            for f in &e.fields {
+                blob.push_str(&format!(" {} {}", f.name, f.value));
+            }
+        }
+        let low = blob.to_lowercase();
+        if !low.contains("birthday") {
+            continue;
+        }
+        if !(blob.contains(&format!("<@{uid}>")) || low.contains(&needle)) {
+            continue;
+        }
+        let age = first_age(&blob);
+        tracing::info!("Psyche-verjaardagsbericht voor {name}: {blob:?} → leeftijd {age:?}");
+        return age.map(|a| year - a);
+    }
+    tracing::info!("geen verjaardagsbericht van Psyche gevonden voor {name} — geen leeftijd");
+    None
+}
+
+/// Iemand kreeg de Birthday-rol: leg de verjaardag vast en post het cadeau in
+/// #butterbots (mention op de eerste regel, embed + knop eronder).
+///
+/// Grendel: één cadeau per lid per kalenderjaar (`db::had_birthday_gift`). MEE6
+/// zet de rol op en af en het vangnet leest de rollen opnieuw — zonder grendel
+/// kon dezelfde jarige meermaals een cadeau pakken.
+async fn post_birthday_gift(http: &Arc<serenity::Http>, pool: &DbPool, uid: &str, name: &str) {
+    let now = now_secs();
+    let (year, day) = birthday_date(now);
+    db::record_birthday(pool, uid, &day, now);
+    if db::last_birthday_gift_ts(pool, uid).is_some_and(|t| db::brussels_ymd(t).0 == year) {
+        return;
+    }
+    // Eerst de leeftijd uit Psyche's bericht halen, dan pas posten: zo staat het
+    // geboortejaar al vast tegen dat de jarige zijn cadeau opent en het feestje
+    // begint. Kennen we het jaar al, dan hoeft er niets meer gezocht te worden.
+    if db::birth_year(pool, uid).is_none() {
+        if let Some(by) = harvest_birth_year(http, uid, name, year).await {
+            db::set_birth_year(pool, uid, by);
+        }
+    }
+    let amount = settings::i64_of(pool, "birthday_gift");
+    let gid = db::create_level_gift(pool, uid, amount, 0, "birthday", now);
+    db::log_event(
+        pool,
+        now,
+        &db::LogEntry::new("birthday", "gift")
+            .actor(uid, name)
+            .amount(amount)
+            .detail(format!("birthday {day}")),
+    );
+    let msg = serenity::CreateMessage::new()
+        .content(format!("<@{uid}>"))
+        .embed(birthday_embed())
+        .components(vec![birthday_button_row(format!("bg:{gid}"), true)]);
+    if let Err(e) = serenity::ChannelId::new(BUTTERBOTS_CHANNEL_ID)
+        .send_message(http, msg)
+        .await
+    {
+        tracing::warn!("verjaardagscadeau posten mislukt voor {name}: {e}");
+    }
+}
+
+/// Klik op "Open your Gift!" — keert eenmalig uit aan de jarige zelf, antwoordt
+/// onzichtbaar en meldt het publiek in #coins.
+async fn handle_birthday_claim(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    // custom_id = "bg:<gift-id>" of "bg:<gift-id>:here" (die laatste komt van
+    // !birthdaytestlive: dan landt het publieke regeltje hier i.p.v. in #coins).
+    let rest = mc.data.custom_id.strip_prefix("bg:").unwrap_or_default();
+    let here = rest.ends_with(":here");
+    let gid: i64 = rest
+        .trim_end_matches(":here")
+        .parse()
+        .unwrap_or(-1);
+    let uid = mc.user.id.to_string();
+    let name = mc
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| mc.user.name.clone());
+    match db::claim_level_gift(&data.pool, gid, &uid, &name, now_secs()) {
+        db::GiftClaim::Granted(amount) => {
+            // Het feestje mag enkel starten als het cadeau binnen 24 u na het
+            // verschijnen geclaimd wordt. Te laat = wél de coins, geen feest.
+            let created = db::level_gift_ts(&data.pool, gid).unwrap_or_else(now_secs);
+            let in_time = here || now_secs() - created <= 24.0 * 3600.0;
+            let extra = if in_time {
+                "<:MM_party:1522596802874835014> *You have started a Party for all of the Magic \
+                 Meadow, with a chest full of **Goodie Bags**! Yaay, partyyy!!!* \
+                 <:MM_party:1522596802874835014>"
+            } else {
+                "You can only start a birthday party within 24 hours of your birthday!"
+            };
+            respond_ephemeral(
+                ctx,
+                mc,
+                &format!(
+                    "**Birthday Gift Claimed!** See <#{PROD_COINS_CHANNEL_ID}> channel to see \
+                     what you got!\n{extra}"
+                ),
+            )
+            .await?;
+            let done = serenity::CreateButton::new(mc.data.custom_id.clone())
+                .emoji('🎁')
+                .label("Claimed")
+                .style(serenity::ButtonStyle::Secondary)
+                .disabled(true);
+            let _ = mc
+                .channel_id
+                .edit_message(
+                    &ctx.http,
+                    mc.message.id,
+                    serenity::EditMessage::new()
+                        .components(vec![serenity::CreateActionRow::Buttons(vec![done])]),
+                )
+                .await;
+            let public = if here {
+                mc.channel_id
+            } else {
+                serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+            };
+            let _ = public
+                .say(
+                    &ctx.http,
+                    format!(
+                        "**{}** opened their Birthday Gift and got **{amount}** coins!",
+                        escape_md(&name)
+                    ),
+                )
+                .await;
+            db::log_event(
+                &data.pool,
+                now_secs(),
+                &db::LogEntry::new("birthday", "claim")
+                    .actor(&uid, &name)
+                    .amount(amount)
+                    .detail("claimed birthday gift".to_string()),
+            );
+            // Zoals bij elk cadeau: de coins tellen mee voor total_earned, dus meteen
+            // nakijken of er een level bij komt.
+            let lvl_ch = levelup_target(ctx, data, mc.channel_id).await;
+            maybe_levelup(&ctx.http, &data.pool, &uid, &name, lvl_ch).await;
+            // Deel 2: het feestje openen. Bij een testcadeau blijft alles in dit
+            // kanaal en zonder rol-ping.
+            if in_time {
+                let party_ch = if here {
+                    mc.channel_id
+                } else {
+                    serenity::ChannelId::new(PROD_GENERAL_CHANNEL_ID)
+                };
+                post_party(&ctx.http, &data.pool, &uid, &name, party_ch, here).await;
+            }
+        }
+        db::GiftClaim::AlreadyClaimed => {
+            respond_ephemeral(ctx, mc, "You already claimed this reward. 🎁").await?
+        }
+        db::GiftClaim::NotYours => {
+            respond_ephemeral(ctx, mc, "Uh-oh! This is not your reward!").await?
+        }
+        db::GiftClaim::NotFound => {
+            respond_ephemeral(ctx, mc, "This reward is no longer available.").await?
+        }
+    }
+    Ok(())
+}
+
+/// Vangnet: elk kwartier de leden mét de Birthday-rol nalezen en alsnog posten
+/// voor wie dit jaar nog geen cadeau kreeg. Zonder dit mist een jarige zijn
+/// cadeau als Fortuna net herstartte toen MEE6 de rol gaf.
+async fn birthday_sweeper(http: Arc<serenity::Http>, pool: DbPool) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+        let guild = serenity::GuildId::new(PROD_GUILD_ID);
+        let mut after = serenity::UserId::new(1);
+        loop {
+            match guild.members(&http, Some(1000), Some(after)).await {
+                Ok(batch) if !batch.is_empty() => {
+                    after = batch[batch.len() - 1].user.id;
+                    for m in batch {
+                        if m.roles.iter().any(|r| r.get() == BIRTHDAY_ROLE_ID) {
+                            let uid = m.user.id.to_string();
+                            let name = m
+                                .user
+                                .global_name
+                                .clone()
+                                .unwrap_or_else(|| m.user.name.clone());
+                            post_birthday_gift(&http, &pool, &uid, &name).await;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+}
+
+// --- verjaardagsfeestje: goodie bags -------------------------------------
+
+/// 1st, 2nd, 3rd, 4th … met de uitzonderingen 11th/12th/13th.
+fn ordinal(n: i64) -> String {
+    let suffix = match (n % 100, n % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+#[cfg(test)]
+mod leeftijd_uit_bericht {
+    use super::first_age;
+
+    /// Mentions en jaartallen mogen nooit voor een leeftijd doorgaan.
+    #[test]
+    fn pikt_de_leeftijd_en_niet_de_ruis() {
+        assert_eq!(first_age("<@233179495094419456> turns 34 today!"), Some(34));
+        assert_eq!(first_age("Happy 1st birthday"), Some(1));
+        assert_eq!(first_age("Happy birthday! (2026)"), None);
+        assert_eq!(first_age("Happy birthday <@233179495094419456>!"), None);
+        assert_eq!(first_age("It is 9am, happy 40th birthday"), Some(9)); // bekend risico: eerste getal wint
+    }
+}
+
+#[cfg(test)]
+mod verjaardag_ordinaal {
+    use super::ordinal;
+
+    /// De valkuil zit in de tienertallen: 11/12/13 krijgen "th", niet st/nd/rd.
+    #[test]
+    fn suffix_klopt_ook_voor_de_tieners() {
+        for (n, want) in [
+            (1, "1st"),
+            (2, "2nd"),
+            (3, "3rd"),
+            (4, "4th"),
+            (11, "11th"),
+            (12, "12th"),
+            (13, "13th"),
+            (21, "21st"),
+            (22, "22nd"),
+            (33, "33rd"),
+            (100, "100th"),
+            (111, "111th"),
+        ] {
+            assert_eq!(ordinal(n), want, "leeftijd {n}");
+        }
+    }
+}
+
+/// Het feest-embed. Kennen we het geboortejaar niet, dan valt het getal weg en
+/// blijft dezelfde zin staan. Custom server-emoji renderen niet in een titel,
+/// vandaar de gewone 🎉 daar.
+fn party_embed(host_name: &str, age: Option<i64>) -> serenity::CreateEmbed {
+    let host = escape_md(host_name);
+    let line = match age {
+        Some(a) => format!(
+            "{host} is celebrating their {} Birthday today!",
+            ordinal(a)
+        ),
+        None => format!("{host} is celebrating their Birthday today!"),
+    };
+    serenity::CreateEmbed::new()
+        .title(format!("🎉 {host_name}'s Birthday Party!!"))
+        .description(format!(
+            "# {line}\nHere are some Party Goodie Bags they're treating you all with!!"
+        ))
+        .image("https://magicmeadow.org/img/goodiebags.png")
+        .colour(0xF1_C4_0F)
+}
+
+/// De goodie-bag-knop. `enabled = false` = de grijze "Claimed"-versie.
+fn party_button_row(custom_id: String, enabled: bool) -> serenity::CreateActionRow {
+    let label = if enabled { "Grab a Goodie Bag!" } else { "Claimed" };
+    let style = if enabled {
+        serenity::ButtonStyle::Success
+    } else {
+        serenity::ButtonStyle::Secondary
+    };
+    serenity::CreateActionRow::Buttons(vec![serenity::CreateButton::new(custom_id)
+        .emoji('🎁')
+        .label(label)
+        .style(style)
+        .disabled(!enabled)])
+}
+
+/// Post het feestje: rol-ping + embed + knop, en pin het bericht. `test` = een
+/// proefdraai (`!partytestlive`): dan géén rol-ping, een korte looptijd, en het
+/// publieke regeltje blijft in hetzelfde kanaal.
+async fn post_party(
+    http: &Arc<serenity::Http>,
+    pool: &DbPool,
+    host_uid: &str,
+    host_name: &str,
+    channel: serenity::ChannelId,
+    test: bool,
+) {
+    let now = now_secs();
+    let secs = if test {
+        600.0
+    } else {
+        settings::i64_of(pool, "party_hours") as f64 * 3600.0
+    };
+    let pid = db::create_party(pool, host_uid, host_name, channel.get(), now, now + secs, test);
+    // Leeftijd = dit jaar min het geboortejaar, als we dat kennen.
+    let age = db::birth_year(pool, host_uid).map(|y| db::brussels_ymd(now).0 - y);
+    let cid = if test {
+        format!("pb:{pid}:here")
+    } else {
+        format!("pb:{pid}")
+    };
+    let mut msg = serenity::CreateMessage::new()
+        .embed(party_embed(host_name, age))
+        .components(vec![party_button_row(cid, true)]);
+    if !test {
+        msg = msg.content(format!("<@&{CHEST_PING_ROLE_ID}>"));
+    }
+    match channel.send_message(http, msg).await {
+        Ok(m) => {
+            db::set_party_message(pool, pid, m.id.get());
+            if let Err(e) = m.pin(http).await {
+                tracing::warn!("feestbericht kon niet gepind worden: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("feestbericht posten mislukt voor {host_name}: {e}"),
+    }
+}
+
+/// Klik op de goodie bag: loot een bedrag, boekt het eenmalig per persoon, en
+/// meldt het publiek in #coins.
+async fn handle_party_claim(
+    ctx: &serenity::Context,
+    mc: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    let rest = mc.data.custom_id.strip_prefix("pb:").unwrap_or_default();
+    let here = rest.ends_with(":here");
+    let pid: i64 = rest.trim_end_matches(":here").parse().unwrap_or(-1);
+    let uid = mc.user.id.to_string();
+    let name = mc
+        .user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| mc.user.name.clone());
+    let lo = settings::i64_of(&data.pool, "party_bag_min");
+    let hi = settings::i64_of(&data.pool, "party_bag_max").max(lo);
+    let amount = rand::thread_rng().gen_range(lo..=hi);
+    match db::claim_party_bag(&data.pool, pid, &uid, &name, amount, now_secs()) {
+        db::BagClaim::Granted(amount) => {
+            respond_ephemeral(
+                ctx,
+                mc,
+                &format!(
+                    "Yaay, you opened your Party Goodie Bag!! Go see what was in it in \
+                     <#{PROD_COINS_CHANNEL_ID}>!"
+                ),
+            )
+            .await?;
+            let (host_uid, host) = db::party_host(&data.pool, pid).unwrap_or_default();
+            let public = if here {
+                mc.channel_id
+            } else {
+                serenity::ChannelId::new(PROD_COINS_CHANNEL_ID)
+            };
+            // De jarige die uit zijn eigen kist pakt, krijgt een eigen regel —
+            // anders stond zijn naam er twee keer in dezelfde zin.
+            let line = if host_uid == uid {
+                format!(
+                    "**{}** treated themselves to one of their own Party Goodie Bags and got \
+                     **{amount}** coins!",
+                    escape_md(&name)
+                )
+            } else {
+                format!(
+                    "**{}** got **{amount}** coins out of **{}**'s Party Goodie Bag! \
+                     Be sure to wish them a Happy Birthday!!",
+                    escape_md(&name),
+                    escape_md(&host)
+                )
+            };
+            let _ = public.say(&ctx.http, line).await;
+            db::log_event(
+                &data.pool,
+                now_secs(),
+                &db::LogEntry::new("birthday", "goodiebag")
+                    .actor(&uid, &name)
+                    .amount(amount)
+                    .detail(format!("goodie bag from {host}")),
+            );
+            // Bij een testfeestje bewogen er geen coins → ook geen level-check.
+            if !here {
+                let lvl_ch = levelup_target(ctx, data, mc.channel_id).await;
+                maybe_levelup(&ctx.http, &data.pool, &uid, &name, lvl_ch).await;
+            }
+        }
+        db::BagClaim::AlreadyTaken => {
+            respond_ephemeral(ctx, mc, "You already grabbed a Goodie Bag from this chest!").await?
+        }
+        db::BagClaim::Closed => {
+            respond_ephemeral(ctx, mc, "This reward is no longer available.").await?
+        }
+    }
+    Ok(())
+}
+
+/// Sluiter: elke minuut de afgelopen feestjes grijs maken en ontpinnen. Leest de
+/// DB, dus een herstart tijdens een feestje verandert niets.
+async fn party_closer(http: Arc<serenity::Http>, pool: DbPool) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let now = now_secs();
+        for (pid, ch, msg, expires, _test) in db::open_parties(&pool) {
+            if now < expires {
+                continue;
+            }
+            if msg != 0 {
+                let channel = serenity::ChannelId::new(ch);
+                let mid = serenity::MessageId::new(msg);
+                let _ = channel
+                    .edit_message(
+                        &http,
+                        mid,
+                        serenity::EditMessage::new()
+                            .components(vec![party_button_row(format!("pb:{pid}"), false)]),
+                    )
+                    .await;
+                let _ = channel.unpin(&http, mid).await;
+            }
+            db::close_party(&pool, pid);
+        }
+    }
 }
 
 // --- level-up-cadeaus ----------------------------------------------------
@@ -831,6 +1386,107 @@ pub async fn chest(ctx: Context<'_>) -> Result<(), Error> {
 pub async fn chestodds(ctx: Context<'_>) -> Result<(), Error> {
     ctx.send(poise::CreateReply::default().embed(chest_odds_embed(&ctx.data().pool)))
         .await?;
+    Ok(())
+}
+
+/// `!test` — Fortuna post zelf "Testing started" in dit kanaal. Bedoeld als
+/// bewijs dat de bot in een (privé-)testkanaal kan schrijven. Admin-only, dus
+/// bruikbaar op de prod-guild. Het commando-bericht wordt opgeruimd door de
+/// `pre_command`-hook.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn test(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.say("Testing started").await?;
+    Ok(())
+}
+
+/// `!birthdaytest` — toon het verjaardags-embed in dit kanaal, met een dode
+/// knop: enkel om te zien hoe het eruitziet. Er wordt geen cadeau aangemaakt en
+/// er bewegen geen coins. Admin-only, dus bruikbaar op de prod-guild.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn birthdaytest(ctx: Context<'_>) -> Result<(), Error> {
+    let uid = ctx.author().id.to_string();
+    ctx.channel_id()
+        .send_message(
+            ctx.serenity_context().http.clone(),
+            serenity::CreateMessage::new()
+                .content(format!("<@{uid}>"))
+                .embed(birthday_embed())
+                .components(vec![birthday_button_row("bg:preview".to_string(), false)]),
+        )
+        .await?;
+    Ok(())
+}
+
+/// `!birthdaytestlive` — hetzelfde bericht, maar met een **werkende** knop van
+/// 0 coins in dit kanaal. Zo zie je het volledige pad (klik → onzichtbaar
+/// antwoord → knop wordt grijs → publiek regeltje) zonder dat er coins bewegen
+/// en zonder iets in #coins te zetten. Soort `birthdaytest`, dus het telt niet
+/// mee voor de jaargrendel van een echt verjaardagscadeau. Admin-only.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn birthdaytestlive(ctx: Context<'_>) -> Result<(), Error> {
+    let uid = ctx.author().id.to_string();
+    let name = ctx
+        .author()
+        .global_name
+        .clone()
+        .unwrap_or_else(|| ctx.author().name.clone());
+    let gid = db::create_level_gift(&ctx.data().pool, &uid, 0, 0, "birthdaytest", now_secs());
+    tracing::info!("birthdaytestlive: cadeau {gid} van 0 coins voor {name}");
+    ctx.channel_id()
+        .send_message(
+            ctx.serenity_context().http.clone(),
+            serenity::CreateMessage::new()
+                .content(format!("<@{uid}>"))
+                .embed(birthday_embed())
+                .components(vec![birthday_button_row(format!("bg:{gid}:here"), true)]),
+        )
+        .await?;
+    Ok(())
+}
+
+/// `!partytest [leeftijd]` — toon het feest-embed in dit kanaal met een dode
+/// knop en zonder rol-ping. Zonder getal krijg je de zin zonder leeftijd (wat
+/// vandaag iedereen krijgt); met `!partytest 34` zie je hoe "34th" oogt.
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn partytest(ctx: Context<'_>, age: Option<i64>) -> Result<(), Error> {
+    let name = ctx
+        .author()
+        .global_name
+        .clone()
+        .unwrap_or_else(|| ctx.author().name.clone());
+    ctx.channel_id()
+        .send_message(
+            ctx.serenity_context().http.clone(),
+            serenity::CreateMessage::new()
+                .embed(party_embed(&name, age))
+                .components(vec![party_button_row("pb:preview".to_string(), false)]),
+        )
+        .await?;
+    Ok(())
+}
+
+/// `!partytestlive` — een echt feestje in dit kanaal: werkende knop, echte
+/// goodie bags, maar zonder rol-ping en met het publieke regeltje hier i.p.v.
+/// in #coins. Loopt 10 minuten i.p.v. 24 uur, zodat je het grijs worden en het
+/// ontpinnen meteen ziet. Er wordt wel een bedrag geloot en getoond, maar er
+/// worden géén coins uitbetaald (zie `db::claim_party_bag`, vlag `test`).
+#[poise::command(prefix_command, check = "admin_only")]
+pub async fn partytestlive(ctx: Context<'_>) -> Result<(), Error> {
+    let uid = ctx.author().id.to_string();
+    let name = ctx
+        .author()
+        .global_name
+        .clone()
+        .unwrap_or_else(|| ctx.author().name.clone());
+    post_party(
+        &ctx.serenity_context().http,
+        &ctx.data().pool,
+        &uid,
+        &name,
+        ctx.channel_id(),
+        true,
+    )
+    .await;
     Ok(())
 }
 
@@ -1908,6 +2564,11 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
                 chest(),
                 chestodds(),
                 chestrescue(),
+                test(),
+                birthdaytest(),
+                birthdaytestlive(),
+                partytest(),
+                partytestlive(),
                 threadfix_preview(),
                 threadfix_commit(),
                 threadfix_reset(),
@@ -1938,6 +2599,10 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
             let hourly_http = ctx.http.clone();
             let weekly_pool = pool.clone();
             let weekly_http = ctx.http.clone();
+            let bday_pool = pool.clone();
+            let bday_http = ctx.http.clone();
+            let party_pool = pool.clone();
+            let party_http = ctx.http.clone();
             let resume_http = ctx.http.clone();
             Box::pin(async move {
                 // Uurlijkse shout-out voor wie ≥100 coins verdiende in het afgelopen uur.
@@ -1948,6 +2613,10 @@ pub async fn run(pool: DbPool, cfg: Config) -> Result<(), Error> {
                 if WEEKLY_LEADERBOARD_ENABLED {
                     tokio::spawn(weekly_leaderboard(weekly_http, weekly_pool));
                 }
+                // Vangnet voor verjaardagen: elk kwartier de Birthday-rol nalezen.
+                tokio::spawn(birthday_sweeper(bday_http, bday_pool));
+                // Feestjes sluiten na hun looptijd (knop grijs + uit de pins).
+                tokio::spawn(party_closer(party_http, party_pool));
 
                 // Chest-staat uit de DB herstellen → een herstart verliest niets meer:
                 // (1) de per-kanaal cooldowns, (2) de lopende chests met hun pop-timer.
