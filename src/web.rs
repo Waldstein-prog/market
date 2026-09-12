@@ -1478,27 +1478,10 @@ fn inventory_home(
         "MAX".to_string()
     };
 
-    // Onderaan de Coins-tab: de ronde Hytale-knop met de resterende pas-geldigheid eróver.
-    // Enkel bij een lópende dagpas. Geen pas, verlopen, óf permanente toegang → geen knop:
-    // een afteller zonder einddatum (of zonder pas) zegt niets.
-    // Eigen `data-passexp` i.p.v. de `.grant[data-exp]` van de Boosts-tab: die scripts
-    // scannen het hele document, en alle tabs staan tegelijk in de HTML (enkel verborgen
-    // via CSS), dus anders zouden twee timers op hetzelfde element vechten.
-    // Het logo draagt de toestand, de tijd staat eronder. Bij een pauze (speler niet op de
-    // server) staat er een pauzeteken op het logo en blijft de teller stilstaan — een pas
-    // van N uur is N uur speeltijd.
-    let pass_btn = |paused: bool, below: String| {
-        let pause_mark = if paused {
-            "<span class=\"passpause\" aria-label=\"paused\"><i></i><i></i></span>"
-        } else {
-            ""
-        };
-        format!(
-            "<div class=\"passcol\"><span class=\"passname\">Meadowland Pass</span>\
-             <div class=\"passbtn\">\
-               <img src=\"/img/hytalepass.png\" alt=\"Meadowland Pass\">{pause_mark}</div>{below}</div>"
-        )
-    };
+    // De pas-knop mét de resterende SPEELTIJD eronder tekent `from_ledger` hieronder.
+    // De losse `pass_btn`-variant (enkel een knop met een kale tijd) is weg samen met de
+    // kalender-terugval van 12/09: er is nog maar één bron voor deze tijd, het
+    // speeltijd-tegoed van de tale-kant.
 
     // Vaste weergave van een stilstaande teller. Seconden staan er ALTIJD bij — dit is
     // dezelfde klok als in het panel (`fmtRem`), en die toont ze ook boven het uur. Zonder
@@ -1546,6 +1529,8 @@ fn inventory_home(
       draw();setInterval(tik,1000);setInterval(sync,10000);})();</script>";
 
     let from_ledger = |l: crate::pass_ledger::Ledger| {
+        // `l.online` staat op false zodra de stand bevroren is, dus een stilgevallen
+        // tale-kant toont automatisch een stilstaande klok met pauzeteken.
         let pas_loopt = l.online && l.test_remaining <= 0.0;
         let verborgen = if l.test_remaining > 0.0 { "" } else { " hidden" };
         format!(
@@ -1584,21 +1569,15 @@ fn inventory_home(
         Some(p) if crate::pass_ledger::lookup(&p.hytale_name).is_some() => {
             from_ledger(crate::pass_ledger::lookup(&p.hytale_name).expect("net nog gezien"))
         }
-        // Geen gegevens van de tale-kant (bestand onleesbaar, of die naam staat er niet in):
-        // val terug op de oude weergave i.p.v. een verzonnen tijd te tonen.
-        // Zonder gegevens van de tale-kant weten we niet of hij nu speelt, dus tonen we een
-        // stilstaande tijd mét pauzeteken i.p.v. een klok die zomaar doorloopt. Beter een
-        // paar seconden te oud dan een teller die tijd wegtelt die niemand verbruikt.
-        Some(p) => match p.expires {
-            Some(exp) => pass_btn(
-                true,
-                format!(
-                    "<span class=\"passtime\">{}</span>",
-                    still((exp - now_secs()).max(0.0))
-                ),
-            ),
-            None => String::new(),
-        },
+        // Geen gegevens van de tale-kant: dan tonen we NIETS.
+        //
+        // Hier stond tot 12/09 een terugval op `expires`, de datum die market bij een
+        // aankoop stempelt. Dat leest als tijd maar is kalendertijd: ze loopt door terwijl
+        // je niet speelt, en na een week staat ze op nul terwijl er nog uren tegoed zijn.
+        // Niemand koopt kalendertijd — mensen kopen speeltijd (user, 12/09). Een getal dat
+        // niet klopt is erger dan geen getal, dus is die terugval geschrapt. Een bevroren
+        // stand van de tale-kant tonen we wél: die staat hierboven, met de klok op pauze.
+        Some(_) => String::new(),
         // Geen pas-rij op dit account — val terug op de **Hytale-naam** die dit lid al
         // heeft vastgezet. Twee gevallen waarin dat het enige spoor is:
         //   • een Twitch-redeem landde op `twitch:<id>` en het lid heeft zijn Twitch niet
@@ -5563,10 +5542,10 @@ async fn admin_item_rotation(
     Redirect::to(&format!("/admin/market?saved={}", f.id)).into_response()
 }
 
-/// Compacte resterende-tijd voor de accounts-tabel: "2d 3h", "5h 23m", "42m" of "< 1m".
+/// Compacte resterende SPEELTIJD voor de accounts-tabel: "2d 3h", "5h 23m", "42m" of "< 1m".
 fn fmt_dur(secs: i64) -> String {
     if secs <= 0 {
-        return "verlopen".to_string();
+        return "geen tegoed meer".to_string();
     }
     let (d, h, m) = (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60);
     if d > 0 {
@@ -5598,8 +5577,10 @@ struct Person {
     hytale: String,
     twitch_id: String,
     twitch_login: String,
-    /// Pas-rijen die op deze persoon staan: (bron, resterende dagpas, permanent).
-    passes: Vec<(&'static str, Option<i64>, bool)>,
+    /// Waar deze persoon zijn pas vandaan heeft: (bron, permanent). Hoeveel tijd er nog op
+    /// staat hangt niet aan de bron maar aan de persoon — één speeltijd-klok per
+    /// Hytale-naam, gevoed door al zijn passen — en komt dus uit `pass_ledger`.
+    passes: Vec<(&'static str, bool)>,
     /// Staat hij nu op de Discord-server? (false = vertrokken, of enkel via Twitch gekend)
     in_guild: bool,
 }
@@ -5670,8 +5651,8 @@ fn merge_people(
         if people[i].hytale.is_empty() {
             people[i].hytale = a.hytale_name.clone();
         }
-        if a.day_pass_secs_left.is_some() || a.perma {
-            people[i].passes.push(("Via de shop", a.day_pass_secs_left, a.perma));
+        if a.has_pass_row || a.perma {
+            people[i].passes.push(("Via de shop", a.perma));
         }
     }
     // Namen die enkel in `coins` staan (vastgezet zonder ooit iets te kopen).
@@ -5713,8 +5694,8 @@ fn merge_people(
         if people[i].hytale.is_empty() {
             people[i].hytale = a.hytale_name.clone();
         }
-        if a.day_pass_secs_left.is_some() || a.perma {
-            people[i].passes.push(("Via Twitch", a.day_pass_secs_left, a.perma));
+        if a.has_pass_row || a.perma {
+            people[i].passes.push(("Via Twitch", a.perma));
         }
     }
 
@@ -5744,8 +5725,7 @@ async fn admin_accounts(
     let Some((_uid, name)) = require_admin(&st, &headers) else {
         return Redirect::to("/").into_response();
     };
-    let now = now_secs();
-    let accounts = db::list_accounts(&st.pool, now);
+    let accounts = db::list_accounts(&st.pool);
     let hytale_names = db::hytale_names(&st.pool);
     let twitch_ids = db::twitch_ids(&st.pool);
     let twitch_logins = db::twitch_logins(&st.pool);
@@ -5817,21 +5797,50 @@ async fn admin_accounts(
                 format!("<span class=\"vv\">{}</span>", esc(v))
             }
         };
+        // Eén klok per mens, niet per bron: een Twitch-redeem en een shop-aankoop voeden
+        // hetzelfde speeltijd-tegoed aan de tale-kant. De bronnen staan er dus als bron, en
+        // de tijd staat er één keer — de échte, resterende SPEELTIJD. Kalendertijd
+        // (`expires`) komt hier niet meer aan te pas; die liep door terwijl de speler niet
+        // speelde en loog dus altijd (user, 12/09).
         let mut pass_rows = String::new();
-        for (src, left, perma) in &p.passes {
-            let what = if *perma {
-                "permanente pas".to_string()
-            } else if let Some(secs) = left {
-                format!("{} speeltijd over", fmt_dur(*secs))
-            } else {
-                "geen tegoed meer".to_string()
-            };
-            pass_rows
-                .push_str(&format!("<div class=\"kk\">{src}</div><div class=\"vv\">{what}</div>"));
+        let perma = p.passes.iter().any(|(_, perma)| *perma);
+        for (src, _) in &p.passes {
+            pass_rows.push_str(&format!(
+                "<div class=\"kk\">{src}</div><div class=\"vv\">pas gekocht</div>"
+            ));
         }
-        if pass_rows.is_empty() {
-            pass_rows.push_str(
-                "<div class=\"kk\">Pas</div><div class=\"vv none\">geen pas via market</div>",
+        let tegoed = if p.hytale.is_empty() {
+            None
+        } else {
+            crate::pass_ledger::lookup(&p.hytale)
+        };
+        let tijd = if perma {
+            "<span class=\"vv\">permanente toegang</span>".to_string()
+        } else {
+            match tegoed {
+                // Bevroren stand (tale-kant ligt stil): het pauzeteken zegt dat deze klok
+                // niet meer loopt — hetzelfde teken als in de inventaris en het panel.
+                Some(l) if l.remaining > 0.0 => format!(
+                    "<span class=\"vv\">{}{}{}</span>",
+                    fmt_dur(l.remaining as i64),
+                    if l.test_remaining > 0.0 {
+                        format!(" (waarvan {} testtijd)", fmt_dur(l.test_remaining as i64))
+                    } else {
+                        String::new()
+                    },
+                    if l.stale { " ⏸" } else { "" }
+                ),
+                Some(_) => "<span class=\"vv none\">geen tegoed meer</span>".to_string(),
+                // De tale-kant kent deze naam niet (nog nooit een pas gehad, of het
+                // grootboek is niet leesbaar). Dan liever niets dan een verzonnen getal.
+                None => "<span class=\"vv none\">niet gekend</span>".to_string(),
+            }
+        };
+        pass_rows.push_str(&format!("<div class=\"kk\">Speeltijd over</div>{tijd}"));
+        if p.passes.is_empty() && !perma {
+            pass_rows = format!(
+                "<div class=\"kk\">Pas</div><div class=\"vv none\">geen pas via market</div>\
+                 {pass_rows}"
             );
         }
         // Waarom iemand hier niet volledig staat — zonder dat je het moet raden.
@@ -6494,7 +6503,7 @@ mod accounts_bundelen {
             user_id: uid.into(),
             username: user.into(),
             hytale_name: hytale.into(),
-            day_pass_secs_left: None,
+            has_pass_row: false,
             perma: false,
         }
     }

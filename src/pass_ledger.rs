@@ -98,6 +98,11 @@ pub struct Ledger {
     /// Hoeveel speeltijd er in totaal al van zijn passen af is. Enkel stijgend, en enkel
     /// terwijl hij in-game is — daarmee valt te zien of een gekochte pas al opgebrand is.
     pub used: f64,
+    /// Is deze stand niet meer vers (de tale-kant ligt stil)? Dan staat hier wat er het
+    /// laatst bekend was — een stilstaand getal, niet te verwarren met een lopende klok.
+    /// De weergave zet de klok dan op pauze; er is bewust GEEN terugval op market's eigen
+    /// `expires`, want dat is kalendertijd en niemand koopt kalendertijd (user, 12/09).
+    pub stale: bool,
     /// Is dit **testtijd**? Tijdens de testfase houdt de tale-kant een apart tegoed bij
     /// (`"kind": "test"`), en staat het gewone tegoed stil. Sinds de testpas-regel van
     /// 2026-08-14 (één per persoon tot heractivatie) beslist market daar zelf niets meer
@@ -145,18 +150,22 @@ fn state() -> &'static Mutex<State> {
 /// onleesbaar, of deze naam staat er niet in).
 pub fn lookup(hytale_name: &str) -> Option<Ledger> {
     let st = state().lock().ok()?;
-    if !st.have_data || !st.fresh {
+    if !st.have_data {
         return None;
     }
     let key = hytale_name.to_lowercase();
     let e = st.passes.get(&key)?;
+    // Bevroren stand: het getal klopt nog als LAATST GEKENDE speeltijd, maar we weten niet
+    // meer wie er speelt — dus de klok gaat op pauze i.p.v. verder te lopen.
+    let stale = !st.fresh;
     // De spelerslijst weet het zeker; de stijgende `used`-teller is enkel de terugval als die
     // lijst er niet is. Beide potjes krijgen exact dezelfde behandeling — welk potje loopt,
     // beslist de tale-kant, niet de vraag of je binnen bent.
-    let online = match st.online_read {
-        Some(t) if t.elapsed() < PLAYTIME_STALE => st.online_now.contains(&key),
-        _ => e.last_rise.is_some_and(|t| t.elapsed() < ONLINE_GRACE),
-    };
+    let online = !stale
+        && match st.online_read {
+            Some(t) if t.elapsed() < PLAYTIME_STALE => st.online_now.contains(&key),
+            _ => e.last_rise.is_some_and(|t| t.elapsed() < ONLINE_GRACE),
+        };
     Some(Ledger {
         remaining: e.remaining.max(0.0),
         test_remaining: e.test_remaining.max(0.0),
@@ -164,6 +173,7 @@ pub fn lookup(hytale_name: &str) -> Option<Ledger> {
         online,
         used: e.used,
         test: e.test,
+        stale,
     })
 }
 
@@ -652,15 +662,21 @@ mod tests {
         sample(p.to_str().unwrap()).unwrap();
         assert!(lookup("Waldstein").is_some(), "verse stand telt gewoon mee");
 
-        // Dezelfde inhoud, maar de tale-kant schreef hem een uur geleden.
+        // Dezelfde inhoud, maar de tale-kant schreef hem een uur geleden. Het getal blijft
+        // bruikbaar als LAATST GEKENDE speeltijd — er is geen andere waarheid, en market's
+        // eigen `expires` is kalendertijd en dus geen alternatief. Wat wél wijzigt: de klok
+        // staat stil (`stale`), zodat de weergave hem op pauze zet i.p.v. te laten lopen.
         write(&p, &body(nu - 3600.0));
         sample(p.to_str().unwrap()).unwrap();
-        assert!(lookup("Waldstein").is_none(), "bevroren stand = geen gegevens");
+        let l = lookup("Waldstein").expect("laatst gekende stand blijft zichtbaar");
+        assert!(l.stale, "bevroren stand is als bevroren gemerkt");
+        assert!(!l.online, "en niemand geldt dan als spelend — de klok loopt niet");
+        assert_eq!(l.pass_remaining, 2055.0, "het getal zelf verandert niet");
 
-        // En zodra de bot weer schrijft, telt hij meteen weer mee.
+        // En zodra de bot weer schrijft, loopt hij meteen weer mee.
         write(&p, &body(nu));
         sample(p.to_str().unwrap()).unwrap();
-        assert!(lookup("Waldstein").is_some(), "vers = weer bruikbaar");
+        assert!(!lookup("Waldstein").unwrap().stale, "vers = weer een lopende klok");
 
         let _ = std::fs::remove_file(p);
     }

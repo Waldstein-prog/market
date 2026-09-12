@@ -3685,8 +3685,14 @@ pub struct AccountRow {
     pub user_id: String,
     pub username: String,
     pub hytale_name: String,
-    /// `Some(secs)` = lopende dagpas met resterende seconden; `None` = geen actieve dagpas.
-    pub day_pass_secs_left: Option<i64>,
+    /// Heeft dit account een pas-rij (shop of Twitch)? Enkel het BESTAAN ervan telt hier.
+    ///
+    /// Hier stond tot 12/09 `day_pass_secs_left`: de seconden tot `expires`. Dat is
+    /// kalendertijd — ze loopt door terwijl de speler niet speelt, terwijl een pas net
+    /// speeltijd is. Wat er nog op staat weet enkel de tale-kant (`pass_ledger`), en dát
+    /// is wat het overzicht toont. `expires` blijft enkel wat het is: de stempel waaraan
+    /// de tale-bot ziet dat er een pas gekocht is.
+    pub has_pass_row: bool,
     /// Permanente toegang (`coins.perma_access`).
     pub perma: bool,
 }
@@ -3699,7 +3705,7 @@ pub struct AccountRow {
 /// gaat), en anders uit `coins` — wie zijn naam op de site zette maar nog niets kocht,
 /// heeft er nog geen grant-rij bij. Beide tonen is nodig sinds een admin die naam hier
 /// kan rechtzetten: een leeg vakje naast een vastgezette naam zou misleiden.
-pub fn list_accounts(pool: &DbPool, now: f64) -> Vec<AccountRow> {
+pub fn list_accounts(pool: &DbPool) -> Vec<AccountRow> {
     let conn = pool.get().expect("db");
     let mut stmt = conn
         .prepare(
@@ -3720,17 +3726,15 @@ pub fn list_accounts(pool: &DbPool, now: f64) -> Vec<AccountRow> {
         .query_map([], |r| {
             let expires: Option<f64> = r.get(3)?;
             let perma: i64 = r.get(4)?;
-            // Dagpas = een verval-datum in de toekomst. Perma (expires NULL) of een
-            // verlopen datum telt niet als lopende dagpas.
-            let day_pass_secs_left = match expires {
-                Some(e) if e > now => Some((e - now) as i64),
-                _ => None,
-            };
+            // Een rij met een vervaldatum = hier is ooit een (tijdelijke) pas gekocht. Of er
+            // nog tijd op staat zegt deze kolom niet: dat is speeltijd, en die telt de
+            // tale-kant. Perma staat apart (`expires IS NULL`).
+            let has_pass_row = expires.is_some();
             Ok(AccountRow {
                 user_id: r.get(0)?,
                 username: r.get(1)?,
                 hytale_name: r.get(2)?,
-                day_pass_secs_left,
+                has_pass_row,
                 perma: perma != 0,
             })
         })
@@ -5368,7 +5372,7 @@ mod pass_link_test {
     fn accounts_toont_ook_een_naam_zonder_grant() {
         let (pool, path) = fresh("acclijst");
         set_hytale_name(&pool, "disc1", "Bob", "Bob");
-        assert!(list_accounts(&pool, 1_000_000.0).is_empty(), "zonder aankoop geen rij");
+        assert!(list_accounts(&pool).is_empty(), "zonder aankoop geen rij");
 
         // Eén gekocht item volstaat om in de lijst te komen — een pas is er niet, dus er
         // is ook geen grant-rij die de naam kan aanleveren.
@@ -5380,7 +5384,7 @@ mod pass_link_test {
                 [],
             )
             .unwrap();
-        let rows = list_accounts(&pool, 1_000_000.0);
+        let rows = list_accounts(&pool);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hytale_name, "Bob", "de naam uit coins telt mee");
 
