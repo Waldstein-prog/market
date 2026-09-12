@@ -41,6 +41,17 @@ const DEFAULT_PLAYTIME: &str = "/opt/hytale/playtime.json";
 /// betekent dat er iets stuk is — dan liever terugvallen op de oude gok dan een spelerslijst
 /// van een uur geleden geloven.
 const PLAYTIME_STALE: Duration = Duration::from_secs(180);
+/// Hoe oud de stand van de tale-kant mag zijn voor we hem niet meer vertrouwen. De bot
+/// schrijft `passes.json` elke 15s opnieuw, ook als er niets wijzigt — blijft dat drie
+/// minuten uit, dan telt daar iets niet meer mee.
+///
+/// **Waarom dit moest** (2026-09-12). Die nacht viel het pas-onderhoud van de bot stil
+/// (volle schijf) en bleef `passes.json` negen uur op dezelfde stand staan. De site bleef
+/// die bevroren tijd tonen: wie een pas kocht zag "35 min" en na een tweede aankoop nog
+/// eens "35 min". Een stand die niet meer bijgewerkt wordt is geen stand meer — dan liever
+/// terugvallen op onze eigen aankoopklok (`expires`), hetzelfde getal dat Manage → Accounts
+/// toont. Precies dezelfde afweging als bij `playtime.json` hieronder.
+const PASSES_STALE: Duration = Duration::from_secs(180);
 /// Hoe vaak we het bestand opnieuw inlezen. Klein bestand, maar een paginabezoek mag er
 /// nooit op wachten — dus lezen we op de achtergrond en bedienen we uit het geheugen.
 const SAMPLE_EVERY: Duration = Duration::from_secs(20);
@@ -102,6 +113,10 @@ struct State {
     passes: HashMap<String, Entry>,
     /// Is het bestand ooit met succes gelezen? Zo niet, dan valt de site terug op `expires`.
     have_data: bool,
+    /// Is die lezing ook nog VERS (zie `PASSES_STALE`)? Een bevroren bestand — de tale-kant
+    /// ligt stil — telt als geen gegevens: dan toont de site de aankoopklok i.p.v. een tijd
+    /// van uren geleden.
+    fresh: bool,
     /// Wie er volgens `playtime.json` nu in-game is (namen in kleine letters).
     online_now: HashSet<String>,
     /// Wanneer we die lijst voor het laatst uit een VERS bestand haalden. `None` = geen
@@ -130,7 +145,7 @@ fn state() -> &'static Mutex<State> {
 /// onleesbaar, of deze naam staat er niet in).
 pub fn lookup(hytale_name: &str) -> Option<Ledger> {
     let st = state().lock().ok()?;
-    if !st.have_data {
+    if !st.have_data || !st.fresh {
         return None;
     }
     let key = hytale_name.to_lowercase();
@@ -172,6 +187,17 @@ fn sample_playtime(path: &str) -> Result<usize, String> {
     Ok(st.online_now.len())
 }
 
+/// Hoe lang geleden werd deze stand geschreven? `updated` uit het bestand gaat voor (die
+/// zegt wanneer de tale-kant hem sámenstelde); anders de schrijftijd van het bestand zelf.
+/// `None` = niet te bepalen — dan geven we het voordeel van de twijfel en telt de stand.
+fn file_age(path: &str, updated: Option<f64>) -> Option<Duration> {
+    if let Some(u) = updated {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
+        return Some(Duration::from_secs_f64((now - u).max(0.0)));
+    }
+    std::fs::metadata(path).ok()?.modified().ok()?.elapsed().ok()
+}
+
 /// Lees het bestand één keer in en werk de toestand bij. Geeft het aantal passen terug
 /// plus elke **stijging** van een tegoed sinds de vorige lezing — de toekenningen die het
 /// logboek moet vastleggen. De allereerste lezing (na een herstart van market) levert er
@@ -180,8 +206,12 @@ fn sample(path: &str) -> Result<(usize, Vec<Grant>), String> {
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let passes = v.get("passes").and_then(|p| p.as_object()).ok_or("geen passes-object")?;
+    // Hoe oud is deze stand? De bot stempelt elke ronde een `updated` mee; een oudere bot
+    // doet dat niet, en dan is de schrijftijd van het bestand even goed.
+    let age = file_age(path, v.get("updated").and_then(|u| u.as_f64()));
 
     let mut st = state().lock().map_err(|_| "state vergrendeld")?;
+    st.fresh = age.is_none_or(|a| a <= PASSES_STALE);
     // Zonder vorige lezing is er niets om mee te vergelijken: dan enkel ijken.
     let baseline = !st.have_data;
     let mut grants: Vec<Grant> = Vec::new();
@@ -308,6 +338,10 @@ pub async fn run(pool: DbPool) {
     // De spelerslijst vaker dan het grootboek: dát is wat bepaalt of de klok op de site
     // loopt of stilstaat, en het bestand is klein. Het grootboek zelf verandert toch maar
     // elke 15s (het ritme van de bot).
+    // Zichtbaar maken wanneer de tale-kant stilvalt of terugkomt: één regel per omslag,
+    // geen stroom. Zonder dit merk je pas dat het pas-onderhoud plat ligt als een speler
+    // klaagt over een verkeerde tijd op de site.
+    let mut was_fresh = state().lock().map(|s| s.fresh).unwrap_or(false);
     let mut n: u32 = 0;
     loop {
         tokio::time::sleep(PLAYTIME_EVERY).await;
@@ -319,6 +353,19 @@ pub async fn run(pool: DbPool) {
             n = 0;
             match sample(&path) {
                 Ok((_, grants)) => {
+                    let nu_fresh = state().lock().map(|s| s.fresh).unwrap_or(false);
+                    if nu_fresh != was_fresh {
+                        if nu_fresh {
+                            tracing::info!("Pas-grootboek is weer vers — de site toont opnieuw de speeltijd van de tale-kant");
+                        } else {
+                            tracing::warn!(
+                                "Pas-grootboek staat STIL ({path} wordt niet meer bijgewerkt) — \
+                                 de site valt terug op aftellen op de aankoopdatum. Kijk naar het \
+                                 pas-onderhoud van de tale-bot."
+                            );
+                        }
+                        was_fresh = nu_fresh;
+                    }
                     for g in &grants {
                         tracing::info!(
                             "Speeltijd erbij: {} +{} (nu {} op die pas)",
@@ -584,6 +631,38 @@ mod tests {
         assert!(rows[0].actor_uid.is_empty());
 
         let _ = std::fs::remove_file(dbp);
+    }
+
+    /// Een stand die niet meer bijgewerkt wordt, mag de site niet meer voeden: dan toont
+    /// ze de aankoopklok (zoals Manage → Accounts) i.p.v. een bevroren tijd. Dit is de bug
+    /// van 12/09: de tale-bot lag stil en iedereen zag uren later nog dezelfde minuten.
+    #[test]
+    fn een_bevroren_stand_telt_niet_meer_mee() {
+        let _g = begin();
+        let p = std::env::temp_dir().join(format!("passes-oud-{}.json", std::process::id()));
+        let nu = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+        let body = |updated: f64| {
+            format!(
+                r#"{{"version":3,"updated":{updated},"passes":{{"Waldstein":{{
+                     "test_remaining":0.0,"pass_remaining":2055.0,"used":10.0}}}}}}"#
+            )
+        };
+
+        write(&p, &body(nu));
+        sample(p.to_str().unwrap()).unwrap();
+        assert!(lookup("Waldstein").is_some(), "verse stand telt gewoon mee");
+
+        // Dezelfde inhoud, maar de tale-kant schreef hem een uur geleden.
+        write(&p, &body(nu - 3600.0));
+        sample(p.to_str().unwrap()).unwrap();
+        assert!(lookup("Waldstein").is_none(), "bevroren stand = geen gegevens");
+
+        // En zodra de bot weer schrijft, telt hij meteen weer mee.
+        write(&p, &body(nu));
+        sample(p.to_str().unwrap()).unwrap();
+        assert!(lookup("Waldstein").is_some(), "vers = weer bruikbaar");
+
+        let _ = std::fs::remove_file(p);
     }
 
     /// De leesbare vorm in het logboek.
